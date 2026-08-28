@@ -1,0 +1,101 @@
+[package]
+name = "openbci_gui"
+version = "0.2.0"
+edition = "2021"
+authors = ["OpenBCI Community"]
+description = "OpenBCI GUI - Native macOS application for EEG visualization and recording"
+license = "MIT"
+repository = "https://github.com/OpenBCI/OpenBCI_GUI"
+
+[features]
+default = []
+
+[dependencies]
+# GUI framework - egui + eframe with wgpu/Metal backend for excellent Apple Silicon performance
+# 0.32 uses winit 0.30.12+ which does not panic on macOS 26 NSScreen enumeration.
+# (eframe 0.28 / winit 0.29 / icrate crash at launch on Tahoe.)
+eframe = { version = "0.32", features = ["wgpu"] }
+egui = "0.32"
+egui_plot = "0.33"
+
+# Async runtime (needed for networking streams, LSL, file writing)
+tokio = { version = "1", features = ["full"] }
+
+# Serialization for settings persistence (matches SessionSettings.pde JSON approach)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Cross-platform user config directory (Phase 8 persistence)
+directories = "5"
+
+# Error handling (used in board trait)
+thiserror = "1"
+
+# Logging (replace Java println + CustomOutputStream)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Date/time handling (for file names, session timing)
+chrono = { version = "0.4", features = ["serde"] }
+
+# Random for synthetic board (initially); later remove when BrainFlow synthetic is wired
+rand = "0.8"
+
+# Fast FFT computation for the FFT widget (pure Rust, no external libs needed)
+rustfft = "6"
+
+# ndarray for constructing Array2 when calling BrainFlow DataFilter band power functions
+# (required for accurate feature vectors fed to BrainFlow MLModel)
+ndarray = "0.15"
+
+# Cross-platform audio output for Focus widget real-time audio feedback (sine tone modulation)
+# Lightweight; uses platform backends (CoreAudio on macOS)
+cpal = "0.15"
+
+# Serial port discovery (for Cyton, Ganglion BLED112, etc.)
+serialport = "4"
+
+# Native file dialogs for Playback file picker (and future "Save Image", "Load Session")
+rfd = "0.14"
+
+# Networking output (matches the original GUI's Networking widget)
+# LSL temporarily disabled due to build issues on some macOS setups.
+# Will re-enable with a more robust binding later.
+# lsl = "0.1"
+
+# OSC for Max/MSP, SuperCollider, etc.
+rosc = "0.10"
+
+# --------------------------------------------------------------------
+# BrainFlow Rust binding (official)
+# The binding lives in the BrainFlow clone at ~/github/brainflow
+# (see scripts/build_brainflow_macos.sh; BRAINFLOW_SRC defaults there).
+# We enable "generate_binding" on first build so bindgen creates the FFI.
+# After the first successful build with the feature, the generated files
+# in brainflow/rust_package/brainflow/src/ffi/*.rs can be committed and
+# future builds can drop the feature for faster iteration.
+# --------------------------------------------------------------------
+brainflow = { path = "/Users/monomyth/github/brainflow/rust_package/brainflow" }  # pre-generated FFI matches the arm64 dylibs in the binding's lib/ folder
+
+[build-dependencies]
+
+[[bin]]
+name = "openbci_gui"
+path = "src/main.rs"
+
+[package.metadata.bundle]
+name = "OpenBCI GUI"
+identifier = "com.openbci.gui"
+# Phase 8 foundations alignment: icon under resources/ (same dir as embedded fonts). Place sketch.icns (from Java OpenBCI_GUI/sketch.icns) as resources/icon.icns.
+# `cargo bundle --release` will succeed once a real .icns exists (expected for packaging foundations; no .icns shipped in this phase).
+icon = ["resources/icon.icns"]
+version = "0.2.0"
+resources = ["resources/"]
+copyright = "Copyright © 2026 OpenBCI"
+category = "public.app-category.education"
+short_description = "Visualize and record EEG from OpenBCI devices"
+long_description = """
+The OpenBCI GUI provides a stable and powerful interface for any OpenBCI device
+(Cyton, Ganglion). Features real-time visualization, filtering, networking (LSL/OSC/UDP),
+and data logging in BDF/ODF formats.
+"""

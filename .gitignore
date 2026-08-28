@@ -1,0 +1,31 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# macOS
+.DS_Store
+*.app
+*.dmg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Build artifacts from cargo-bundle
+*.app/
+dist/
+
+# BrainFlow native libs (we will manage these explicitly)
+libBoardController.dylib
+libDataHandler.dylib
+libMLModule.dylib
+libsimpleble-c.dylib
+brainflow/
+
+# User data (should never be committed)
+**/Recordings/
+**/Settings/
+**/Console_Data/
+*.log
