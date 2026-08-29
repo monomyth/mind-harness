@@ -34,6 +34,27 @@ pub fn cyton_impedance_off_cmd(channel: usize) -> Option<String> {
     Some(format!("x{c}061100Xz{c}00Z"))
 }
 
+/// Split concatenated Cyton ADS / lead-off commands so each `config_board` call
+/// gets one terminator. `x1000100Xz101Z` → `x1000100X` then `z101Z`.
+/// Commands with no trailing X/Z (`z`, `/2`) stay a single piece.
+pub fn split_cyton_config_cmds(cmd: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, ch) in cmd.char_indices() {
+        if ch == 'X' || ch == 'Z' {
+            let end = i + ch.len_utf8();
+            if end > start {
+                out.push(&cmd[start..end]);
+            }
+            start = end;
+        }
+    }
+    if start < cmd.len() {
+        out.push(&cmd[start..]);
+    }
+    out
+}
+
 /// Population std (Java `std()` uses `/ n`, not `n-1`).
 pub fn population_std(xs: &[f64]) -> Option<f64> {
     if xs.len() < 2 {
@@ -105,6 +126,30 @@ mod tests {
             cyton_impedance_off_cmd(8).as_deref(),
             Some("xQ061100XzQ00Z")
         );
+    }
+
+    #[test]
+    fn split_cyton_impedance_cmds_on_trailing_xz() {
+        assert_eq!(
+            split_cyton_config_cmds("x1000100Xz101Z"),
+            vec!["x1000100X", "z101Z"]
+        );
+        assert_eq!(
+            split_cyton_config_cmds("x1061100Xz100Z"),
+            vec!["x1061100X", "z100Z"]
+        );
+        assert_eq!(
+            split_cyton_config_cmds(cyton_impedance_on_cmd(0).as_deref().unwrap()),
+            vec!["x1000100X", "z101Z"]
+        );
+        assert_eq!(
+            split_cyton_config_cmds(cyton_impedance_off_cmd(0).as_deref().unwrap()),
+            vec!["x1061100X", "z100Z"]
+        );
+        assert_eq!(split_cyton_config_cmds("x1060110X"), vec!["x1060110X"]);
+        assert_eq!(split_cyton_config_cmds("z101Z"), vec!["z101Z"]);
+        assert_eq!(split_cyton_config_cmds("z"), vec!["z"]);
+        assert_eq!(split_cyton_config_cmds(""), Vec::<&str>::new());
     }
 
     #[test]

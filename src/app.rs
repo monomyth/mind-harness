@@ -2,6 +2,7 @@
 //
 // Now driven by the Widget + WidgetManager system.
 
+use crate::board::ads_settings::{default_bank, AdsChannel};
 use crate::board::brainflow_board::BrainFlowBoard;
 use crate::board::{extract_exg, recent_raw_rows, DataSource};
 use crate::control_panel::{ControlPanel, DataSourceType};
@@ -12,7 +13,6 @@ use crate::networking::{NetworkingManager, Protocol};
 use crate::theme;
 use crate::widget_context::WidgetContext;
 use crate::widget_manager::WidgetManager;
-use crate::board::ads_settings::{default_bank, AdsChannel};
 use crate::widgets::{
     WAccelerometer, WAnalogRead, WBandPower, WDigitalRead, WEmg, WEmgJoystick, WFocus,
     WHardwareSettings, WHeadPlot, WImpedance, WMarker, WNetworking, WPulseSensor, WSpectrogram,
@@ -365,7 +365,8 @@ impl OpenBciGuiApp {
                     }
                 }
                 Protocol::LSL => {
-                    cfg.enabled = persisted.lsl_enabled && crate::networking::NetworkingManager::lsl_available();
+                    cfg.enabled = persisted.lsl_enabled
+                        && crate::networking::NetworkingManager::lsl_available();
                     if !persisted.lsl_target.is_empty() {
                         cfg.target = persisted.lsl_target.clone();
                     }
@@ -805,6 +806,239 @@ impl OpenBciGuiApp {
                 }
             }
         }
+    }
+
+    fn draw_session_rack(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Session")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.small("Layout");
+                    egui::ComboBox::from_id_salt("layout_select")
+                        .selected_text(match self.current_layout {
+                            1 => "1 Full",
+                            2 => "2 Quad",
+                            3 => "3 Split V",
+                            4 => "4 Split H",
+                            5 => "5 Tall L",
+                            6 => "6 Tall R",
+                            _ => "Layout",
+                        })
+                        .show_ui(ui, |ui| {
+                            let opts = [
+                                (1, "1  Full"),
+                                (2, "2  Quad"),
+                                (3, "3  Split vertical"),
+                                (4, "4  Split horizontal"),
+                                (5, "5  Tall left"),
+                                (6, "6  Tall right"),
+                            ];
+                            for (num, label) in opts {
+                                if ui
+                                    .selectable_value(&mut self.current_layout, num, label)
+                                    .changed()
+                                {
+                                    self.set_layout(num);
+                                    self.event_log
+                                        .log_system(&format!("Layout changed to {}", label));
+                                }
+                            }
+                        });
+                    if ui.small_button("Customize").clicked() {
+                        self.show_layout_customizer = true;
+                    }
+                });
+
+                let mut persist_filters = false;
+                ui.horizontal(|ui| {
+                    ui.small("Notch");
+                    let mut mode = self.last_persisted_notch_mode;
+                    let mut notch_changed = false;
+                    egui::ComboBox::from_id_salt("notch_mode")
+                        .selected_text(mode.label())
+                        .show_ui(ui, |ui| {
+                            for m in NotchMode::ALL {
+                                if ui.selectable_value(&mut mode, m, m.label()).changed() {
+                                    notch_changed = true;
+                                }
+                            }
+                        });
+                    if notch_changed {
+                        self.last_persisted_notch_mode = mode;
+                        persist_filters = true;
+                        self.event_log
+                            .log_filter(&format!("Notch set to {}", mode.label()));
+                    }
+                    let mut bp = self.last_persisted_filter_bandpass;
+                    if ui.checkbox(&mut bp, "BP 1–50").changed() {
+                        self.last_persisted_filter_bandpass = bp;
+                        persist_filters = true;
+                    }
+                });
+                if persist_filters {
+                    self.apply_persisted_filters_to_current_board();
+                    self.save_current_persisted_settings();
+                }
+
+                if self
+                    .board
+                    .as_ref()
+                    .is_some_and(|b| b.name().contains("Synthetic"))
+                {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("8 ch").clicked() {
+                            self.switch_synthetic_channels(8);
+                        }
+                        if ui.small_button("16 ch").clicked() {
+                            self.switch_synthetic_channels(16);
+                        }
+                    });
+                }
+
+                ui.horizontal(|ui| {
+                    if !self.data_logger.is_logging() {
+                        egui::ComboBox::from_id_salt("rec_fmt")
+                            .selected_text(format!("{:?}", self.recording_format))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.recording_format,
+                                    crate::data_logger::LogFormat::BDF,
+                                    "BDF",
+                                );
+                                ui.selectable_value(
+                                    &mut self.recording_format,
+                                    crate::data_logger::LogFormat::ODF,
+                                    "ODF",
+                                );
+                            });
+                    }
+                    let record_label = if self.data_logger.is_logging() {
+                        "Stop Rec"
+                    } else {
+                        "Record"
+                    };
+                    let record_color = if self.data_logger.is_logging() {
+                        theme::STOP
+                    } else {
+                        theme::START
+                    };
+                    if ui
+                        .add(egui::Button::new(record_label).fill(record_color).small())
+                        .clicked()
+                    {
+                        if self.data_logger.is_logging() {
+                            if let Some(p) = self.data_logger.current_file() {
+                                self.last_recording_path = Some(p.clone());
+                            }
+                            self.data_logger.stop();
+                            self.connection_status.clear();
+                            self.event_log.log_recording("Recording stopped");
+                        } else {
+                            let chans = self
+                                .board
+                                .as_ref()
+                                .map(|b| b.exg_channels().len())
+                                .unwrap_or(8);
+                            let sr = self.board.as_ref().map(|b| b.sample_rate()).unwrap_or(250);
+                            match self.data_logger.start(self.recording_format, chans, sr) {
+                                Ok(path) => {
+                                    self.last_recording_path = Some(path.clone());
+                                    self.connection_status =
+                                        format!("Recording to {}", path.display());
+                                    self.event_log.log_recording(&format!(
+                                        "Started {:?} → {}",
+                                        self.recording_format,
+                                        path.display()
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.connection_status = format!("Recording failed: {}", e);
+                                    self.event_log
+                                        .log_error(&format!("Recording start failed: {}", e));
+                                }
+                            }
+                        }
+                    }
+                    if !self.data_logger.is_logging() && ui.small_button("Export").clicked() {
+                        let path = self.last_recording_path.clone().or_else(|| {
+                            self.control_panel
+                                .playback_file
+                                .as_ref()
+                                .map(std::path::PathBuf::from)
+                        });
+                        match path {
+                            Some(p) => match crate::board::playback::PlaybackBoard::from_file(&p)
+                            {
+                                Ok(pb) => {
+                                    match crate::export::export_next_to(
+                                        &p,
+                                        pb.export_samples(),
+                                        pb.sample_rate(),
+                                        pb.exg_channels().len(),
+                                        pb.session_markers(),
+                                    ) {
+                                        Ok((csv, jsonl)) => {
+                                            self.event_log.log_recording(&format!(
+                                                "Feature export → {} / {}",
+                                                csv.display(),
+                                                jsonl.display()
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            self.event_log.log_error(&format!("Export failed: {e}"));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    self.event_log
+                                        .log_error(&format!("Export: cannot open recording: {e}"));
+                                }
+                            },
+                            None => {
+                                self.event_log.log_error(
+                                    "Export: record a session or pick a Playback file first",
+                                );
+                            }
+                        }
+                    }
+                });
+
+                if ui.small_button("Console").clicked() {
+                    self.console_show_window = !self.console_show_window;
+                }
+
+                ui.horizontal(|ui| {
+                    let mut udp_on = self
+                        .networking
+                        .configs
+                        .iter()
+                        .find(|c| c.protocol == Protocol::UDP)
+                        .map(|c| c.enabled)
+                        .unwrap_or(false);
+                    if ui.checkbox(&mut udp_on, "UDP").changed() {
+                        if let Some(cfg) = self.networking.config_mut(Protocol::UDP) {
+                            cfg.enabled = udp_on;
+                        }
+                        self.networking.apply_config();
+                    }
+                    let mut osc_on = self
+                        .networking
+                        .configs
+                        .iter()
+                        .find(|c| c.protocol == Protocol::OSC)
+                        .map(|c| c.enabled)
+                        .unwrap_or(false);
+                    if ui.checkbox(&mut osc_on, "OSC").changed() {
+                        if let Some(cfg) = self.networking.config_mut(Protocol::OSC) {
+                            cfg.enabled = osc_on;
+                        }
+                        self.networking.apply_config();
+                    }
+                    if ui.small_button("Stop net").clicked() {
+                        self.networking.stop_all();
+                    }
+                });
+            });
     }
 }
 
@@ -1279,11 +1513,13 @@ impl eframe::App for OpenBciGuiApp {
                         let chs: Vec<usize> = (0..b.exg_channels().len()).collect();
                         match b.start_impedance_test(&chs) {
                             Ok(()) => {
+                                imp.clear_start_error();
                                 self.event_log.log_system("Impedance test started on board");
                             }
                             Err(e) => {
-                                self.event_log
-                                    .log_error(&format!("Impedance start failed: {e}"));
+                                let msg = format!("Impedance start failed: {e}");
+                                imp.set_start_error(&msg);
+                                self.event_log.log_error(&msg);
                             }
                         }
                         imp.clear_pending();
@@ -1294,25 +1530,25 @@ impl eframe::App for OpenBciGuiApp {
                                 self.event_log.log_system("Impedance test stopped");
                             }
                             Err(e) => {
-                                self.event_log
-                                    .log_error(&format!("Impedance stop failed: {e}"));
+                                let msg = format!("Impedance stop failed: {e}");
+                                imp.set_start_error(&msg);
+                                self.event_log.log_error(&msg);
                             }
                         }
                         imp.clear_pending();
                     }
                     if let Some(e) = b.take_impedance_error() {
-                        self.event_log
-                            .log_error(&format!("Impedance scan aborted: {e}"));
+                        let msg = format!("Impedance scan aborted: {e}");
+                        imp.set_start_error(&msg);
+                        self.event_log.log_error(&msg);
                     }
                 }
                 if let Some(hw) = t.as_any_mut().downcast_mut::<WHardwareSettings>() {
                     if let Some((ch, settings)) = hw.take_pending() {
                         match b.commit_ads_channel(ch, settings) {
                             Ok(()) => {
-                                self.persisted_ads_channels = b
-                                    .ads_channels()
-                                    .map(|s| s.to_vec())
-                                    .unwrap_or_default();
+                                self.persisted_ads_channels =
+                                    b.ads_channels().map(|s| s.to_vec()).unwrap_or_default();
                                 persist_ads = true;
                                 self.event_log.log_system(&format!(
                                     "Hardware Settings ch{} → {:?}",
@@ -1354,34 +1590,30 @@ impl eframe::App for OpenBciGuiApp {
             self.save_current_persisted_settings();
         }
 
-        // Top bar — Java OpenBCI chrome (dark blue + light-blue subnav height ~64px)
+        // Thin transport (Ableton / Resolve), not a 64px Java navy header.
         egui::TopBottomPanel::top("top_nav")
-            .exact_height(64.0)
+            .exact_height(28.0)
             .frame(
                 egui::Frame::NONE
-                    .fill(theme::OPENBCI_BLUE)
-                    .inner_margin(8.0),
+                    .fill(theme::TRANSPORT)
+                    .inner_margin(egui::Margin::symmetric(8, 2)),
             )
             .show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.heading(
-                    egui::RichText::new(format!("OpenBCI GUI  v{}", env!("CARGO_PKG_VERSION")))
-                        .color(theme::WHITE),
-                );
-                ui.separator();
-
-                let stream_label = if self.streaming {
-                    "Stop Data Stream"
-                } else {
-                    "Start Data Stream"
-                };
+            ui.horizontal(|ui| {
+                let stream_label = if self.streaming { "Stop" } else { "Start" };
                 let stream_fill = if self.streaming {
-                    theme::TURN_OFF_RED
+                    theme::STOP
                 } else {
-                    theme::TURN_ON_GREEN
+                    theme::START
                 };
                 if ui
-                    .add(egui::Button::new(egui::RichText::new(stream_label).color(theme::OPENBCI_DARKBLUE)).fill(stream_fill))
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(stream_label).color(theme::TEXT).small(),
+                        )
+                        .fill(stream_fill)
+                        .min_size(egui::vec2(52.0, 18.0)),
+                    )
                     .clicked()
                 {
                     if let Some(ref mut b) = self.board {
@@ -1402,10 +1634,10 @@ impl eframe::App for OpenBciGuiApp {
 
                 if ui
                     .add(
-                        egui::Button::new(
-                            egui::RichText::new("End Session").color(theme::WHITE),
-                        )
-                        .fill(theme::SUBNAV_LIGHTBLUE),
+                        egui::Button::new(egui::RichText::new("End").color(theme::TEXT).small())
+                            .fill(theme::PANEL)
+                            .stroke(theme::hairline())
+                            .min_size(egui::vec2(40.0, 18.0)),
                     )
                     .clicked()
                 {
@@ -1414,190 +1646,22 @@ impl eframe::App for OpenBciGuiApp {
 
                 ui.separator();
 
-                ui.label(egui::RichText::new("Layout").color(theme::WHITE));
-                egui::ComboBox::from_id_salt("layout_select")
-                    .selected_text(match self.current_layout {
-                        1 => "1  Full",
-                        2 => "2  Quad",
-                        3 => "3  Split vertical",
-                        4 => "4  Split horizontal",
-                        5 => "5  Tall left",
-                        6 => "6  Tall right",
-                        _ => "Layout",
-                    })
-                    .show_ui(ui, |ui| {
-                        let opts = [
-                            (1, "1  Full"),
-                            (2, "2  Quad"),
-                            (3, "3  Split vertical"),
-                            (4, "4  Split horizontal"),
-                            (5, "5  Tall left (Java default)"),
-                            (6, "6  Tall right"),
-                        ];
-                        for (num, label) in opts {
-                            if ui
-                                .selectable_value(&mut self.current_layout, num, label)
-                                .changed()
-                            {
-                                self.set_layout(num);
-                                self.event_log
-                                    .log_system(&format!("Layout changed to {}", label));
-                            }
-                        }
-                    });
-
-                if ui.small_button("Customize").clicked() {
-                    self.show_layout_customizer = true;
-                }
-
-                ui.separator();
-
-                // Notch: Java GlobalEnvironmentalFilter (50 / 60 / 50+60 / None).
-                // Shown for any live or Playback board that exposes FilterSettings.
-                let mut persist_filters = false;
-                if self.board.is_some() {
-                    ui.label(egui::RichText::new("Notch").color(theme::WHITE));
-                    let mut mode = self.last_persisted_notch_mode;
-                    let mut notch_changed = false;
-                    let notch_combo = egui::ComboBox::from_id_salt("notch_mode")
-                        .selected_text(mode.label())
-                        .show_ui(ui, |ui| {
-                            for m in NotchMode::ALL {
-                                if ui.selectable_value(&mut mode, m, m.label()).changed() {
-                                    notch_changed = true;
-                                }
-                            }
-                        });
-                    notch_combo.response.on_hover_text(
-                        "Java default is 50 + 60 Hz. A sharp FFT peak at 50 Hz with Notch 60 (or 60 Hz with Notch 50) is line noise the current notch does not remove.",
-                    );
-                    if notch_changed {
-                        self.last_persisted_notch_mode = mode;
-                        persist_filters = true;
-                        self.event_log
-                            .log_filter(&format!("Notch set to {}", mode.label()));
-                    }
-
-                    let mut bp = self.last_persisted_filter_bandpass;
-                    if ui.checkbox(&mut bp, "BP Filt 1-50 Hz").changed() {
-                        self.last_persisted_filter_bandpass = bp;
-                        persist_filters = true;
-                        self.event_log.log_filter(&format!(
-                            "Bandpass filter {}",
-                            if bp { "enabled" } else { "disabled" }
-                        ));
-                    }
-                }
-                if persist_filters {
-                    self.apply_persisted_filters_to_current_board();
-                    self.save_current_persisted_settings();
-                }
-
-                ui.separator();
-
-                // Only allow channel count change for Synthetic boards (Phase 7 dyn board)
-                if self
-                    .board
-                    .as_ref()
-                    .is_some_and(|b| b.name().contains("Synthetic"))
-                {
-                    if ui.button("8 ch").clicked() {
-                        self.switch_synthetic_channels(8);
-                    }
-                    if ui.button("16 ch").clicked() {
-                        self.switch_synthetic_channels(16);
-                    }
-                }
-
                 if let Some(ref b) = self.board {
-                    let status = if self.streaming {
-                        "● Streaming"
-                    } else {
-                        "○ Stopped"
-                    };
+                    let run = if self.streaming { "live" } else { "stop" };
                     ui.label(
-                        egui::RichText::new(format!("{}  |  {}", b.name(), status))
-                            .color(theme::WHITE),
+                        egui::RichText::new(format!("{}  {run}", b.name()))
+                            .small()
+                            .color(theme::TEXT),
                     );
-
                     ui.label(
-                        egui::RichText::new(crate::stream_stats::format_hz(
-                            self.current_sample_rate,
+                        egui::RichText::new(format!(
+                            "{}  {}",
+                            crate::stream_stats::format_hz(self.current_sample_rate).trim(),
+                            crate::stream_stats::format_loss(self.packet_loss_percent).trim()
                         ))
-                        .color(theme::WHITE)
-                        .monospace(),
-                    );
-                    ui.colored_label(
-                        crate::stream_stats::loss_color(self.packet_loss_percent),
-                        egui::RichText::new(crate::stream_stats::format_loss(
-                            self.packet_loss_percent,
-                        ))
-                        .monospace(),
-                    );
-
-                    if self.networking.has_active_streams() {
-                        let active: Vec<&str> = self
-                            .networking
-                            .configs
-                            .iter()
-                            .filter(|c| c.enabled)
-                            .map(|c| match c.protocol {
-                                Protocol::UDP => "UDP",
-                                Protocol::OSC => "OSC",
-                                Protocol::LSL => "LSL",
-                            })
-                            .collect();
-                        ui.colored_label(
-                            egui::Color32::from_rgb(100, 180, 255),
-                            format!("📡 {}", active.join("+")),
-                        );
-                    }
-
-                    let mut udp_on = self
-                        .networking
-                        .configs
-                        .iter()
-                        .find(|c| c.protocol == Protocol::UDP)
-                        .map(|c| c.enabled)
-                        .unwrap_or(false);
-                    if ui.checkbox(&mut udp_on, "UDP").changed() {
-                        if let Some(cfg) = self.networking.config_mut(Protocol::UDP) {
-                            cfg.enabled = udp_on;
-                        }
-                        self.networking.apply_config();
-                        self.event_log.log_networking(&format!(
-                            "UDP {}",
-                            if udp_on { "enabled" } else { "disabled" }
-                        ));
-                    }
-                    let mut osc_on = self
-                        .networking
-                        .configs
-                        .iter()
-                        .find(|c| c.protocol == Protocol::OSC)
-                        .map(|c| c.enabled)
-                        .unwrap_or(false);
-                    if ui.checkbox(&mut osc_on, "OSC").changed() {
-                        if let Some(cfg) = self.networking.config_mut(Protocol::OSC) {
-                            cfg.enabled = osc_on;
-                        }
-                        self.networking.apply_config();
-                        self.event_log.log_networking(&format!(
-                            "OSC {}",
-                            if osc_on { "enabled" } else { "disabled" }
-                        ));
-                    }
-
-                    if ui.button("Stop All Net").clicked() {
-                        self.networking.stop_all();
-                        self.event_log
-                            .log_networking("All networking streams stopped");
-                    }
-                }
-
-                if !self.connection_status.is_empty() {
-                    ui.label(
-                        egui::RichText::new(&self.connection_status).color(theme::WHITE),
+                        .small()
+                        .monospace()
+                        .color(crate::stream_stats::loss_color(self.packet_loss_percent)),
                     );
                 }
 
@@ -1607,162 +1671,37 @@ impl eframe::App for OpenBciGuiApp {
                         .recording_duration()
                         .map(|d| format!("{}:{:02}", d.as_secs() / 60, d.as_secs() % 60))
                         .unwrap_or_default();
+                    ui.colored_label(theme::STOP, format!("REC {dur}"));
+                }
 
-                    ui.colored_label(
-                        egui::Color32::from_rgb(220, 50, 50),
-                        format!("● REC {}", dur),
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.small(
+                        egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                            .color(theme::HAIRLINE),
                     );
-                }
-
-                ui.separator();
-
-                // Recording format selector (only when not recording)
-                if !self.data_logger.is_logging() {
-                    egui::ComboBox::from_label("")
-                        .selected_text(format!("{:?}", self.recording_format))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.recording_format,
-                                crate::data_logger::LogFormat::BDF,
-                                "BDF",
-                            );
-                            ui.selectable_value(
-                                &mut self.recording_format,
-                                crate::data_logger::LogFormat::ODF,
-                                "CSV (ODF)",
-                            );
-                        });
-                }
-
-                let record_label = if self.data_logger.is_logging() {
-                    "Stop Recording"
-                } else {
-                    "Record"
-                };
-                let record_color = if self.data_logger.is_logging() {
-                    egui::Color32::from_rgb(180, 50, 50)
-                } else {
-                    egui::Color32::from_rgb(50, 140, 50)
-                };
-
-                if ui
-                    .add(egui::Button::new(record_label).fill(record_color))
-                    .clicked()
-                {
-                    if self.data_logger.is_logging() {
-                        if let Some(p) = self.data_logger.current_file() {
-                            self.last_recording_path = Some(p.clone());
-                        }
-                        self.data_logger.stop();
-                        self.connection_status.clear();
-                        self.event_log.log_recording("Recording stopped");
-                    } else {
-                        let chans = if let Some(ref b) = self.board {
-                            b.exg_channels().len()
-                        } else {
-                            8
-                        };
-                        let sr = if let Some(ref b) = self.board {
-                            b.sample_rate()
-                        } else {
-                            250
-                        };
-
-                        match self.data_logger.start(self.recording_format, chans, sr) {
-                            Ok(path) => {
-                                self.last_recording_path = Some(path.clone());
-                                self.connection_status = format!("Recording to {}", path.display());
-                                self.event_log.log_recording(&format!(
-                                    "Started {} recording → {}",
-                                    match self.recording_format {
-                                        crate::data_logger::LogFormat::BDF => "BDF",
-                                        crate::data_logger::LogFormat::ODF => "ODF/CSV",
-                                    },
-                                    path.display()
-                                ));
-                            }
-                            Err(e) => {
-                                self.connection_status = format!("Recording failed: {}", e);
-                                self.event_log
-                                    .log_error(&format!("Recording start failed: {}", e));
-                            }
-                        }
-                    }
-                }
-                if !self.data_logger.is_logging()
-                    && ui
-                        .button("Export features")
-                        .on_hover_text("Windowed band power + marker + artifact → CSV/JSONL")
-                        .clicked()
-                {
-                    let path = self.last_recording_path.clone().or_else(|| {
-                        self.control_panel
-                            .playback_file
-                            .as_ref()
-                            .map(std::path::PathBuf::from)
-                    });
-                    match path {
-                        Some(p) => match crate::board::playback::PlaybackBoard::from_file(&p) {
-                            Ok(pb) => {
-                                match crate::export::export_next_to(
-                                    &p,
-                                    pb.export_samples(),
-                                    pb.sample_rate(),
-                                    pb.exg_channels().len(),
-                                    pb.session_markers(),
-                                ) {
-                                    Ok((csv, jsonl)) => {
-                                        self.event_log.log_recording(&format!(
-                                            "Feature export → {} / {}",
-                                            csv.display(),
-                                            jsonl.display()
-                                        ));
-                                        self.connection_status =
-                                            format!("Exported {}", csv.display());
-                                    }
-                                    Err(e) => {
-                                        self.event_log.log_error(&format!("Export failed: {e}"));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                self.event_log
-                                    .log_error(&format!("Export: cannot open recording: {e}"));
-                            }
-                        },
-                        None => {
-                            self.event_log.log_error(
-                                "Export features: record a session or pick a Playback file first",
-                            );
-                        }
-                    }
-                }
+                });
             });
         });
 
-        // Phase 7 hybrid layout (plan.md Phase 7 step 5): right SidePanel for interactive tool widgets.
-        // Marker, Networking config, Focus (ML + lock-free audio + threshold + Mark button) are
-        // now *always on screen* during any session (live or Playback). This was the missing piece
-        // that made the Phase 6 Focus widget invisible despite being "populated".
-        // The panel is resizable, scrollable, and professional-looking with colored headers.
-        // Console stays as the prominent global 📜 button + full rich window (best for audit trail).
         if !self.tool_widgets.is_empty() {
             egui::SidePanel::right("tool_panel")
                 .resizable(true)
-                .default_width(320.0)
-                .min_width(260.0)
-                .max_width(480.0)
+                .default_width(280.0)
+                .min_width(220.0)
+                .max_width(420.0)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(theme::PANEL)
+                        .stroke(theme::hairline())
+                        .inner_margin(6.0),
+                )
                 .show(ctx, |ui| {
                     ui.vertical(|ui| {
-                        ui.heading("Tools");
-                        ui.small("Focus • Networking • Marker");
-                        ui.separator();
-
+                        ui.small(egui::RichText::new("PROPERTIES").color(theme::HAIRLINE));
                         egui::ScrollArea::vertical()
                             .auto_shrink([false; 2])
                             .show(ui, |ui| {
-                                // Fresh ctx for tools (dropped before CentralPanel re-creates one for viz).
-                                // Safe because &mut borrows to shared state (net, logger, log, last_marker) are sequential.
+                                self.draw_session_rack(ui);
                                 if let Some(board) = self.board.as_deref() {
                                     let mut widget_ctx = WidgetContext::new(
                                         &mut self.networking,
@@ -1773,41 +1712,25 @@ impl eframe::App for OpenBciGuiApp {
                                     );
 
                                     for tool in &mut self.tool_widgets {
-                                        // Visual card for each tool
-                                        egui::Frame::NONE
-                                            .fill(theme::WHITE)
-                                            .stroke(egui::Stroke::new(
-                                                1.0_f32,
-                                                theme::OBJECT_BORDER_GREY,
-                                            ))
-                                            .inner_margin(6.0)
+                                        let open = matches!(
+                                            tool.title(),
+                                            "Focus" | "Impedance" | "Hardware Settings" | "Marker"
+                                        );
+                                        egui::CollapsingHeader::new(tool.title())
+                                            .default_open(open)
                                             .show(ui, |ui| {
-                                                ui.strong(tool.title());
                                                 tool.show(ui, board, &mut widget_ctx);
                                             });
-                                        ui.add_space(6.0);
                                     }
 
                                     // Phase 7 WPacketLoss visual (sparkline + reset) — lives in SidePanel.
                                     // Uses the app's running heuristic (wall-time vs received count).
                                     // Playback always shows ~0% (perfect replay). Reset clears history + logs.
                                     let loss = self.packet_loss_percent;
-                                    let loss_color = if loss > 5.0 {
-                                        egui::Color32::from_rgb(255, 80, 80)
-                                    } else if loss > 1.0 {
-                                        egui::Color32::from_rgb(255, 200, 80)
-                                    } else {
-                                        egui::Color32::from_rgb(80, 200, 120)
-                                    };
-                                    egui::Frame::NONE
-                                        .fill(theme::WHITE)
-                                        .stroke(egui::Stroke::new(
-                                            1.0_f32,
-                                            theme::OBJECT_BORDER_GREY,
-                                        ))
-                                        .inner_margin(6.0)
+                                    let loss_color = crate::stream_stats::loss_color(loss);
+                                    egui::CollapsingHeader::new("Packet Loss")
+                                        .default_open(false)
                                         .show(ui, |ui| {
-                                            ui.strong("Packet Loss");
                                             ui.horizontal(|ui| {
                                                 ui.colored_label(
                                                     loss_color,
@@ -1870,8 +1793,9 @@ impl eframe::App for OpenBciGuiApp {
                 });
         }
 
-        // Main widget area (the classic visualization grid — TimeSeries, FFT, BandPower, Accel)
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(theme::CANVAS))
+            .show(ctx, |ui| {
             // Phase 7: as_deref() yields Option<&dyn DataSource> — uniform for Playback + live boards
             if let Some(board) = self.board.as_deref() {
                 self.widget_manager.update(board);
@@ -1893,17 +1817,15 @@ impl eframe::App for OpenBciGuiApp {
             }
         });
 
-        // Bottom status / mini-console (Phase 7 — live EventLog preview + full Console window)
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("status_bar")
+            .exact_height(22.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::TRANSPORT)
+                    .inner_margin(egui::Margin::symmetric(8, 1)),
+            )
+            .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                // Prominent "Console" button — the highest-UX win of Phase 7
-                let console_btn =
-                    egui::Button::new("📜 Console").fill(egui::Color32::from_rgb(70, 90, 120));
-                if ui.add(console_btn).clicked() {
-                    self.console_show_window = !self.console_show_window;
-                }
-
-                ui.separator();
 
                 // Phase 7 Playback polish: compact interactive controls for the magical roundtrip.
                 // Lets the user pause, change speed, and scrub the exact recording they just made
@@ -1973,25 +1895,13 @@ impl eframe::App for OpenBciGuiApp {
                     }
                 }
 
-                if self.data_logger.is_logging() {
-                    if let Some(path) = self.data_logger.current_file() {
-                        ui.colored_label(egui::Color32::RED, "● REC");
-                        ui.label(
-                            path.file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_string(),
-                        );
-                    }
-                }
-
                 if self.networking.has_active_streams() {
                     ui.colored_label(egui::Color32::from_rgb(100, 180, 255), "📡 Net");
                 }
 
                 if !self.last_marker.is_empty() {
                     ui.colored_label(
-                        egui::Color32::LIGHT_BLUE,
+                        theme::ACCENT,
                         format!("Last: {}", self.last_marker),
                     );
                 }

@@ -183,7 +183,7 @@ impl Widget for WFFT {
         if let Some((freqs, mags)) = envelopes.as_ref() {
             if let Some(hz) = unmatched_mains_hz(freqs, mags, notch) {
                 ui.colored_label(
-                    theme::OPENBCI_DARKBLUE,
+                    theme::ACCENT,
                     format!(
                         "Sharp {hz:.0} Hz peak — Notch {} does not remove it. Try 50 + 60 Hz.",
                         notch.label()
@@ -243,7 +243,7 @@ impl Widget for WFFT {
                         .width(1.3_f32),
                 );
             }
-            let mains = egui::Color32::from_black_alpha(80);
+            let mains = egui::Color32::from_white_alpha(40);
             if display_max >= 50.0 {
                 plot_ui.vline(
                     VLine::new("50 Hz", 50.0)

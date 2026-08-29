@@ -181,11 +181,11 @@ fn paint_joystick(ui: &egui::Ui, rect: Rect, x: f64, y: f64) {
     painter.circle_stroke(c, r, Stroke::new(1.0_f32, Color32::from_rgb(210, 210, 210)));
     painter.line_segment(
         [pos2(c.x - r, c.y), pos2(c.x + r, c.y)],
-        Stroke::new(1.0_f32, Color32::from_gray(180)),
+        Stroke::new(1.0_f32, theme::HAIRLINE),
     );
     painter.line_segment(
         [pos2(c.x, c.y - r), pos2(c.x, c.y + r)],
-        Stroke::new(1.0_f32, Color32::from_gray(180)),
+        Stroke::new(1.0_f32, theme::HAIRLINE),
     );
     let inset = 15.0 * 2.0;
     let span = (r - inset).max(8.0);
@@ -193,13 +193,13 @@ fn paint_joystick(ui: &egui::Ui, rect: Rect, x: f64, y: f64) {
     // Java maps joystick Y with inverted draw (up is +Y).
     let py = c.y - (y.clamp(-1.0, 1.0) as f32) * span;
     let p = pos2(px, py);
-    painter.circle_stroke(p, 7.5, Stroke::new(2.0_f32, theme::OPENBCI_BLUE));
+    painter.circle_stroke(p, 7.5, Stroke::new(2.0_f32, theme::ACCENT));
     painter.line_segment(
         [pos2(p.x - 10.0, p.y), pos2(p.x + 10.0, p.y)],
-        Stroke::new(2.0_f32, theme::OPENBCI_BLUE),
+        Stroke::new(2.0_f32, theme::ACCENT),
     );
     painter.line_segment(
         [pos2(p.x, p.y - 10.0), pos2(p.x, p.y + 10.0)],
-        Stroke::new(2.0_f32, theme::OPENBCI_BLUE),
+        Stroke::new(2.0_f32, theme::ACCENT),
     );
 }

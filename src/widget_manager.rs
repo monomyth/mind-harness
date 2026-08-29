@@ -226,13 +226,11 @@ impl WidgetManager {
             );
 
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                // Widget frame with header bar (matching original Java GUI style)
                 egui::Frame::NONE
-                    .fill(crate::theme::WIDGET_BG)
-                    .stroke(egui::Stroke::new(1.0_f32, crate::theme::OBJECT_BORDER_GREY))
+                    .fill(crate::theme::CANVAS)
+                    .stroke(crate::theme::hairline())
                     .show(ui, |ui| {
-                        // Header bar (like the original Widget nav bar, navHeight = 22)
-                        let header_height = 22.0;
+                        let header_height = 18.0;
                         let header_rect = ui.available_rect_before_wrap();
                         ui.painter().rect_filled(
                             egui::Rect::from_min_size(
@@ -240,17 +238,16 @@ impl WidgetManager {
                                 egui::vec2(header_rect.width(), header_height),
                             ),
                             0.0,
-                            crate::theme::WIDGET_HEADER,
+                            crate::theme::TRANSPORT,
                         );
 
-                        ui.add_space(3.0);
+                        ui.add_space(2.0);
                         ui.horizontal(|ui| {
                             ui.add_space(6.0);
-                            ui.strong(widget.title());
+                            ui.small(egui::RichText::new(widget.title()).color(crate::theme::TEXT));
                         });
                         ui.add_space(2.0);
 
-                        // Widget content — pass ctx so Marker and Networking can have real side-effects
                         widget.show(ui, source, ctx);
                     });
             });

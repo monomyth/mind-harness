@@ -127,12 +127,7 @@ pub fn paint_emg_cell(
     let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 200);
     let stroke = Stroke::new(
         1.0_f32,
-        Color32::from_rgba_unmultiplied(
-            theme::OPENBCI_DARKBLUE.r(),
-            theme::OPENBCI_DARKBLUE.g(),
-            theme::OPENBCI_DARKBLUE.b(),
-            150,
-        ),
+        Color32::from_rgba_unmultiplied(theme::TEXT.r(), theme::TEXT.g(), theme::TEXT.b(), 150),
     );
 
     let limit = state.settings.uv_limit.uv().max(1.0);
@@ -149,7 +144,7 @@ pub fn paint_emg_cell(
         egui::Align2::LEFT_TOP,
         format!("{}", channel + 1),
         egui::FontId::proportional(12.0),
-        theme::OPENBCI_DARKBLUE,
+        theme::TEXT,
     );
 
     let bar_w = (rect.width() * 0.16).clamp(8.0, 18.0);

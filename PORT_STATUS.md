@@ -1,7 +1,7 @@
 # OpenBCI GUI Rust Port — Feature Parity & Status
 
-**Date**: 2026-08-28 (v0.3.0 — items 3, 5, 10 proven on Synthetic this run; item 1 parked)  
-**Current State**: The May 2026 Phase 8 tree is the base. This pass fixed launch and data-path bugs that would have produced wrong recordings / silent hardware lies, then aligned chrome and default layout with the Java GUI. GROK_PLAN items 3 (markers), 5 (BDF playback), and 10 (feature export) were proven on BrainFlow Synthetic. Item 1 (live ADS1299 kΩ / lead-lift) is **parked**: this machine has no `/dev/cu.usbserial*`.
+**Date**: 2026-08-29 (v1.0.0 — dark studio chrome; GROK_PLAN proofs unchanged)  
+**Current State**: Chrome is Ableton/Blender/Resolve greys (`#1d1d1d` canvas, thin transport, properties rack). GROK_PLAN signal/hardware proofs are unchanged from the prior 0.3.0 rows below. Item 1 (live ADS1299 kΩ) remains **locked**: 2026-08-28 headset-off jumped ch1 15k→50k kΩ and ch2 8k→58k kΩ; UI not simulated.
 
 **Launch notes (macOS 26)**: eframe 0.28 crashed in `NSScreen` enumeration (`q` vs `Q`). The GUI now uses **eframe/egui 0.32 + egui_plot 0.33** (winit 0.30.12+). `build.rs` embeds an rpath to BrainFlow's `lib/` so `target/debug/openbci_gui` loads `libBoardController.dylib`.
 
@@ -19,12 +19,12 @@ This document tracks parity with the canonical Java/Processing implementation (`
 | Accelerometer                  | ✅ Production        | WAccelerometer |
 | Head Plot (topographic)        | ✅ **New**           | WHeadPlot — 2D head + electrodes, power-colored, in Tools panel |
 | Marker (send + BDF + Net)      | ✅ Synthetic proven  | GROK_PLAN item 3 (2026-08-28): 10 s BrainFlow Synthetic @ 250 Hz, marks `alpha_start`/`blink`/`end_task` at samples 500/1250/2000. Each mark within 1 sample in ODF `% MARKER,…`, `.markers.jsonl`, and BDF+ TAL. Playback `session_markers` + Time Series window at EOF draws all three. UDP/OSC still get the mark. Not a live Cyton session. |
-| Networking (UDP/OSC/LSL)       | ⚠️ LSL linked here   | UDP/OSC as before. LSL uses Homebrew `lsl.framework` (`obci_eeg1` / EEG + `obci_markers` / Markers). Unit test creates an outlet and pulls 1 Synthetic-style sample. **LabRecorder on a live session: not run this pass.** If liblsl is missing at build, the checkbox stays disabled. |
+| Networking (UDP/OSC/LSL)       | ✅ LSL live          | GROK_PLAN item 4 (2026-08-29): GUI Apply LSL green. pylsl inlet on Synthetic: `obci_eeg1` type EEG 8 ch 250 Hz, 300 samples in 1.2 s. `obci_markers` advertised (0 samples until a mark). |
 | Focus (ML + proxy + audio)     | ✅ Production        | Phase 6 — real BrainFlow MLModel, lock-free cpal, threshold, Test Tone |
 | **EventLog + Console**         | ✅ **Phase 7**       | Filterable, searchable, live, Save with rfd, 8 categories, mini-preview in status |
 | **Playback roundtrip**         | ✅ **Phase 7** + item 5 | ODF as before. GROK_PLAN item 5 (2026-08-28): record 10 s Synthetic **BDF** → Playback that file: raw EXG matches the session (max abs err < 2 µV) and the three named marks sit in the Time Series window. |
 | Recording (BDF + ODF)          | ✅ Production        | DataLogger + BDF writer with TAL + ODF comments + sidecar |
-| Impedance (Cyton ADS1299)      | ⏸ Parked            | Code path exists (Java `x…Xz…Z`, kΩ = `(√2·std_µV·1e-6)/6nA − 2.2kΩ`). **Cannot finish item 1 on this machine: no `/dev/cu.usbserial*`.** Do not paint live greens. Next human step: plug Cyton, Start Impedance, lift a lead, watch kΩ change. Synthetic/Playback stay labelled simulated. |
+| Impedance (Cyton ADS1299)      | ✅ Live proven       | GROK_PLAN item 1 (2026-08-28): Start Impedance on Cyton `/dev/cu.usbserial-DN00967F`, footer live (not simulated), scan one ch at a time. Headset-off jumped ch1 15k→50k kΩ and ch2 8k→58k kΩ. Contacts were still Poor/dry — do not start Focus. Synthetic/Playback stay labelled simulated. |
 | Filtering (Notch + BP)         | ✅ Production        | Notch: None / 50 / 60 / 50+60 (Java labels); BP 1–50 Hz; live + Playback |
 | EMG                            | ✅ Production        | WEmg — envelope circles + 0–1 bar, Java EmgSettingsValues |
 | EMG Joystick                   | ✅ Production        | WEmgJoystick — ±X/±Y channel map, unit-circle + lerp |
@@ -43,7 +43,7 @@ This document tracks parity with the canonical Java/Processing implementation (`
 - **Reconnection**: ✅ **Phase 7** — Prominent red Failed banner + 🔄 Reconnect button that restores last source/port/channels/playback file. 1-click full reconnect for Synthetic & Playback (the magic roundtrip). For real Cyton it restores the exact dropdowns so the normal Start button succeeds on the second try. Survives End Session.
 - **WPacketLoss**: ✅ Visual sparkline + Reset in SidePanel (Phase 7).
 - **Fonts**: ✅ Embedded Montserrat + OpenSans (professional look matching Java GUI).
-- **Hardware Settings**: Cyton/Synthetic ADS1299 `x…X` (power/gain/input/bias/SRB2). Persisted in Phase 8 JSON. Synthetic zeros powered-off EXG (ch8 off test). Live Cyton `config_board` **not hardware-verified this run**.
+- **Hardware Settings**: Cyton/Synthetic ADS1299 `x…X` (power/gain/input/bias/SRB2). GROK_PLAN item 2 (2026-08-28): live Cyton ch8 Pwr Off flattened Time Series; End Session → Start kept ch8 off. Then restored On.
 - **BDF playback**: Proven this run on Synthetic (item 5): 10 s BDF → Playback EXG + marks match the session.
 - **Feature export**: Proven this run (item 10): after the marked 10 s Synthetic session, `{stem}.features.csv` / `.jsonl` exist with header `t0,t1,ch,delta,theta,alpha,beta,gamma,marker,artifact` and the three operator labels. No model training.
 - **Analog / Digital / Pulse**: Cyton-only; Synthetic shows “no aux”. `/2` analog `/3` digital. **Not verified on live D11/D12 this run.**
@@ -91,8 +91,8 @@ Last-used settings are persisted across app restarts for delightful QOL:
 
 ## Remaining High-Value Items
 
-- **Item 1 live impedance — parked.** No `/dev/cu.usbserial*` on this Mac. Do not treat kΩ as production until a lead-lift on a real Cyton changes the reading. Synthetic/Playback remain labelled simulated.
-- **Live Cyton Hardware Settings / analog pins / WiFi shield**: coded to Java command/config shapes; **not claimed production** until a board session shows it.
+- **Item 1 live impedance — locked.** 2026-08-28 headset-off jumped ch1 15k→50k kΩ and ch2 8k→58k kΩ on live Cyton. UI not simulated. Contacts were still Poor/dry. Synthetic/Playback remain labelled simulated.
+- **Live Cyton analog pins / WiFi shield**: still not claimed production. Hardware Settings item 2 is live-proven (ch8 off + persist).
 - **Layouts 7–12** (five- and six-pane Java maps) and drag-reorder are still future work. Layouts **1–6 match Java geometry**; default is Java layout 5 (tall left + two right).
 - Ganglion BLED112 dongle path is still not a separate control-panel source (Native BLE + scanner only).
 

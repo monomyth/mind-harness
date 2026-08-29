@@ -3,16 +3,16 @@
 //! This is the Rust equivalent of the Java `BoardBrainFlow` + its subclasses.
 //! It can represent Synthetic, Cyton (Serial/WiFi), Ganglion (Native/BLE/WiFi), etc.
 
-use crate::board::ads_settings::{self, AdsChannel, default_bank, zero_unpowered_exg};
+use crate::board::ads_settings::{self, default_bank, zero_unpowered_exg, AdsChannel};
 use crate::board::impedance::{
     column_window, cyton_impedance_on_cmd, ganglion_kohm, kohm_from_lead_off_std_uv,
-    population_std,
+    population_std, split_cyton_config_cmds,
 };
 use crate::board::{BoardError, DataSource};
 use brainflow::board_shim::BoardShim;
 use brainflow::brainflow_input_params::BrainFlowInputParamsBuilder;
 use brainflow::{BoardIds, BrainFlowPresets, NoiseTypes};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -103,52 +103,26 @@ const CYTON_IMP_DWELL: Duration = Duration::from_millis(2000);
 const CYTON_IMP_OFF_GAP: Duration = Duration::from_millis(150);
 const BRAINFLOW_STREAM_CAP: usize = 45000;
 
-/// Pause / `config_board` / resume for Cyton `x`/`z`. Runs off the eframe thread
-/// because BrainFlow waits ~1 s for `$$$` when the stream is stopped.
-fn run_cyton_serial_io(
-    board_id: BoardIds,
-    serial_port: Option<String>,
-    cmd: Option<String>,
-    stop_first: bool,
-    start_after: bool,
+/// `config_board` on the LIVE `BoardShim` only — never stop/start the stream.
+/// Hardware Settings already works this way; Time Series must keep filling the
+/// 1 s impedance std window. Concatenated `x…Xz…Z` is one command per call
+/// (Cyton cannot parse both in a single `config_board`).
+fn cyton_config_on_live(
+    shim: &BoardShim,
+    cmd: Option<&str>,
+    currently_streaming: bool,
 ) -> (bool, bool, Option<String>) {
-    let mut builder = BrainFlowInputParamsBuilder::default();
-    if let Some(port) = serial_port {
-        builder = builder.serial_port(port);
-    }
-    let params = builder.build();
-    let shim = match BoardShim::new(board_id, params) {
-        Ok(s) => s,
-        Err(e) => return (false, stop_first, Some(e.to_string())),
-    };
-    let mut streaming = stop_first;
-    if stop_first {
-        match shim.stop_stream() {
-            Ok(()) => streaming = false,
-            Err(e) => return (false, true, Some(e.to_string())),
-        }
-    }
     let sent = if let Some(cmd) = cmd {
-        match shim.config_board(&cmd) {
-            Ok(_) => true,
-            Err(e) => {
-                if start_after && !streaming && shim.start_stream(BRAINFLOW_STREAM_CAP, "").is_ok()
-                {
-                    streaming = true;
-                }
-                return (false, streaming, Some(e.to_string()));
+        for piece in split_cyton_config_cmds(cmd) {
+            if let Err(e) = shim.config_board(piece) {
+                return (false, currently_streaming, Some(e.to_string()));
             }
         }
+        true
     } else {
         true
     };
-    if start_after && !streaming {
-        match shim.start_stream(BRAINFLOW_STREAM_CAP, "") {
-            Ok(()) => streaming = true,
-            Err(e) => return (sent, false, Some(e.to_string())),
-        }
-    }
-    (sent, streaming, None)
+    (sent, currently_streaming, None)
 }
 
 impl BrainFlowBoard {
@@ -177,17 +151,13 @@ impl BrainFlowBoard {
         )
         .unwrap_or_default();
 
-        let analog_channels: Vec<usize> = brainflow::board_shim::get_analog_channels(
-            board_id,
-            BrainFlowPresets::DefaultPreset,
-        )
-        .unwrap_or_default();
+        let analog_channels: Vec<usize> =
+            brainflow::board_shim::get_analog_channels(board_id, BrainFlowPresets::DefaultPreset)
+                .unwrap_or_default();
 
-        let other_channels: Vec<usize> = brainflow::board_shim::get_other_channels(
-            board_id,
-            BrainFlowPresets::DefaultPreset,
-        )
-        .unwrap_or_default();
+        let other_channels: Vec<usize> =
+            brainflow::board_shim::get_other_channels(board_id, BrainFlowPresets::DefaultPreset)
+                .unwrap_or_default();
         let digital_channels: Vec<usize> = other_channels
             .iter()
             .copied()
@@ -344,19 +314,12 @@ impl DataSource for BrainFlowBoard {
         self.drain_cyton_imp_io();
         if self.impedance_active && self.is_ads1299() {
             // Session teardown can hitch; restore ADS before releasing the port.
-            if let Some(ch) = self.impedance_scan_off_channel() {
-                if let Some(cmd) = self.ads_restore_imp_cmd(ch) {
-                    let _ = run_cyton_serial_io(
-                        self.board_id,
-                        self.serial_port.clone(),
-                        Some(cmd),
-                        self.is_streaming,
-                        self.is_streaming,
-                    );
+            if let Some(shim) = self.board.as_ref() {
+                if let Some(ch) = self.impedance_scan_off_channel() {
+                    if let Some(cmd) = self.ads_restore_imp_cmd(ch) {
+                        let _ = cyton_config_on_live(shim, Some(&cmd), self.is_streaming);
+                    }
                 }
-            } else if self.is_streaming {
-                let _ =
-                    run_cyton_serial_io(self.board_id, self.serial_port.clone(), None, false, true);
             }
         }
         if let Some(shim) = self.board.take() {
@@ -587,6 +550,7 @@ impl DataSource for BrainFlowBoard {
         self.impedance_values = vec![None; n];
         self.cyton_imp_scan = None;
         self.imp_stop_queued = false;
+        self.impedance_error = None;
 
         if self.board_id == BoardIds::SyntheticBoard {
             self.impedance_active = true;
@@ -612,13 +576,8 @@ impl DataSource for BrainFlowBoard {
                 channel: 0,
                 since: Instant::now(),
             });
-            let streaming = self.is_streaming;
-            if let Err(e) = self.launch_cyton_io(
-                Some(cmd),
-                streaming,
-                streaming,
-                CytonImpIoKind::StartOn { channel: 0 },
-            ) {
+            if let Err(e) = self.launch_cyton_io(Some(cmd), CytonImpIoKind::StartOn { channel: 0 })
+            {
                 self.impedance_active = false;
                 self.cyton_imp_scan = None;
                 return Err(e);
@@ -725,7 +684,9 @@ impl DataSource for BrainFlowBoard {
                 BoardIds::CytonWifiBoard | BoardIds::CytonDaisyWifiBoard
             )
         {
-            return Err(BoardError::Io("hardware settings are Cyton ADS1299 only".into()));
+            return Err(BoardError::Io(
+                "hardware settings are Cyton ADS1299 only".into(),
+            ));
         }
         self.config_board_str(&cmd)?;
         self.ads_bank[channel] = settings;
@@ -827,8 +788,6 @@ impl BrainFlowBoard {
     fn launch_cyton_io(
         &mut self,
         cmd: Option<String>,
-        stop_first: bool,
-        start_after: bool,
         kind: CytonImpIoKind,
     ) -> Result<(), BoardError> {
         if self.imp_io_busy {
@@ -836,33 +795,23 @@ impl BrainFlowBoard {
                 "impedance command already in progress".into(),
             ));
         }
-        let board_id = self.board_id;
-        let port = self.serial_port.clone();
-        let (tx, rx) = mpsc::channel();
-        if let Ok(mut slot) = self.imp_io_rx.lock() {
-            *slot = Some(rx);
+        let Some(shim) = self.board.as_ref() else {
+            return Err(BoardError::NotInitialized);
+        };
+        let (sent, streaming, err) = cyton_config_on_live(shim, cmd.as_deref(), self.is_streaming);
+        let io_err = err.clone();
+        self.apply_cyton_imp_io_result(CytonImpIoResult {
+            kind,
+            sent,
+            streaming,
+            err,
+        });
+        if self.imp_stop_queued && self.impedance_active {
+            self.imp_stop_queued = false;
+            let _ = self.begin_cyton_imp_stop();
         }
-        self.imp_io_busy = true;
-        self.imp_pending_kind = Some(kind);
-        let spawn = std::thread::Builder::new()
-            .name("cyton-imp".into())
-            .spawn(move || {
-                let (sent, streaming, err) =
-                    run_cyton_serial_io(board_id, port, cmd, stop_first, start_after);
-                let _ = tx.send(CytonImpIoResult {
-                    kind,
-                    sent,
-                    streaming,
-                    err,
-                });
-            });
-        if let Err(e) = spawn {
-            self.imp_io_busy = false;
-            self.imp_pending_kind = None;
-            if let Ok(mut slot) = self.imp_io_rx.lock() {
-                *slot = None;
-            }
-            return Err(BoardError::Io(e.to_string()));
+        if let Some(e) = io_err {
+            return Err(BoardError::BrainFlow(e));
         }
         Ok(())
     }
@@ -1005,16 +954,10 @@ impl BrainFlowBoard {
                 let cmd = self.ads_restore_imp_cmd(channel).ok_or_else(|| {
                     BoardError::Io("Cyton has no EXG channels for impedance".into())
                 })?;
-                let streaming = self.is_streaming;
-                self.launch_cyton_io(
-                    Some(cmd),
-                    streaming,
-                    streaming,
-                    CytonImpIoKind::StopOff { channel },
-                )
+                self.launch_cyton_io(Some(cmd), CytonImpIoKind::StopOff { channel })
             }
-            Some(CytonImpScan::OffWait { resume_stream, .. }) => {
-                self.launch_cyton_io(None, false, resume_stream, CytonImpIoKind::StopResume)
+            Some(CytonImpScan::OffWait { .. }) => {
+                self.launch_cyton_io(None, CytonImpIoKind::StopResume)
             }
             None => {
                 self.impedance_active = false;
@@ -1064,8 +1007,6 @@ impl BrainFlowBoard {
                 let want_resume = self.is_streaming;
                 if let Err(e) = self.launch_cyton_io(
                     Some(off),
-                    want_resume,
-                    false,
                     CytonImpIoKind::SwitchOff {
                         from: channel,
                         next,
@@ -1085,16 +1026,11 @@ impl BrainFlowBoard {
                     self.cyton_imp_scan = None;
                     self.impedance_active = false;
                     if resume_stream {
-                        let _ = self.launch_cyton_io(None, false, true, CytonImpIoKind::StopResume);
+                        let _ = self.launch_cyton_io(None, CytonImpIoKind::StopResume);
                     }
                     return;
                 };
-                if let Err(e) = self.launch_cyton_io(
-                    Some(on),
-                    false,
-                    resume_stream,
-                    CytonImpIoKind::SwitchOn { next },
-                ) {
+                if let Err(e) = self.launch_cyton_io(Some(on), CytonImpIoKind::SwitchOn { next }) {
                     self.impedance_error = Some(e.to_string());
                 }
             }
@@ -1184,7 +1120,12 @@ mod tests {
         assert!(!b.impedance_is_simulated());
         assert_eq!(b.impedance_quality_kohm(), (750.0, 2500.0));
         assert_eq!(b.get_impedance(), vec![None; 8]);
-        assert!(b.start_impedance_test(&[0]).is_err());
+        assert!(b.board.is_none());
+        let err = b.start_impedance_test(&[0]).unwrap_err();
+        assert!(
+            matches!(err, BoardError::NotInitialized),
+            "live kOhm must not open a second serial session: {err}"
+        );
         assert!(!b.impedance_test_active());
         assert!(!b.impedance_is_simulated());
         assert_eq!(b.get_impedance(), vec![None; 8]);

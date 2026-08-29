@@ -17,6 +17,8 @@ pub struct WImpedance {
     last_values: Vec<Option<f64>>,
     pending_start: bool,
     pending_stop: bool,
+    /// Last Start / scan error; kept until the next successful Start.
+    last_error: Option<String>,
 }
 
 impl WImpedance {
@@ -26,6 +28,7 @@ impl WImpedance {
             last_values: vec![],
             pending_start: false,
             pending_stop: false,
+            last_error: None,
         }
     }
 
@@ -40,6 +43,14 @@ impl WImpedance {
     pub fn clear_pending(&mut self) {
         self.pending_start = false;
         self.pending_stop = false;
+    }
+
+    pub fn set_start_error(&mut self, err: impl Into<String>) {
+        self.last_error = Some(err.into());
+    }
+
+    pub fn clear_start_error(&mut self) {
+        self.last_error = None;
     }
 }
 
@@ -100,6 +111,10 @@ impl Widget for WImpedance {
                 ui.small(format!("measuring ch {} (ADS1299 lead-off)", ch + 1));
             }
         });
+
+        if let Some(err) = &self.last_error {
+            ui.colored_label(egui::Color32::from_rgb(230, 80, 70), err);
+        }
 
         ui.add_space(4.0);
 

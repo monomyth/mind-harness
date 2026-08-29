@@ -608,26 +608,17 @@ impl Widget for WFocus {
 
         ui.add_space(8.0);
 
-        // === Main Focus Meter ===
         let pct = (self.focus_value * 100.0).clamp(0.0, 100.0);
-        let bar_color = if self.focus_value > 0.75 {
-            egui::Color32::from_rgb(60, 160, 80) // good focus = green
-        } else if self.focus_value > 0.55 {
-            egui::Color32::from_rgb(160, 150, 60)
-        } else {
-            egui::Color32::from_rgb(140, 90, 90)
-        };
-
-        let progress = egui::ProgressBar::new(self.focus_value)
-            .text(egui::RichText::new(format!("{:.0}%", pct)).strong())
-            .fill(bar_color);
-
-        ui.add(progress);
-
-        ui.small(if self.use_ml && self.ml_prepared {
-            "Real-time BrainFlow ML prediction (5-band feature vector)"
-        } else {
-            "Proxy: relative alpha power (FFT-based)"
+        ui.horizontal(|ui| {
+            paint_focus_ring(ui, self.focus_value);
+            ui.vertical(|ui| {
+                ui.small(if self.use_ml && self.ml_prepared {
+                    "BrainFlow ML (5-band features)"
+                } else {
+                    "Proxy: relative alpha (FFT)"
+                });
+                ui.small(format!("value  {:.2}", self.focus_value));
+            });
         });
 
         ui.add_space(4.0);
@@ -646,7 +637,7 @@ impl Widget for WFocus {
                 .show(ui, |plot_ui| {
                     plot_ui.line(
                         egui_plot::Line::new("focus", points)
-                            .color(egui::Color32::from_rgb(70, 160, 110))
+                            .color(crate::theme::ACCENT)
                             .width(1.5_f32),
                     );
                 });
@@ -742,4 +733,35 @@ impl Widget for WFocus {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
+}
+
+fn paint_focus_ring(ui: &mut egui::Ui, value: f32) {
+    let size = egui::vec2(88.0, 88.0);
+    let (resp, painter) = ui.allocate_painter(size, egui::Sense::hover());
+    let c = resp.rect.center();
+    let r = 32.0_f32;
+    painter.circle_stroke(c, r, egui::Stroke::new(3.5_f32, crate::theme::HAIRLINE));
+    let steps = 72usize;
+    let filled = ((value.clamp(0.0, 1.0) * steps as f32).round() as usize).min(steps);
+    if filled >= 1 {
+        let mut pts = Vec::with_capacity(filled + 1);
+        for i in 0..=filled {
+            let t = i as f32 / steps as f32;
+            let a = -std::f32::consts::FRAC_PI_2 + t * std::f32::consts::TAU;
+            pts.push(egui::pos2(c.x + r * a.cos(), c.y + r * a.sin()));
+        }
+        if pts.len() >= 2 {
+            painter.add(egui::Shape::line(
+                pts,
+                egui::Stroke::new(3.5_f32, crate::theme::ACCENT),
+            ));
+        }
+    }
+    painter.text(
+        c,
+        egui::Align2::CENTER_CENTER,
+        format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0),
+        egui::FontId::proportional(16.0),
+        crate::theme::TEXT,
+    );
 }

@@ -225,12 +225,13 @@ fn paint_channel_trace(
 ) {
     let painter = ui.painter_at(rect);
     let y0 = rect.center().y;
+    painter.rect_filled(rect, 0.0, theme::CANVAS);
     painter.line_segment(
         [pos2(rect.left(), y0), pos2(rect.right(), y0)],
-        Stroke::new(1.0_f32, Color32::from_black_alpha(30)),
+        Stroke::new(1.0_f32, theme::HAIRLINE),
     );
 
-    let label_color = theme::OPENBCI_DARKBLUE;
+    let label_color = theme::TEXT;
     let font = egui::FontId::proportional(10.0);
     painter.text(
         pos2(rect.left() + 4.0, rect.top() + 2.0),
@@ -419,7 +420,7 @@ impl Widget for WTimeSeries {
                             "off".into()
                         },
                         egui::FontId::proportional(if powered { 12.0 } else { 9.0 }),
-                        theme::WHITE,
+                        theme::TEXT,
                     );
                     if circ_resp.clicked() {
                         self.visible_channels[i] = false;

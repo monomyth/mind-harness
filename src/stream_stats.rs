@@ -23,11 +23,11 @@ pub fn format_loss(percent: f64) -> String {
 
 pub fn loss_color(percent: f64) -> Color32 {
     if percent > 5.0 {
-        Color32::from_rgb(255, 90, 90)
+        Color32::from_rgb(0xc4, 0x5c, 0x4e)
     } else if percent > 1.0 {
-        Color32::from_rgb(255, 200, 80)
+        Color32::from_rgb(0xb0, 0x8d, 0x57)
     } else {
-        Color32::from_rgb(180, 220, 190)
+        Color32::from_rgb(0x8a, 0x8a, 0x8a)
     }
 }
 

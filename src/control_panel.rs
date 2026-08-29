@@ -150,12 +150,12 @@ impl ControlPanel {
                     "OpenBCI GUI  v{}  —  Session Setup",
                     env!("CARGO_PKG_VERSION")
                 ))
-                .color(crate::theme::OPENBCI_BLUE),
+                .color(crate::theme::TEXT),
             );
             ui.label(
-                egui::RichText::new("Native rewrite of the Processing GUI. Same boards, same experiment loop.")
+                egui::RichText::new("Same boards, same experiment loop.")
                     .italics()
-                    .color(crate::theme::OPENBCI_DARKBLUE),
+                    .color(crate::theme::TEXT),
             );
             ui.add_space(16.0);
 
