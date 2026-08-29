@@ -106,6 +106,20 @@ fn uv_std_last_second(ys: &[f64], sample_rate: f32) -> f64 {
     }
 }
 
+/// True when a recording mark falls in the visible Time Series window (newest at playhead).
+pub(crate) fn marker_visible_in_window(
+    sample_index: u64,
+    playhead: usize,
+    visible_len: usize,
+) -> bool {
+    if visible_len == 0 {
+        return false;
+    }
+    let start = playhead as i64 - visible_len as i64 + 1;
+    let idx = sample_index as i64;
+    idx >= start && idx <= playhead as i64
+}
+
 fn paint_markers(
     ui: &egui::Ui,
     rect: Rect,
@@ -122,14 +136,12 @@ fn paint_markers(
         .playhead_sample()
         .unwrap_or_else(|| n_samples.saturating_sub(1));
     let painter = ui.painter_at(rect);
-    let window_n = n_samples;
     for m in marks {
-        let idx = m.sample_index as i64;
-        let start = playhead as i64 - window_n as i64 + 1;
-        if idx < start || idx > playhead as i64 {
+        if !marker_visible_in_window(m.sample_index, playhead, n_samples) {
             continue;
         }
-        let k = (idx - start) as usize;
+        let start = playhead as i64 - n_samples as i64 + 1;
+        let k = (m.sample_index as i64 - start) as usize;
         let t = sample_time(k, n_samples, sample_rate);
         let x = time_to_x(t, window_sec, rect.left(), rect.width());
         painter.line_segment(

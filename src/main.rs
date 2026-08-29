@@ -22,6 +22,9 @@ mod widget_context;
 mod widget_manager;
 mod widgets;
 
+#[cfg(test)]
+mod test_support;
+
 use app::OpenBciGuiApp;
 use eframe::egui;
 
