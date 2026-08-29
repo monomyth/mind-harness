@@ -167,8 +167,8 @@ pub fn fft_single_sided_uv(samples: &[f64], sample_rate: f64) -> (Vec<f64>, Vec<
     let bin = sample_rate / n as f64;
     let mut freqs = Vec::with_capacity(n_half + 1);
     let mut mags = Vec::with_capacity(n_half + 1);
-    for k in 0..=n_half {
-        let raw = (buffer[k].re.powi(2) + buffer[k].im.powi(2)).sqrt();
+    for (k, val) in buffer.iter().enumerate().take(n_half + 1) {
+        let raw = (val.re.powi(2) + val.im.powi(2)).sqrt();
         let mag = if k == 0 || k == n_half {
             raw / n as f64
         } else {
@@ -301,7 +301,7 @@ mod tests {
             "first bin was {} Hz",
             freqs[0]
         );
-        assert!(!freqs.iter().any(|&f| f == 0.0));
+        assert!(!freqs.contains(&0.0));
     }
 
     #[test]

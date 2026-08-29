@@ -3,9 +3,10 @@
 //! This is the Rust equivalent of the Java `BoardBrainFlow` + its subclasses.
 //! It can represent Synthetic, Cyton (Serial/WiFi), Ganglion (Native/BLE/WiFi), etc.
 
+use crate::board::ads_settings::{self, AdsChannel, default_bank, zero_unpowered_exg};
 use crate::board::impedance::{
-    column_window, cyton_impedance_off_cmd, cyton_impedance_on_cmd, ganglion_kohm,
-    kohm_from_lead_off_std_uv, population_std,
+    column_window, cyton_impedance_on_cmd, ganglion_kohm, kohm_from_lead_off_std_uv,
+    population_std,
 };
 use crate::board::{BoardError, DataSource};
 use brainflow::board_shim::BoardShim;
@@ -20,6 +21,8 @@ pub struct BrainFlowBoard {
     board_id: BoardIds,
     serial_port: Option<String>,
     device_id: Option<String>, // for BLE / Ganglion
+    ip_address: Option<String>,
+    ip_port: Option<usize>,
     exg_channels: Vec<usize>,
     accel_channels: Vec<usize>,
     sample_rate: i32,
@@ -49,6 +52,10 @@ pub struct BrainFlowBoard {
     imp_io_rx: Mutex<Option<Receiver<CytonImpIoResult>>>,
     imp_pending_kind: Option<CytonImpIoKind>,
     imp_stop_queued: bool,
+    ads_bank: Vec<AdsChannel>,
+    analog_channels: Vec<usize>,
+    digital_channels: Vec<usize>,
+    cyton_board_mode: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -125,10 +132,9 @@ fn run_cyton_serial_io(
         match shim.config_board(&cmd) {
             Ok(_) => true,
             Err(e) => {
-                if start_after && !streaming {
-                    if shim.start_stream(BRAINFLOW_STREAM_CAP, "").is_ok() {
-                        streaming = true;
-                    }
+                if start_after && !streaming && shim.start_stream(BRAINFLOW_STREAM_CAP, "").is_ok()
+                {
+                    streaming = true;
                 }
                 return (false, streaming, Some(e.to_string()));
             }
@@ -171,6 +177,25 @@ impl BrainFlowBoard {
         )
         .unwrap_or_default();
 
+        let analog_channels: Vec<usize> = brainflow::board_shim::get_analog_channels(
+            board_id,
+            BrainFlowPresets::DefaultPreset,
+        )
+        .unwrap_or_default();
+
+        let other_channels: Vec<usize> = brainflow::board_shim::get_other_channels(
+            board_id,
+            BrainFlowPresets::DefaultPreset,
+        )
+        .unwrap_or_default();
+        let digital_channels: Vec<usize> = other_channels
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(i, _)| *i != 0 && *i != 5)
+            .map(|(_, c)| c)
+            .collect();
+
         let package_num_channel = brainflow::board_shim::get_package_num_channel(
             board_id,
             BrainFlowPresets::DefaultPreset,
@@ -192,6 +217,8 @@ impl BrainFlowBoard {
             board_id,
             serial_port,
             device_id,
+            ip_address: None,
+            ip_port: None,
             exg_channels,
             accel_channels,
             sample_rate,
@@ -215,6 +242,10 @@ impl BrainFlowBoard {
             imp_io_rx: Mutex::new(None),
             imp_pending_kind: None,
             imp_stop_queued: false,
+            ads_bank: default_bank(num_exg),
+            analog_channels,
+            digital_channels,
+            cyton_board_mode: 0,
         }
     }
 
@@ -232,6 +263,7 @@ impl BrainFlowBoard {
         let n = board.exg_channels.len();
         board.filter_settings = crate::filter_settings::FilterSettings::new(n);
         board.impedance_values = vec![None; n];
+        board.ads_bank = default_bank(n);
         board
     }
 
@@ -253,6 +285,24 @@ impl BrainFlowBoard {
             Some(device_id.to_string()),
         )
     }
+
+    /// Cyton WiFi shield (BrainFlow `CYTON_WIFI_BOARD`, IP + port 6677).
+    pub fn cyton_wifi(ip: &str, daisy: bool) -> Self {
+        let id = if daisy {
+            BoardIds::CytonDaisyWifiBoard
+        } else {
+            BoardIds::CytonWifiBoard
+        };
+        let mut board = Self::new(id, None, None);
+        board.ip_address = Some(ip.trim().to_string());
+        board.ip_port = Some(6677);
+        board
+    }
+
+    #[allow(dead_code)]
+    pub fn wifi_endpoint(&self) -> Option<(String, usize)> {
+        Some((self.ip_address.clone()?, self.ip_port.unwrap_or(6677)))
+    }
 }
 
 impl DataSource for BrainFlowBoard {
@@ -268,6 +318,12 @@ impl DataSource for BrainFlowBoard {
         }
         if let Some(ref dev) = self.device_id {
             builder = builder.serial_number(dev.clone());
+        }
+        if let Some(ref ip) = self.ip_address {
+            builder = builder.ip_address(ip.clone());
+        }
+        if let Some(port) = self.ip_port {
+            builder = builder.ip_port(port);
         }
 
         let params = builder.build();
@@ -289,7 +345,7 @@ impl DataSource for BrainFlowBoard {
         if self.impedance_active && self.is_ads1299() {
             // Session teardown can hitch; restore ADS before releasing the port.
             if let Some(ch) = self.impedance_scan_off_channel() {
-                if let Some(cmd) = cyton_impedance_off_cmd(ch) {
+                if let Some(cmd) = self.ads_restore_imp_cmd(ch) {
                     let _ = run_cyton_serial_io(
                         self.board_id,
                         self.serial_port.clone(),
@@ -304,10 +360,8 @@ impl DataSource for BrainFlowBoard {
             }
         }
         if let Some(shim) = self.board.take() {
-            if self.is_streaming {
-                if shim.stop_stream().is_ok() {
-                    self.is_streaming = false;
-                }
+            if self.is_streaming && shim.stop_stream().is_ok() {
+                self.is_streaming = false;
             }
             let _ = shim.release_session();
         }
@@ -370,6 +424,9 @@ impl DataSource for BrainFlowBoard {
                 row.push(arr[[c, s]]);
             }
             new_samples.push(row);
+        }
+        for row in &mut new_samples {
+            zero_unpowered_exg(row, &self.exg_channels, &self.ads_bank);
         }
 
         let delivered = new_samples.len();
@@ -487,6 +544,8 @@ impl DataSource for BrainFlowBoard {
             BoardIds::CytonBoard => "Cyton (8ch)",
             BoardIds::CytonDaisyBoard => "Cyton + Daisy (16ch)",
             BoardIds::GanglionNativeBoard => "Ganglion (Native BLE)",
+            BoardIds::CytonWifiBoard => "Cyton WiFi (8ch)",
+            BoardIds::CytonDaisyWifiBoard => "Cyton WiFi + Daisy (16ch)",
             _ => "BrainFlow Board",
         }
     }
@@ -631,6 +690,91 @@ impl DataSource for BrainFlowBoard {
     fn take_impedance_error(&mut self) -> Option<String> {
         self.impedance_error.take()
     }
+
+    fn ads_channels(&self) -> Option<&[AdsChannel]> {
+        if self.is_ads1299()
+            || self.board_id == BoardIds::SyntheticBoard
+            || matches!(
+                self.board_id,
+                BoardIds::CytonWifiBoard | BoardIds::CytonDaisyWifiBoard
+            )
+        {
+            Some(&self.ads_bank)
+        } else {
+            None
+        }
+    }
+
+    fn commit_ads_channel(
+        &mut self,
+        channel: usize,
+        settings: AdsChannel,
+    ) -> Result<(), BoardError> {
+        if channel >= self.ads_bank.len() {
+            return Err(BoardError::Io("channel out of range".into()));
+        }
+        let cmd = ads_settings::ads_commit_cmd(channel, settings)
+            .ok_or_else(|| BoardError::Io("no ADS letter for channel".into()))?;
+        if self.board_id == BoardIds::SyntheticBoard || self.board.is_none() {
+            self.ads_bank[channel] = settings;
+            return Ok(());
+        }
+        if !self.is_ads1299()
+            && !matches!(
+                self.board_id,
+                BoardIds::CytonWifiBoard | BoardIds::CytonDaisyWifiBoard
+            )
+        {
+            return Err(BoardError::Io("hardware settings are Cyton ADS1299 only".into()));
+        }
+        self.config_board_str(&cmd)?;
+        self.ads_bank[channel] = settings;
+        Ok(())
+    }
+
+    fn channel_powered(&self) -> Vec<bool> {
+        self.ads_bank
+            .iter()
+            .map(|s| s.power == ads_settings::AdsPower::On)
+            .collect()
+    }
+
+    fn analog_channels(&self) -> &[usize] {
+        &self.analog_channels
+    }
+
+    fn digital_channels(&self) -> &[usize] {
+        &self.digital_channels
+    }
+
+    fn cyton_board_mode(&self) -> Option<u8> {
+        if self.supports_aux_widgets() {
+            Some(self.cyton_board_mode)
+        } else {
+            None
+        }
+    }
+
+    fn set_cyton_board_mode(&mut self, mode: u8) -> Result<(), BoardError> {
+        if !self.supports_aux_widgets() {
+            return Err(BoardError::Io("aux mode is Cyton-only".into()));
+        }
+        if self.board.is_some() {
+            self.config_board_str(&format!("/{mode}"))?;
+        }
+        self.cyton_board_mode = mode;
+        Ok(())
+    }
+
+    fn supports_aux_widgets(&self) -> bool {
+        matches!(
+            self.board_id,
+            BoardIds::CytonBoard
+                | BoardIds::CytonDaisyBoard
+                | BoardIds::CytonWifiBoard
+                | BoardIds::CytonDaisyWifiBoard
+        )
+    }
 }
 
 fn tail_locked(buf: &Mutex<Vec<Vec<f64>>>, max_samples: usize) -> Vec<Vec<f64>> {
@@ -649,8 +793,16 @@ impl BrainFlowBoard {
     fn is_ads1299(&self) -> bool {
         matches!(
             self.board_id,
-            BoardIds::CytonBoard | BoardIds::CytonDaisyBoard
+            BoardIds::CytonBoard
+                | BoardIds::CytonDaisyBoard
+                | BoardIds::CytonWifiBoard
+                | BoardIds::CytonDaisyWifiBoard
         )
+    }
+
+    fn ads_restore_imp_cmd(&self, channel: usize) -> Option<String> {
+        let ads = self.ads_bank.get(channel).copied().unwrap_or_default();
+        ads_settings::ads_impedance_restore_cmd(channel, ads)
     }
 
     fn is_ganglion(&self) -> bool {
@@ -850,7 +1002,7 @@ impl BrainFlowBoard {
         }
         match self.cyton_imp_scan {
             Some(CytonImpScan::Measuring { channel, .. }) => {
-                let cmd = cyton_impedance_off_cmd(channel).ok_or_else(|| {
+                let cmd = self.ads_restore_imp_cmd(channel).ok_or_else(|| {
                     BoardError::Io("Cyton has no EXG channels for impedance".into())
                 })?;
                 let streaming = self.is_streaming;
@@ -906,7 +1058,7 @@ impl BrainFlowBoard {
                     }
                 }
                 let next = (channel + 1) % n;
-                let Some(off) = cyton_impedance_off_cmd(channel) else {
+                let Some(off) = self.ads_restore_imp_cmd(channel) else {
                     return;
                 };
                 let want_resume = self.is_streaming;
@@ -1124,5 +1276,36 @@ mod tests {
         });
         assert!(b.impedance_test_active());
         assert_eq!(b.impedance_scan_channel(), Some(1));
+    }
+
+    #[test]
+    fn synthetic_power_off_channel_8_zeros_exg() {
+        let mut b = BrainFlowBoard::synthetic(8);
+        let off = AdsChannel {
+            power: ads_settings::AdsPower::Off,
+            ..AdsChannel::default()
+        };
+        b.commit_ads_channel(7, off).unwrap();
+        assert!(!b.channel_powered()[7]);
+        let mut row = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        zero_unpowered_exg(&mut row, b.exg_channels(), b.ads_channels().unwrap());
+        assert_eq!(row[8], 0.0);
+        assert_eq!(row[1], 1.0);
+    }
+
+    #[test]
+    fn cyton_wifi_config_has_ip_and_port() {
+        let b = BrainFlowBoard::cyton_wifi("192.168.4.1", false);
+        assert_eq!(b.wifi_endpoint(), Some(("192.168.4.1".into(), 6677)));
+        assert!(!b.supports_aux_widgets() || b.analog_channels().len() <= 8);
+        assert!(b.supports_aux_widgets());
+        assert!(!b.impedance_is_simulated());
+    }
+
+    #[test]
+    fn synthetic_hides_aux_widgets() {
+        let b = BrainFlowBoard::synthetic(8);
+        assert!(!b.supports_aux_widgets());
+        assert!(b.ads_channels().is_some());
     }
 }

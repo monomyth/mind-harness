@@ -11,8 +11,10 @@ pub struct WNetworking {
     // UI-editable state (synced from the real NetworkingManager via WidgetContext each frame)
     udp_target: String,
     osc_target: String,
+    lsl_target: String,
     udp_enabled: bool,
     osc_enabled: bool,
+    lsl_enabled: bool,
 }
 
 impl WNetworking {
@@ -22,8 +24,10 @@ impl WNetworking {
             // Match the defaults in NetworkingManager::new()
             udp_target: "127.0.0.1:12345".to_string(),
             osc_target: "127.0.0.1:9000".to_string(),
+            lsl_target: crate::networking::lsl_stream::DEFAULT_EEG_NAME.to_string(),
             udp_enabled: false,
             osc_enabled: false,
+            lsl_enabled: false,
         }
     }
 }
@@ -47,7 +51,7 @@ impl Widget for WNetworking {
         _source: &dyn DataSource,
         ctx: &mut crate::widget_context::WidgetContext,
     ) {
-        ui.label("Live EEG + marker output (UDP / OSC). LSL is not built in this binary.");
+        ui.label("Live EEG + marker output (UDP / OSC / LSL).");
         if let Some(err) = ctx.networking.last_error.clone() {
             ui.colored_label(egui::Color32::from_rgb(220, 80, 80), err);
         }
@@ -69,7 +73,12 @@ impl Widget for WNetworking {
                         self.osc_target = cfg.target.clone();
                     }
                 }
-                Protocol::LSL => { /* read-only for now */ }
+                Protocol::LSL => {
+                    self.lsl_enabled = cfg.enabled;
+                    if !cfg.target.is_empty() {
+                        self.lsl_target = cfg.target.clone();
+                    }
+                }
             }
         }
 
@@ -142,19 +151,43 @@ impl Widget for WNetworking {
 
         ui.add_space(6.0);
 
-        // ========== LSL (placeholder, non-functional) ==========
+        let linked = crate::networking::NetworkingManager::lsl_available();
         ui.horizontal(|ui| {
-            let mut lsl_off = false;
-            ui.add_enabled(false, egui::Checkbox::new(&mut lsl_off, "LSL"));
-            ui.strong("Target:");
-            ui.add(
-                egui::TextEdit::singleline(&mut "OpenBCI_EEG".to_string())
-                    .desired_width(160.0)
-                    .interactive(false),
+            ui.add_enabled_ui(linked, |ui| {
+                if ui.checkbox(&mut self.lsl_enabled, "LSL").changed() {
+                    ctx.update_networking_config(Protocol::LSL, self.lsl_enabled, &self.lsl_target);
+                    ctx.apply_networking();
+                }
+            });
+            ui.strong("Name:");
+            ui.add_enabled(
+                linked,
+                egui::TextEdit::singleline(&mut self.lsl_target).desired_width(160.0),
             );
-            ui.colored_label(egui::Color32::from_rgb(220, 140, 60), "Planned");
         });
-        ui.small("LSL will use the official lsl crate once build issues on macOS are resolved.");
+        ui.horizontal(|ui| {
+            if linked && ui.button("Apply LSL").clicked() {
+                ctx.update_networking_config(Protocol::LSL, self.lsl_enabled, &self.lsl_target);
+                ctx.apply_networking();
+            }
+            if !linked {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 140, 60),
+                    "disabled — liblsl not linked at build",
+                );
+            } else if self.lsl_enabled && ctx.networking.lsl_connected() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(80, 200, 120),
+                    "● obci_eeg1 + obci_markers",
+                );
+            } else if self.lsl_enabled {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 80),
+                    "⚠ enabled but not connected",
+                );
+            }
+        });
+        ui.small("Java names: obci_eeg1 / EEG at board rate, plus obci_markers / Markers.");
 
         ui.add_space(10.0);
         ui.separator();

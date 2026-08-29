@@ -28,6 +28,7 @@ pub fn cyton_impedance_on_cmd(channel: usize) -> Option<String> {
 }
 
 /// Restore default ADS (gain x24, SRB2 on) and clear lead-off.
+#[allow(dead_code)]
 pub fn cyton_impedance_off_cmd(channel: usize) -> Option<String> {
     let c = ads_channel_letter(channel)?;
     Some(format!("x{c}061100Xz{c}00Z"))

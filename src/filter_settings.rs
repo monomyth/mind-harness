@@ -58,18 +58,13 @@ impl FilterSettings {
 }
 
 /// Java `GlobalEnvironmentalFilter`: 50 / 60 / 50+60 / None.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NotchMode {
     Fifty,
     Sixty,
+    #[default]
     FiftyAndSixty,
     Off,
-}
-
-impl Default for NotchMode {
-    fn default() -> Self {
-        Self::FiftyAndSixty
-    }
 }
 
 impl NotchMode {

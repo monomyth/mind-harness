@@ -178,8 +178,7 @@ impl EmgProcessor {
             return;
         }
         let sr = sample_rate as f64;
-        for i in 0..n {
-            let col = exg[i];
+        for (i, &col) in exg.iter().take(n).enumerate() {
             let series: Vec<f64> = rows
                 .iter()
                 .map(|r| r.get(col).copied().unwrap_or(0.0))
@@ -265,6 +264,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn spikes_are_clipped_to_uv_limit_in_the_average() {
         let mut ch = EmgChannelState::default();
         ch.settings.uv_limit = EmgUvLimit::Fifty;
@@ -273,6 +273,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn upper_snaps_up_to_a_rising_envelope() {
         let mut ch = EmgChannelState::default();
         ch.upper_threshold = 25.0;
@@ -285,6 +286,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn output_is_zero_at_the_lower_threshold_and_positive_when_higher() {
         let mut quiet = EmgChannelState::default();
         quiet.lower_threshold = 6.0;
@@ -308,6 +310,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn output_never_goes_negative() {
         let mut ch = EmgChannelState::default();
         ch.lower_threshold = 20.0;

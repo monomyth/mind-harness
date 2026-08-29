@@ -21,6 +21,7 @@
 
 use crate::board::{BoardError, DataSource};
 use crate::filter_settings::FilterSettings;
+use crate::markers::{self, MarkerEvent};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::time::Instant;
@@ -43,11 +44,101 @@ pub struct PlaybackBoard {
     filtered: Vec<Vec<f64>>,
     filter_dirty: bool,
     impedance_active: bool,
+    markers: Vec<MarkerEvent>,
 }
 
 impl PlaybackBoard {
-    /// Load and parse an ODF .txt recording (Rust or Java GUI format).
+    /// Load ODF, BDF, or Cyton SD hex.
     pub fn from_file(path: &std::path::Path) -> Result<Self, BoardError> {
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ext == "bdf" {
+            return Self::from_bdf(path);
+        }
+        if looks_like_sd(path) {
+            return Self::from_sd(path);
+        }
+        Self::from_odf(path)
+    }
+
+    pub fn from_bdf(path: &std::path::Path) -> Result<Self, BoardError> {
+        let (samples, sample_rate, n_exg, mut markers) =
+            crate::data_writers::bdf::read_bdf(path).map_err(|e| BoardError::Io(e.to_string()))?;
+        let mut extra = markers::load_sidecar(path);
+        markers.append(&mut extra);
+        markers.sort_by_key(|m| m.sample_index);
+        markers.dedup_by(|a, b| a.sample_index == b.sample_index && a.label == b.label);
+        let filename = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        Ok(Self::from_samples(
+            filename, samples, sample_rate, n_exg, markers,
+        ))
+    }
+
+    pub fn from_sd(path: &std::path::Path) -> Result<Self, BoardError> {
+        let (samples, n_exg, sample_rate) = crate::board::sd_card::parse_sd_file(path)?;
+        let filename = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        Ok(Self::from_samples(
+            filename,
+            samples,
+            sample_rate,
+            n_exg,
+            vec![],
+        ))
+    }
+
+    pub fn from_samples(
+        filename: String,
+        samples: Vec<Vec<f64>>,
+        sample_rate: i32,
+        n_exg: usize,
+        markers: Vec<MarkerEvent>,
+    ) -> Self {
+        let row_len = samples.first().map(|r| r.len()).unwrap_or(n_exg);
+        let n_exg = n_exg.min(row_len).max(1);
+        let exg_channels: Vec<usize> = (0..n_exg).collect();
+        let accel_channels: Vec<usize> = if row_len > n_exg {
+            (n_exg..(n_exg + 3).min(row_len)).collect()
+        } else {
+            vec![]
+        };
+        let total_duration_sec = samples.len() as f64 / sample_rate.max(1) as f64;
+        let mut board = Self {
+            samples,
+            exg_channels,
+            accel_channels,
+            sample_rate,
+            playhead: 0,
+            last_wall_time: Instant::now(),
+            speed: 1.0,
+            paused: false,
+            filename,
+            total_duration_sec,
+            last_delivered: 0,
+            filter_settings: FilterSettings::new(n_exg),
+            filtered: vec![],
+            filter_dirty: true,
+            impedance_active: false,
+            markers,
+        };
+        board.apply_pending_filters();
+        board
+    }
+
+    pub fn export_samples(&self) -> &[Vec<f64>] {
+        &self.samples
+    }
+
+    /// Load and parse an ODF .txt recording (Rust or Java GUI format).
+    pub fn from_odf(path: &std::path::Path) -> Result<Self, BoardError> {
         let file = File::open(path).map_err(|e| BoardError::Io(e.to_string()))?;
         let reader = BufReader::new(file);
 
@@ -56,6 +147,7 @@ impl PlaybackBoard {
         let mut data_start = false;
         let mut skip_first_column = false;
         let mut samples: Vec<Vec<f64>> = Vec::new();
+        let mut markers: Vec<MarkerEvent> = markers::load_sidecar(path);
         let filename = path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -65,6 +157,10 @@ impl PlaybackBoard {
             let line = line.map_err(|e| BoardError::Io(e.to_string()))?;
             let trimmed = line.trim();
 
+            if let Some(m) = markers::parse_odf_marker_line(trimmed) {
+                markers.push(m);
+                continue;
+            }
             if trimmed.starts_with("OpenBCI") || trimmed.starts_with("%OpenBCI") {
                 continue;
             }
@@ -144,43 +240,11 @@ impl PlaybackBoard {
             ));
         }
 
-        // Heuristic for Playback roundtrip fidelity (plan.md Phase 7):
-        // BrainFlow board rows start with EXG channels at indices 0.. (get_exg_channels returns [0,1,..] for synthetic/Cyton).
-        // The ODF writer records the full rows as-is; we reconstruct exg_channels starting at 0 so that
-        // WTimeSeries, WFocus (ML + proxy using exg_channels() + get_avg..), BandPower etc. see identical
-        // data layout during replay as they did live. This makes the "record → immediate Playback" magical.
-        let row_len = samples[0].len();
-        let n_exg = n_channels.min(row_len).max(1);
-        let exg_channels: Vec<usize> = (0..n_exg).collect();
-        let accel_channels: Vec<usize> = if row_len > n_exg {
-            (n_exg..(n_exg + 3).min(row_len)).collect()
-        } else {
-            vec![]
-        };
-
-        let total_samples = samples.len();
-        let total_duration_sec = total_samples as f64 / sample_rate as f64;
-
-        let n_exg_for_filters = n_exg;
-        let mut board = Self {
-            samples,
-            exg_channels,
-            accel_channels,
-            sample_rate,
-            playhead: 0,
-            last_wall_time: Instant::now(),
-            speed: 1.0,
-            paused: false,
-            filename,
-            total_duration_sec,
-            last_delivered: 0,
-            filter_settings: FilterSettings::new(n_exg_for_filters),
-            filtered: vec![],
-            filter_dirty: true,
-            impedance_active: false,
-        };
-        board.apply_pending_filters();
-        Ok(board)
+        let n_exg = n_channels.min(samples[0].len()).max(1);
+        markers.sort_by_key(|m| m.sample_index);
+        Ok(Self::from_samples(
+            filename, samples, sample_rate, n_exg, markers,
+        ))
     }
 
     fn rebuild_filtered(&mut self) {
@@ -391,6 +455,14 @@ impl DataSource for PlaybackBoard {
         self.impedance_active
     }
 
+    fn session_markers(&self) -> &[MarkerEvent] {
+        &self.markers
+    }
+
+    fn playhead_sample(&self) -> Option<usize> {
+        Some(self.playhead)
+    }
+
     fn get_filter_settings(&self) -> Option<&FilterSettings> {
         Some(&self.filter_settings)
     }
@@ -417,6 +489,29 @@ impl DataSource for PlaybackBoard {
             self.filter_dirty = false;
         }
     }
+}
+
+fn looks_like_sd(path: &std::path::Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    for line in text.lines().take(32) {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('%') || t.starts_with('#') || t.starts_with("OpenBCI") {
+            continue;
+        }
+        let parts: Vec<&str> = t.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        if parts.len() < 8 {
+            return false;
+        }
+        return parts.iter().take(4).all(|p| {
+            p.chars()
+                .all(|c| c.is_ascii_hexdigit())
+                && p.len() >= 2
+                && p.parse::<f64>().ok().filter(|v| v.fract() != 0.0).is_none()
+        });
+    }
+    false
 }
 
 fn playback_tail(src: &[Vec<f64>], playhead: usize, max_samples: usize) -> Vec<Vec<f64>> {
@@ -575,6 +670,46 @@ mod tests {
         assert!(pb.impedance_is_simulated());
         pb.stop_impedance_test().unwrap();
         assert!(!pb.impedance_test_active());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn odf_markers_roundtrip_within_one_sample() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("openbci_playback_test_marks.txt");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "OpenBCI Data Format (Rust port)").unwrap();
+        writeln!(f, "Sample Rate: 250 Hz, Channels: 2").unwrap();
+        writeln!(f, "ch0,ch1").unwrap();
+        for i in 0..20 {
+            writeln!(f, "{},{}", i, i).unwrap();
+            if i == 9 {
+                writeln!(f, "% MARKER,10,0.040000,blink").unwrap();
+            }
+        }
+        drop(f);
+        let pb = PlaybackBoard::from_file(&path).unwrap();
+        assert_eq!(pb.session_markers().len(), 1);
+        assert_eq!(pb.session_markers()[0].sample_index, 10);
+        assert_eq!(pb.session_markers()[0].label, "blink");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sd_hex_plays_as_playback() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("openbci_playback_test_sd.txt");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            "00,000001,000002,000003,000004,000005,000006,000007,000008,0000,0000,0000"
+        )
+        .unwrap();
+        drop(f);
+        let pb = PlaybackBoard::from_file(&path).unwrap();
+        assert_eq!(pb.exg_channels().len(), 8);
+        assert_eq!(pb.parsed_rows().len(), 1);
+        assert!(pb.parsed_rows()[0][0] > 0.0);
         let _ = std::fs::remove_file(path);
     }
 }

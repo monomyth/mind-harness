@@ -89,7 +89,7 @@ impl Widget for WBandPower {
             .copied()
             .unwrap_or(0.75) as f64;
         for (s, &r) in self.smoothed_powers.iter_mut().zip(raw.iter()) {
-            *s = *s * factor as f64 + r * (1.0 - factor as f64);
+            *s = *s * factor + r * (1.0 - factor);
         }
     }
 

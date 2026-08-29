@@ -4,28 +4,36 @@
 //! that made the original Java GUI so powerful.
 
 pub mod accelerometer;
+pub mod analog;
 pub mod band_power;
+pub mod digital;
 pub mod emg;
 pub mod emg_joystick;
 pub mod fft;
 pub mod focus;
+pub mod hardware_settings;
 pub mod head_plot;
 pub mod impedance;
 pub mod marker;
 pub mod networking;
+pub mod pulse;
 pub mod spectrogram;
 pub mod time_series;
 
 pub use accelerometer::WAccelerometer;
+pub use analog::WAnalogRead;
 pub use band_power::WBandPower;
+pub use digital::WDigitalRead;
 pub use emg::WEmg;
 pub use emg_joystick::WEmgJoystick;
 pub use fft::WFFT;
 pub use focus::WFocus;
+pub use hardware_settings::WHardwareSettings;
 pub use head_plot::WHeadPlot;
 pub use impedance::WImpedance;
 pub use marker::WMarker;
 pub use networking::WNetworking;
+pub use pulse::WPulseSensor;
 pub use spectrogram::WSpectrogram;
 pub use time_series::WTimeSeries;
 
@@ -53,19 +61,6 @@ pub fn axis_tick_label(value: f64) -> String {
         format!("{:.1}", value)
     } else {
         format!("{:.2}", value)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::axis_tick_label;
-
-    #[test]
-    fn large_db_steps_still_format() {
-        assert_eq!(axis_tick_label(-80.0), "-80");
-        assert_eq!(axis_tick_label(-20.0), "-20");
-        assert_eq!(axis_tick_label(0.0), "0");
-        assert_eq!(axis_tick_label(60.0), "60");
     }
 }
 
@@ -104,4 +99,17 @@ pub trait Widget {
     fn as_any(&self) -> &dyn std::any::Any;
     #[allow(dead_code)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::axis_tick_label;
+
+    #[test]
+    fn large_db_steps_still_format() {
+        assert_eq!(axis_tick_label(-80.0), "-80");
+        assert_eq!(axis_tick_label(-20.0), "-20");
+        assert_eq!(axis_tick_label(0.0), "0");
+        assert_eq!(axis_tick_label(60.0), "60");
+    }
 }

@@ -67,7 +67,7 @@ impl Widget for WMarker {
     fn show(
         &mut self,
         ui: &mut egui::Ui,
-        _source: &dyn DataSource,
+        source: &dyn DataSource,
         ctx: &mut crate::widget_context::WidgetContext,
     ) {
         ui.horizontal(|ui| {
@@ -94,6 +94,15 @@ impl Widget for WMarker {
             }
         } else {
             ui.small("No markers sent yet. Use this widget to mark events during recording.");
+        }
+
+        let file_marks = source.session_markers();
+        if !file_marks.is_empty() {
+            ui.separator();
+            ui.small("Recording / playback marks (sample index):");
+            for m in file_marks.iter().rev().take(8) {
+                ui.small(format!("#{}  {:.3}s  {}", m.sample_index, m.board_timestamp, m.label));
+            }
         }
     }
 

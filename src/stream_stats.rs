@@ -62,7 +62,7 @@ impl SampleIndexTracker {
 
     /// Cyton + Daisy serial: even indices 0,2,…,254.
     pub fn daisy_even_0_254() -> Self {
-        Self::from_sequence((0..=254).step_by(2).map(|i| i as i32).collect())
+        Self::from_sequence((0..=254).step_by(2).collect())
     }
 
     fn from_sequence(sequence: Vec<i32>) -> Self {
@@ -85,6 +85,7 @@ impl SampleIndexTracker {
         lost
     }
 
+    #[allow(dead_code)]
     pub fn take_window(&mut self) -> (u64, u64) {
         let out = (self.window_received, self.window_lost);
         self.window_received = 0;

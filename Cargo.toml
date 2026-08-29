@@ -10,6 +10,9 @@ repository = "https://github.com/OpenBCI/OpenBCI_GUI"
 [features]
 default = []
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(has_liblsl)'] }
+
 [dependencies]
 # GUI framework - egui + eframe with wgpu/Metal backend for excellent Apple Silicon performance
 # 0.32 uses winit 0.30.12+ which does not panic on macOS 26 NSScreen enumeration.
@@ -58,10 +61,8 @@ serialport = "4"
 # Native file dialogs for Playback file picker (and future "Save Image", "Load Session")
 rfd = "0.14"
 
-# Networking output (matches the original GUI's Networking widget)
-# LSL temporarily disabled due to build issues on some macOS setups.
-# Will re-enable with a more robust binding later.
-# lsl = "0.1"
+# LSL: linked via build.rs → Homebrew lsl.framework (`cfg(has_liblsl)`),
+# not the crates.io `lsl` crate (that crate wants -llsl; brew ships a framework).
 
 # OSC for Max/MSP, SuperCollider, etc.
 rosc = "0.10"

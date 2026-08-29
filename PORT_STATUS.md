@@ -1,7 +1,7 @@
 # OpenBCI GUI Rust Port — Feature Parity & Status
 
-**Date**: 2026-08-28 (v0.3.0 — live ADS1299 impedance path; not hardware-verified this run)  
-**Current State**: The May 2026 Phase 8 tree is the base. This pass fixed launch and data-path bugs that would have produced wrong recordings / silent hardware lies, then aligned chrome and default layout with the Java GUI.
+**Date**: 2026-08-28 (v0.3.0 — GROK_PLAN items 1–10 coded; hardware claims only where verified)  
+**Current State**: The May 2026 Phase 8 tree is the base. This pass fixed launch and data-path bugs that would have produced wrong recordings / silent hardware lies, then aligned chrome and default layout with the Java GUI. v0.3.0 adds the top-10 Cyton daily-driver gaps (impedance path, hardware settings, sample-accurate marks, BDF playback, LSL, feature export, aux widgets, BLE picker, WiFi config, SD hex).
 
 **Launch notes (macOS 26)**: eframe 0.28 crashed in `NSScreen` enumeration (`q` vs `Q`). The GUI now uses **eframe/egui 0.32 + egui_plot 0.33** (winit 0.30.12+). `build.rs` embeds an rpath to BrainFlow's `lib/` so `target/debug/openbci_gui` loads `libBoardController.dylib`.
 
@@ -18,12 +18,12 @@ This document tracks parity with the canonical Java/Processing implementation (`
 | Band Power                     | ✅ Production        | WBandPower (authoritative exg_channels) |
 | Accelerometer                  | ✅ Production        | WAccelerometer |
 | Head Plot (topographic)        | ✅ **New**           | WHeadPlot — 2D head + electrodes, power-colored, in Tools panel |
-| Marker (send + BDF + Net)      | ✅ Production        | WMarker + WidgetContext |
-| Networking (UDP/OSC/LSL stub)  | ✅ Production        | Configurable, Phase 4 quality |
+| Marker (send + BDF + Net)      | ✅ Production        | Sample index + board time in ODF `% MARKER,idx,t,label`, sidecar `.markers.jsonl`, BDF+ TAL. Playback draws marks. UDP/OSC/LSL still get the mark. Verified on Synthetic ODF/BDF roundtrip (within 1 sample). |
+| Networking (UDP/OSC/LSL)       | ⚠️ LSL linked here   | UDP/OSC as before. LSL uses Homebrew `lsl.framework` (`obci_eeg1` / EEG + `obci_markers` / Markers). Unit test creates an outlet and pulls 1 Synthetic-style sample. **LabRecorder on a live session: not run this pass.** If liblsl is missing at build, the checkbox stays disabled. |
 | Focus (ML + proxy + audio)     | ✅ Production        | Phase 6 — real BrainFlow MLModel, lock-free cpal, threshold, Test Tone |
 | **EventLog + Console**         | ✅ **Phase 7**       | Filterable, searchable, live, Save with rfd, 8 categories, mini-preview in status |
 | **Playback roundtrip**         | ✅ **Phase 7**       | Parser for Rust ODF .txt (and Java), rfd picker, "record → End → pick exact file" flow, logs to Console, widgets receive data intent |
-| Recording (BDF + ODF)          | ✅ Production        | DataLogger + BDF writer + annotations for markers |
+| Recording (BDF + ODF)          | ✅ Production        | DataLogger + BDF writer with TAL + ODF comments + sidecar |
 | Impedance (Cyton ADS1299)      | ⚠️ Code complete     | Java lead-off: `x…Xz…Z` one channel at a time, kΩ = `(√2·std_µV·1e-6)/6nA − 2.2kΩ`. Ganglion: BrainFlow `z`/`Z` + `resistance_channels`/2. Synthetic/Playback still labelled simulated. **Not verified on a live Cyton this run** — do not treat as production until a lead-lift changes kΩ on hardware. |
 | Filtering (Notch + BP)         | ✅ Production        | Notch: None / 50 / 60 / 50+60 (Java labels); BP 1–50 Hz; live + Playback |
 | EMG                            | ✅ Production        | WEmg — envelope circles + 0–1 bar, Java EmgSettingsValues |
@@ -43,7 +43,13 @@ This document tracks parity with the canonical Java/Processing implementation (`
 - **Reconnection**: ✅ **Phase 7** — Prominent red Failed banner + 🔄 Reconnect button that restores last source/port/channels/playback file. 1-click full reconnect for Synthetic & Playback (the magic roundtrip). For real Cyton it restores the exact dropdowns so the normal Start button succeeds on the second try. Survives End Session.
 - **WPacketLoss**: ✅ Visual sparkline + Reset in SidePanel (Phase 7).
 - **Fonts**: ✅ Embedded Montserrat + OpenSans (professional look matching Java GUI).
-- **SD Card**: Honest stub ("Not yet implemented — use BDF/ODF instead") + docs.
+- **Hardware Settings**: Cyton/Synthetic ADS1299 `x…X` (power/gain/input/bias/SRB2). Persisted in Phase 8 JSON. Synthetic zeros powered-off EXG (ch8 off test). Live Cyton `config_board` **not hardware-verified this run**.
+- **BDF playback**: `PlaybackBoard` reads the BDF this app writes (24-bit, 1 s records, TAL marks).
+- **Feature export**: `Export features` writes `*.features.csv` + `*.features.jsonl` (`t0,t1,ch,delta,theta,alpha,beta,gamma,marker,artifact`). No model training.
+- **Analog / Digital / Pulse**: Cyton-only; Synthetic shows “no aux”. `/2` analog `/3` digital. **Not verified on live D11/D12 this run.**
+- **Ganglion BLE scan**: `system_profiler SPBluetoothDataType` picker; empty = “none found”; empty MAC still fail-closed.
+- **Cyton WiFi**: Control panel IP + `CYTON_WIFI_BOARD` / Daisy WiFi, port 6677. Config unit-tested. **Unverified on hardware.**
+- **SD Card**: Java hex layout (24-bit counts → µV). Wrong file = readable error. Verified with a synthetic hex fixture.
 - **TopNav / Status icons**: Improved with Console button, REC, Net, Loss %, Last Marker, event count, Reconnect affordance.
 - **Phase 8 + Post-Phase 8 wave polish**:
   - Persistence of last-used settings (Phase 8)
@@ -85,13 +91,10 @@ Last-used settings are persisted across app restarts for delightful QOL:
 
 ## Remaining High-Value Items
 
-- **Ganglion Native BLE** now talks to BrainFlow with a MAC/name field (no Synthetic fallback). There is still no BLE scanner UI.
 - **Impedance on live Cyton/Ganglion**: Start/Stop no longer send the bogus `startimp`/`stopimp`. Cyton uses the Java ADS1299 lead-off command set and std→kΩ formula; Ganglion uses `z`/`Z` and resistance columns. Live boards fail closed (`None`, no simulated banner, no fake green contacts). Synthetic/Playback remain labelled simulated. **Hardware verification: not done this run** (no live Cyton session showed kΩ changing on a lifted lead).
-- **LSL output** remains disabled (macOS bind issues). UDP/OSC validate `host:port` and no longer show green when bind fails.
-- **SD Card reader** still not implemented (Record → Playback is the workflow).
-- **Java widgets not in this port**: Pulse Sensor, Analog Read, Digital Read, Playback History widget, Widget Template. Spectrogram, EMG, and EMG Joystick are in the layout customizer.
+- **Live Cyton Hardware Settings / analog pins / WiFi shield**: coded to Java command/config shapes; **not claimed production** until a board session shows it.
 - **Layouts 7–12** (five- and six-pane Java maps) and drag-reorder are still future work. Layouts **1–6 match Java geometry**; default is Java layout 5 (tall left + two right).
-- Cyton WiFi / BrainFlow streaming-board / Ganglion BLED112 not in the control panel.
+- Ganglion BLED112 dongle path is still not a separate control-panel source (Native BLE + scanner only).
 
 The Rust port is a usable daily driver for Synthetic, Cyton serial, Playback, recording, filters, and the core viz widgets. It is **not** a complete 1:1 of every Java widget.
 

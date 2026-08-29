@@ -20,6 +20,7 @@ const LOG_YMIN: f64 = -1.0; // log10(0.1)
 /// Java DataProcessing FFT smooth floor.
 const SMOOTH_MIN_UV: f64 = 0.01;
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct WFFT {
     title: String,
     max_freq: f64,

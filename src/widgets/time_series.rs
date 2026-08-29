@@ -106,6 +106,46 @@ fn uv_std_last_second(ys: &[f64], sample_rate: f32) -> f64 {
     }
 }
 
+fn paint_markers(
+    ui: &egui::Ui,
+    rect: Rect,
+    source: &dyn DataSource,
+    sample_rate: f32,
+    window_sec: f32,
+    n_samples: usize,
+) {
+    let marks = source.session_markers();
+    if marks.is_empty() || n_samples == 0 {
+        return;
+    }
+    let playhead = source
+        .playhead_sample()
+        .unwrap_or_else(|| n_samples.saturating_sub(1));
+    let painter = ui.painter_at(rect);
+    let window_n = n_samples;
+    for m in marks {
+        let idx = m.sample_index as i64;
+        let start = playhead as i64 - window_n as i64 + 1;
+        if idx < start || idx > playhead as i64 {
+            continue;
+        }
+        let k = (idx - start) as usize;
+        let t = sample_time(k, n_samples, sample_rate);
+        let x = time_to_x(t, window_sec, rect.left(), rect.width());
+        painter.line_segment(
+            [pos2(x, rect.top()), pos2(x, rect.bottom())],
+            Stroke::new(1.0_f32, Color32::from_rgb(220, 80, 80)),
+        );
+        painter.text(
+            pos2(x + 2.0, rect.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+            &m.label,
+            egui::FontId::proportional(9.0),
+            Color32::from_rgb(180, 40, 40),
+        );
+    }
+}
+
 fn sample_at(row: &[f64], board_ch: usize) -> f64 {
     row.get(board_ch).copied().unwrap_or(0.0)
 }
@@ -160,6 +200,7 @@ fn auto_y_scale(ys: &[f64]) -> f64 {
 }
 
 /// Java GPlot: chronological polyline, Y clipped to ±vertScale.
+#[allow(clippy::too_many_arguments)]
 fn paint_channel_trace(
     ui: &egui::Ui,
     rect: Rect,
@@ -322,15 +363,24 @@ impl Widget for WTimeSeries {
             .max(1);
         let row_h = (available_height / visible_count as f32).max(28.0);
         let last_visible = (0..num_channels)
-            .filter(|&i| self.visible_channels.get(i).copied().unwrap_or(false))
-            .next_back();
+            .rev()
+            .find(|&i| self.visible_channels.get(i).copied().unwrap_or(false));
 
         for (i, &channel_idx) in exg_channels.iter().enumerate().take(num_channels) {
             if !self.visible_channels[i] {
                 continue;
             }
 
-            let color = theme::channel_color(i);
+            let powered = source
+                .channel_powered()
+                .get(i)
+                .copied()
+                .unwrap_or(true);
+            let color = if powered {
+                theme::channel_color(i)
+            } else {
+                Color32::from_gray(120)
+            };
             let ys = channel_samples(&data, channel_idx);
             let scale = self.scale_for_trace(i, &ys);
             let eff_scale = scale as f32;
@@ -351,8 +401,12 @@ impl Widget for WTimeSeries {
                     painter.text(
                         center,
                         egui::Align2::CENTER_CENTER,
-                        format!("{}", i + 1),
-                        egui::FontId::proportional(12.0),
+                        if powered {
+                            format!("{}", i + 1)
+                        } else {
+                            "off".into()
+                        },
+                        egui::FontId::proportional(if powered { 12.0 } else { 9.0 }),
                         theme::WHITE,
                     );
                     if circ_resp.clicked() {
@@ -378,6 +432,16 @@ impl Widget for WTimeSeries {
                         color,
                         last_visible == Some(i),
                     );
+                    if last_visible == Some(i) {
+                        paint_markers(
+                            ui,
+                            plot_rect,
+                            source,
+                            sample_rate,
+                            self.time_window_sec,
+                            ys.len(),
+                        );
+                    }
 
                     ui.scope_builder(egui::UiBuilder::new().max_rect(plot_rect), |ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
@@ -446,7 +510,7 @@ mod tests {
     fn uvrms_uses_last_second_like_java() {
         let sr = 250.0_f32;
         let mut ys = vec![10.0; 250];
-        ys.extend(std::iter::repeat(0.0).take(250));
+        ys.extend(std::iter::repeat_n(0.0, 250));
         let last_sec = super::uv_std_last_second(&ys, sr);
         let whole = super::uv_std(&ys);
         assert!(

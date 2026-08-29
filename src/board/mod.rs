@@ -10,9 +10,12 @@
 //! - Playback file
 //! - LSL stream in (future)
 
+pub mod ads_settings;
+pub mod ble_scan;
 pub mod brainflow_board;
 pub mod impedance;
 pub mod playback;
+pub mod sd_card;
 pub mod synthetic;
 
 /// The core contract that every data source (real board or synthetic) must implement.
@@ -154,6 +157,53 @@ pub trait DataSource: Send + Sync {
 
     /// Drain a mid-scan `config_board` failure so the app can log it.
     fn take_impedance_error(&mut self) -> Option<String> {
+        None
+    }
+
+    /// ADS1299 per-channel settings (Cyton / Synthetic). None on Ganglion / Playback.
+    fn ads_channels(&self) -> Option<&[ads_settings::AdsChannel]> {
+        None
+    }
+
+    fn commit_ads_channel(
+        &mut self,
+        _channel: usize,
+        _settings: ads_settings::AdsChannel,
+    ) -> Result<(), BoardError> {
+        Err(BoardError::Io("hardware settings not supported".into()))
+    }
+
+    fn channel_powered(&self) -> Vec<bool> {
+        vec![true; self.exg_channels().len()]
+    }
+
+    fn analog_channels(&self) -> &[usize] {
+        &[]
+    }
+
+    fn digital_channels(&self) -> &[usize] {
+        &[]
+    }
+
+    /// Cyton `/0` default, `/2` analog, `/3` digital.
+    fn cyton_board_mode(&self) -> Option<u8> {
+        None
+    }
+
+    fn set_cyton_board_mode(&mut self, _mode: u8) -> Result<(), BoardError> {
+        Err(BoardError::Io("board mode not supported".into()))
+    }
+
+    /// Analog / Digital / Pulse widgets. False on Synthetic (no fake pulse).
+    fn supports_aux_widgets(&self) -> bool {
+        false
+    }
+
+    fn session_markers(&self) -> &[crate::markers::MarkerEvent] {
+        &[]
+    }
+
+    fn playhead_sample(&self) -> Option<usize> {
         None
     }
 }

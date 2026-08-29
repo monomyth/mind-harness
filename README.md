@@ -72,6 +72,31 @@ For DMG: `create-dmg` or `hdiutil` scripts can be added later in `scripts/`. Win
 
 See `PORT_STATUS.md` for the detailed feature parity table and the magical Playback roundtrip test procedure.
 
+## Labeled feature export (decoder prep)
+
+After a marked recording (or while a Playback file is selected), **Export features** writes two files next to the recording:
+
+- `{stem}.features.csv`
+- `{stem}.features.jsonl`
+
+Schema (one row per 1.0 s window × 0.5 s hop × channel):
+
+| column | meaning |
+|--------|---------|
+| `t0`, `t1` | window start/end in seconds on the recording clock |
+| `ch` | EXG channel index (0-based) |
+| `delta` `theta` `alpha` `beta` `gamma` | Java band PSD (µV)²/Hz, same bands as Band Power |
+| `marker` | operator-typed labels whose sample index falls in `[t0, t1)` (`\|`-joined if several). Empty if none. Never an inferred “intention” class. |
+| `artifact` | `1` if that channel’s window population std > 100 µV |
+
+No model is trained in this repo. A later decoder can read the CSV/JSONL.
+
+Markers in the recording itself are sample-accurate: ODF line `% MARKER,<sample_index>,<board_timestamp>,<label>`, sidecar `{stem}.markers.jsonl`, and BDF+ TAL on the Annotations signal.
+
+## LSL (macOS)
+
+Build links Homebrew `lsl.framework` (`brew install labstreaminglayer/tap/lsl`) when it is present and sets `has_liblsl`. Streams match Java defaults: `obci_eeg1` type `EEG` at the board rate, plus `obci_markers` type `Markers`. If the framework is missing at compile time the Networking LSL checkbox stays disabled (never green).
+
 ## Reference
 
 The canonical behavior and file formats (BDF header layout, ODF columns, LSL stream names, etc.) are defined in the original Java implementation:

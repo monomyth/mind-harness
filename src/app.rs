@@ -12,9 +12,11 @@ use crate::networking::{NetworkingManager, Protocol};
 use crate::theme;
 use crate::widget_context::WidgetContext;
 use crate::widget_manager::WidgetManager;
+use crate::board::ads_settings::{default_bank, AdsChannel};
 use crate::widgets::{
-    WAccelerometer, WBandPower, WEmg, WEmgJoystick, WFocus, WHeadPlot, WImpedance, WMarker,
-    WNetworking, WSpectrogram, WTimeSeries, Widget, WFFT,
+    WAccelerometer, WAnalogRead, WBandPower, WDigitalRead, WEmg, WEmgJoystick, WFocus,
+    WHardwareSettings, WHeadPlot, WImpedance, WMarker, WNetworking, WPulseSensor, WSpectrogram,
+    WTimeSeries, Widget, WFFT,
 };
 use directories::ProjectDirs;
 use eframe::egui;
@@ -68,6 +70,18 @@ struct PersistedSettings {
     udp_target: String,
     osc_enabled: bool,
     osc_target: String,
+    #[serde(default)]
+    lsl_enabled: bool,
+    #[serde(default)]
+    lsl_target: String,
+    #[serde(default)]
+    ads_channels: Vec<AdsChannel>,
+    #[serde(default)]
+    cyton_wifi_ip: String,
+    #[serde(default)]
+    ganglion_device_id: String,
+    #[serde(default)]
+    sd_file: Option<String>,
 
     // Post-Phase 8 polish: Graph speed & stability controls (Time Window + Smoothing wave)
     // + per-channel y-scale overrides for the classic ChannelBar +/- experience
@@ -101,6 +115,12 @@ impl Default for PersistedSettings {
             udp_target: "127.0.0.1:12345".to_string(),
             osc_enabled: false,
             osc_target: "127.0.0.1:9000".to_string(),
+            lsl_enabled: false,
+            lsl_target: crate::networking::lsl_stream::DEFAULT_EEG_NAME.to_string(),
+            ads_channels: vec![],
+            cyton_wifi_ip: String::new(),
+            ganglion_device_id: String::new(),
+            sd_file: None,
 
             // Defaults chosen to match previous hard-coded behavior + good UX
             ts_time_window_sec: 5.0,
@@ -185,6 +205,8 @@ pub struct OpenBciGuiApp {
     persisted_fft_smoothing_index: usize,
     persisted_bp_smoothing_index: usize,
     persisted_ts_per_channel_y_scales: Vec<f32>,
+    persisted_ads_channels: Vec<AdsChannel>,
+    last_recording_path: Option<std::path::PathBuf>,
 }
 
 impl OpenBciGuiApp {
@@ -289,6 +311,8 @@ impl OpenBciGuiApp {
             persisted_fft_smoothing_index: 2,
             persisted_bp_smoothing_index: 2,
             persisted_ts_per_channel_y_scales: vec![0.0; 16],
+            persisted_ads_channels: vec![],
+            last_recording_path: None,
         };
 
         // === Phase 8: Load persisted settings (silent on any error / missing file) ===
@@ -297,6 +321,10 @@ impl OpenBciGuiApp {
         app.control_panel.synthetic_channels = persisted.synthetic_channels;
         app.control_panel.cyton_channels = persisted.cyton_channels;
         app.control_panel.playback_file = persisted.playback_file.clone();
+        app.control_panel.cyton_wifi_ip = persisted.cyton_wifi_ip.clone();
+        app.control_panel.ganglion_device_id = persisted.ganglion_device_id.clone();
+        app.control_panel.sd_file = persisted.sd_file.clone();
+        app.persisted_ads_channels = persisted.ads_channels.clone();
         if let Some(ref name) = persisted.last_serial_port {
             if let Some(idx) = app
                 .control_panel
@@ -336,7 +364,12 @@ impl OpenBciGuiApp {
                         cfg.target = persisted.osc_target.clone();
                     }
                 }
-                _ => {}
+                Protocol::LSL => {
+                    cfg.enabled = persisted.lsl_enabled && crate::networking::NetworkingManager::lsl_available();
+                    if !persisted.lsl_target.is_empty() {
+                        cfg.target = persisted.lsl_target.clone();
+                    }
+                }
             }
         }
         // Phase 8: ensure persisted enabled networking targets have live senders ready for the upcoming session
@@ -390,6 +423,10 @@ impl OpenBciGuiApp {
                 "Spectrogram" => Box::new(WSpectrogram::new()),
                 "EMG" => Box::new(WEmg::new()),
                 "EMG Joystick" => Box::new(WEmgJoystick::new()),
+                "Analog Read" => Box::new(WAnalogRead::new()),
+                "Digital Read" => Box::new(WDigitalRead::new()),
+                "Pulse Sensor" => Box::new(WPulseSensor::new()),
+                "Hardware Settings" => Box::new(WHardwareSettings::new()),
                 _ => Box::new(WTimeSeries::new()),
             };
             wm.add_widget(widget);
@@ -443,6 +480,10 @@ impl OpenBciGuiApp {
         self.tool_widgets.push(Box::new(WFocus::new()));
         self.tool_widgets.push(Box::new(WHeadPlot::new()));
         self.tool_widgets.push(Box::new(WImpedance::new()));
+        self.tool_widgets.push(Box::new(WHardwareSettings::new()));
+        self.tool_widgets.push(Box::new(WAnalogRead::new()));
+        self.tool_widgets.push(Box::new(WDigitalRead::new()));
+        self.tool_widgets.push(Box::new(WPulseSensor::new()));
         // NOTE: WPacketLoss is rendered inline in the SidePanel (sparkline + Reset + % ) — see the
         // "Phase 7 WPacketLoss visual" block near the tool loop. This keeps the visual right next
         // to the tools the user is looking at during an experiment; no separate widget object needed.
@@ -453,6 +494,9 @@ impl OpenBciGuiApp {
     fn end_session(&mut self) {
         // Snapshot live filter + widget state *before* dropping the board / resetting widgets.
         if let Some(ref b) = self.board {
+            if let Some(ads) = b.ads_channels() {
+                self.persisted_ads_channels = ads.to_vec();
+            }
             if let Some(settings) = b.get_filter_settings() {
                 if let Some(ch) = settings.channels.first() {
                     self.last_persisted_notch_mode = NotchMode::from_channel(ch);
@@ -509,7 +553,7 @@ impl OpenBciGuiApp {
 
         let channels = match cp.selected_source {
             DataSourceType::Synthetic => cp.synthetic_channels,
-            DataSourceType::CytonSerial => cp.cyton_channels,
+            DataSourceType::CytonSerial | DataSourceType::CytonWifi => cp.cyton_channels,
             DataSourceType::GanglionNative => 4,
             _ => 8,
         };
@@ -586,6 +630,8 @@ impl OpenBciGuiApp {
         let mut udp_target = "127.0.0.1:12345".to_string();
         let mut osc_enabled = false;
         let mut osc_target = "127.0.0.1:9000".to_string();
+        let mut lsl_enabled = false;
+        let mut lsl_target = crate::networking::lsl_stream::DEFAULT_EEG_NAME.to_string();
         for c in &self.networking.configs {
             match c.protocol {
                 Protocol::UDP => {
@@ -600,9 +646,19 @@ impl OpenBciGuiApp {
                         osc_target = c.target.clone();
                     }
                 }
-                _ => {}
+                Protocol::LSL => {
+                    lsl_enabled = c.enabled;
+                    if !c.target.is_empty() {
+                        lsl_target = c.target.clone();
+                    }
+                }
             }
         }
+        let ads_channels = self
+            .board
+            .as_ref()
+            .and_then(|b| b.ads_channels().map(|s| s.to_vec()))
+            .unwrap_or_else(|| self.persisted_ads_channels.clone());
 
         // Snapshot current graph speed/stability settings from live widgets (Post-Phase 8 wave)
         let (ts_tw, ts_ys) = self
@@ -654,6 +710,12 @@ impl OpenBciGuiApp {
             udp_target,
             osc_enabled,
             osc_target,
+            lsl_enabled,
+            lsl_target,
+            ads_channels,
+            cyton_wifi_ip: cp.cyton_wifi_ip.clone(),
+            ganglion_device_id: cp.ganglion_device_id.clone(),
+            sd_file: cp.sd_file.clone(),
 
             ts_time_window_sec: ts_tw,
             ts_y_scale_uv: ts_ys,
@@ -707,6 +769,41 @@ impl OpenBciGuiApp {
                 board.set_bandpass_filter(ch, self.last_persisted_filter_bandpass, 1.0, 50.0);
             }
             board.apply_pending_filters();
+        }
+        self.apply_persisted_ads_to_current_board();
+        if let Some(ref b) = self.board {
+            self.networking
+                .set_lsl_geometry(b.exg_channels().len(), b.sample_rate() as f64);
+        }
+    }
+
+    fn apply_persisted_ads_to_current_board(&mut self) {
+        if self.persisted_ads_channels.is_empty() {
+            return;
+        }
+        let n = self
+            .board
+            .as_ref()
+            .and_then(|b| b.ads_channels().map(|s| s.len()))
+            .unwrap_or(0);
+        if n == 0 {
+            return;
+        }
+        let bank: Vec<AdsChannel> = self
+            .persisted_ads_channels
+            .iter()
+            .cloned()
+            .chain(default_bank(n))
+            .take(n)
+            .collect();
+        if let Some(ref mut board) = self.board {
+            for (i, s) in bank.into_iter().enumerate() {
+                if s != AdsChannel::default() {
+                    if let Err(e) = board.commit_ads_channel(i, s) {
+                        tracing::warn!("ADS commit ch{} failed: {e}", i + 1);
+                    }
+                }
+            }
         }
     }
 }
@@ -868,6 +965,29 @@ impl eframe::App for OpenBciGuiApp {
                             };
                             // Stay in PreInit visually until the connection finishes
                         }
+                        DataSourceType::CytonWifi => {
+                            let ip = serial_port.clone().unwrap_or_default();
+                            if ip.trim().is_empty() {
+                                self.control_panel.show = true;
+                                self.control_panel.last_setup_error =
+                                    Some("Enter the WiFi shield IP address.".into());
+                                return;
+                            }
+                            let daisy = chans >= 16;
+                            let ip_for_thread = ip.clone();
+                            let (tx, rx) = oneshot::channel();
+                            std::thread::spawn(move || {
+                                let mut board =
+                                    BrainFlowBoard::cyton_wifi(&ip_for_thread, daisy);
+                                let result =
+                                    board.initialize().map(|_| board).map_err(|e| e.to_string());
+                                let _ = tx.send(result);
+                            });
+                            self.connection_state = ConnectionState::InProgress {
+                                receiver: rx,
+                                status_message: format!("Connecting to Cyton WiFi {}...", ip),
+                            };
+                        }
                         DataSourceType::GanglionNative => {
                             let id = serial_port.clone().unwrap_or_default();
                             if id.trim().is_empty() {
@@ -933,12 +1053,36 @@ impl eframe::App for OpenBciGuiApp {
                             }
                         }
                         DataSourceType::SDCard => {
-                            // Phase 7 stub (plan.md Phase 7 step 7)
-                            self.connection_status = "SD Card: Not implemented (use Playback instead)".to_string();
-                            self.event_log.log_system("SD Card selected — stub shown. Recommend Record + Playback workflow.");
-                            // Do not start session; user sees message in control panel (remains visible)
-                            self.control_panel.show = true;
-                            return;
+                            let file_path = serial_port.clone().unwrap_or_default();
+                            if file_path.is_empty() {
+                                self.control_panel.show = true;
+                                self.control_panel.last_setup_error =
+                                    Some("Choose a Cyton SD hex file first.".into());
+                                return;
+                            }
+                            match crate::board::playback::PlaybackBoard::from_sd(std::path::Path::new(&file_path))
+                            {
+                                Ok(mut pb) => {
+                                    let _ = pb.initialize();
+                                    if pb.start_streaming().is_ok() {
+                                        self.streaming = true;
+                                    }
+                                    self.board = Some(Box::new(pb) as Box<dyn DataSource>);
+                                    self.connection_status = format!("SD playback: {}", file_path);
+                                    self.event_log.log_connection(&format!("SD card playback {file_path}"));
+                                    self.save_last_connection();
+                                    self.populate_widgets_for_new_session();
+                                    self.populate_tool_widgets();
+                                    self.apply_persisted_filters_to_current_board();
+                                    self.save_current_persisted_settings();
+                                    self.system_mode = SystemMode::PostInit;
+                                }
+                                Err(e) => {
+                                    self.control_panel.show = true;
+                                    self.control_panel.last_setup_error = Some(format!("{e}"));
+                                    self.event_log.log_error(&format!("SD file: {e}"));
+                                }
+                            }
                         }
                     }
                 }
@@ -967,9 +1111,13 @@ impl eframe::App for OpenBciGuiApp {
                                 if let Some(ref params) = last_params {
                                     let label = match params.source {
                                         DataSourceType::CytonSerial => format!("Cyton{} on {}", if params.channels >= 16 { " + Daisy" } else { "" }, params.serial_port_name.as_deref().unwrap_or("selected port")),
+                                        DataSourceType::CytonWifi => format!("Cyton WiFi {}", self.control_panel.cyton_wifi_ip),
                                         DataSourceType::Synthetic => format!("Synthetic ({} ch)", params.channels),
                                         DataSourceType::Playback => "the same Playback file".to_string(),
-                                        _ => "last settings".to_string(),
+                                        DataSourceType::SDCard => "the same SD file".to_string(),
+                                        DataSourceType::GanglionNative => {
+                                            format!("Ganglion {}", self.control_panel.ganglion_device_id)
+                                        }
                                     };
                                     if ui.button(egui::RichText::new(format!("🔄 Reconnect using {}", label)).strong()).clicked() {
                                         // Restore exact previous choices into the visible control panel
@@ -981,7 +1129,7 @@ impl eframe::App for OpenBciGuiApp {
                                         }
                                         match params.source {
                                             DataSourceType::Synthetic => self.control_panel.synthetic_channels = params.channels,
-                                            DataSourceType::CytonSerial => self.control_panel.cyton_channels = params.channels,
+                                            DataSourceType::CytonSerial | DataSourceType::CytonWifi => self.control_panel.cyton_channels = params.channels,
                                             _ => {}
                                         }
                                         self.control_panel.playback_file = params.playback_file.clone();
@@ -1118,6 +1266,7 @@ impl eframe::App for OpenBciGuiApp {
         // Phase 7 hybrid + Issue 3 fix: tool widgets (HeadPlot, Impedance, Focus, Marker, Networking)
         // must keep receiving data and servicing actions *even when streaming is paused*.
         // The heavy acquisition / packet-loss / recording / networking-push stay inside the streaming guard above.
+        let mut persist_ads = false;
         if let Some(b) = self.board.as_deref_mut() {
             for t in &mut self.tool_widgets {
                 t.update(b);
@@ -1156,7 +1305,53 @@ impl eframe::App for OpenBciGuiApp {
                             .log_error(&format!("Impedance scan aborted: {e}"));
                     }
                 }
+                if let Some(hw) = t.as_any_mut().downcast_mut::<WHardwareSettings>() {
+                    if let Some((ch, settings)) = hw.take_pending() {
+                        match b.commit_ads_channel(ch, settings) {
+                            Ok(()) => {
+                                self.persisted_ads_channels = b
+                                    .ads_channels()
+                                    .map(|s| s.to_vec())
+                                    .unwrap_or_default();
+                                persist_ads = true;
+                                self.event_log.log_system(&format!(
+                                    "Hardware Settings ch{} → {:?}",
+                                    ch + 1,
+                                    settings.power
+                                ));
+                            }
+                            Err(e) => {
+                                self.event_log
+                                    .log_error(&format!("Hardware Settings failed: {e}"));
+                            }
+                        }
+                    }
+                }
+                if let Some(w) = t.as_any_mut().downcast_mut::<WAnalogRead>() {
+                    if let Some(mode) = w.take_pending_mode() {
+                        if let Err(e) = b.set_cyton_board_mode(mode) {
+                            self.event_log.log_error(&format!("Analog mode: {e}"));
+                        }
+                    }
+                }
+                if let Some(w) = t.as_any_mut().downcast_mut::<WDigitalRead>() {
+                    if let Some(mode) = w.take_pending_mode() {
+                        if let Err(e) = b.set_cyton_board_mode(mode) {
+                            self.event_log.log_error(&format!("Digital mode: {e}"));
+                        }
+                    }
+                }
+                if let Some(w) = t.as_any_mut().downcast_mut::<WPulseSensor>() {
+                    if let Some(mode) = w.take_pending_mode() {
+                        if let Err(e) = b.set_cyton_board_mode(mode) {
+                            self.event_log.log_error(&format!("Pulse analog mode: {e}"));
+                        }
+                    }
+                }
             }
+        }
+        if persist_ads {
+            self.save_current_persisted_settings();
         }
 
         // Top bar — Java OpenBCI chrome (dark blue + light-blue subnav height ~64px)
@@ -1455,6 +1650,9 @@ impl eframe::App for OpenBciGuiApp {
                     .clicked()
                 {
                     if self.data_logger.is_logging() {
+                        if let Some(p) = self.data_logger.current_file() {
+                            self.last_recording_path = Some(p.clone());
+                        }
                         self.data_logger.stop();
                         self.connection_status.clear();
                         self.event_log.log_recording("Recording stopped");
@@ -1472,6 +1670,7 @@ impl eframe::App for OpenBciGuiApp {
 
                         match self.data_logger.start(self.recording_format, chans, sr) {
                             Ok(path) => {
+                                self.last_recording_path = Some(path.clone());
                                 self.connection_status = format!("Recording to {}", path.display());
                                 self.event_log.log_recording(&format!(
                                     "Started {} recording → {}",
@@ -1487,6 +1686,54 @@ impl eframe::App for OpenBciGuiApp {
                                 self.event_log
                                     .log_error(&format!("Recording start failed: {}", e));
                             }
+                        }
+                    }
+                }
+                if !self.data_logger.is_logging()
+                    && ui
+                        .button("Export features")
+                        .on_hover_text("Windowed band power + marker + artifact → CSV/JSONL")
+                        .clicked()
+                {
+                    let path = self.last_recording_path.clone().or_else(|| {
+                        self.control_panel
+                            .playback_file
+                            .as_ref()
+                            .map(std::path::PathBuf::from)
+                    });
+                    match path {
+                        Some(p) => match crate::board::playback::PlaybackBoard::from_file(&p) {
+                            Ok(pb) => {
+                                match crate::export::export_next_to(
+                                    &p,
+                                    pb.export_samples(),
+                                    pb.sample_rate(),
+                                    pb.exg_channels().len(),
+                                    pb.session_markers(),
+                                ) {
+                                    Ok((csv, jsonl)) => {
+                                        self.event_log.log_recording(&format!(
+                                            "Feature export → {} / {}",
+                                            csv.display(),
+                                            jsonl.display()
+                                        ));
+                                        self.connection_status =
+                                            format!("Exported {}", csv.display());
+                                    }
+                                    Err(e) => {
+                                        self.event_log.log_error(&format!("Export failed: {e}"));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                self.event_log
+                                    .log_error(&format!("Export: cannot open recording: {e}"));
+                            }
+                        },
+                        None => {
+                            self.event_log.log_error(
+                                "Export features: record a session or pick a Playback file first",
+                            );
                         }
                     }
                 }
@@ -1944,10 +2191,14 @@ impl eframe::App for OpenBciGuiApp {
                         "Spectrogram",
                         "EMG",
                         "EMG Joystick",
+                        "Analog Read",
+                        "Digital Read",
+                        "Pulse Sensor",
+                        "Hardware Settings",
                     ];
 
-                    for i in 0..count {
-                        let mut current = assignment[i].clone();
+                    for (i, slot) in assignment.iter_mut().enumerate() {
+                        let mut current = slot.clone();
                         egui::ComboBox::from_id_salt(format!("layout_slot_{}", i))
                             .selected_text(&current)
                             .show_ui(ui, |ui| {
@@ -1956,7 +2207,7 @@ impl eframe::App for OpenBciGuiApp {
                                         .selectable_value(&mut current, opt.to_string(), opt)
                                         .changed()
                                     {
-                                        assignment[i] = current.clone();
+                                        *slot = current.clone();
                                         self.pending_layout_rebuild = true;
                                         self.event_log.log_system(&format!(
                                             "Layout {} position {} → {}",

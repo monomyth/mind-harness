@@ -3,6 +3,7 @@
 //! Supports both OpenBCI Data Format (text) and BDF+ (binary).
 
 use crate::data_writers::bdf::DataWriterBDF;
+use crate::markers::{self, MarkerEvent};
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -25,6 +26,8 @@ pub struct DataLogger {
     bdf_buffer: Vec<Vec<f64>>,
     samples_per_record: usize,
     sample_rate: i32,
+    samples_logged: u64,
+    markers: Vec<MarkerEvent>,
 }
 
 impl DataLogger {
@@ -39,6 +42,8 @@ impl DataLogger {
             bdf_buffer: vec![],
             samples_per_record: 0,
             sample_rate: 250,
+            samples_logged: 0,
+            markers: Vec::new(),
         }
     }
 
@@ -54,7 +59,14 @@ impl DataLogger {
 
         // Generate timestamped filename so we never overwrite previous recordings
         let now = chrono::Local::now();
-        let timestamp = now.format("%Y-%m-%d_%H-%M-%S").to_string();
+        let timestamp = format!(
+            "{}_{}",
+            now.format("%Y-%m-%d_%H-%M-%S_%3f"),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        );
 
         let (path, _filename) = match format {
             LogFormat::ODF => {
@@ -92,13 +104,13 @@ impl DataLogger {
 
         self.format = format;
         self.rows_written = 0;
+        self.samples_logged = 0;
+        self.markers.clear();
         self.sample_rate = sample_rate;
         self.recording_start = Some(std::time::Instant::now());
 
-        // Write start annotation
-        if let Some(ref mut bdf) = self.bdf_writer {
-            let _ = bdf.write_annotation(0.0, 0.0, "Recording started");
-        }
+        // Experiment markers go to TAL / ODF; do not queue bookkeeping text that
+        // would force an extra empty BDF record on close.
 
         Ok(path)
     }
@@ -115,6 +127,7 @@ impl DataLogger {
                     }
                     let _ = writeln!(w);
                     self.rows_written += 1;
+                    self.samples_logged += 1;
                 }
             }
             LogFormat::BDF => {
@@ -128,6 +141,7 @@ impl DataLogger {
                         self.bdf_buffer[i].push(val);
                     }
                 }
+                self.samples_logged += 1;
 
                 // When we have a full record, write it
                 if !self.bdf_buffer.is_empty()
@@ -154,25 +168,17 @@ impl DataLogger {
     }
 
     pub fn stop(&mut self) {
-        let duration = self
-            .recording_duration()
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
-
         if let Some(mut bdf) = self.bdf_writer.take() {
             // Flush any remaining samples
             if !self.bdf_buffer.is_empty() && !self.bdf_buffer[0].is_empty() {
                 let _ = bdf.write_data_record(&self.bdf_buffer);
             }
-
-            // Write end annotation
-            let _ = bdf.write_annotation(duration, 0.0, "Recording stopped");
-
             let _ = bdf.close();
         }
         self.odf_writer = None;
         self.output_path = None;
         self.rows_written = 0;
+        self.samples_logged = 0;
         self.bdf_buffer.clear();
         self.samples_per_record = 0;
         self.recording_start = None;
@@ -190,20 +196,38 @@ impl DataLogger {
         self.output_path.as_ref()
     }
 
-    /// Write a marker annotation into the current recording (BDF annotation channel
-    /// or ODF comment). Called by WidgetContext when a marker is sent during an
-    /// active recording. This makes markers first-class in both networking and
-    /// saved data — exactly what Phase 4 + real experiments need.
-    pub fn write_marker_annotation(&mut self, onset: f64, text: &str) -> std::io::Result<()> {
-        let desc = format!("Marker: {}", text);
-        if let Some(ref mut bdf) = self.bdf_writer {
-            bdf.write_annotation(onset, 0.0, &desc)
-        } else if let Some(ref mut w) = self.odf_writer {
-            writeln!(w, "% {},{:.6}", desc, onset)?;
-            Ok(())
-        } else {
-            Ok(())
+    #[allow(dead_code)]
+    pub fn samples_logged(&self) -> u64 {
+        self.samples_logged
+    }
+
+    #[allow(dead_code)]
+    pub fn markers(&self) -> &[MarkerEvent] {
+        &self.markers
+    }
+
+    pub fn board_time(&self) -> f64 {
+        self.samples_logged as f64 / (self.sample_rate.max(1) as f64)
+    }
+
+    /// Sample-accurate mark: index = samples already written, time = index / fs.
+    pub fn write_marker_annotation(&mut self, _onset_unix: f64, text: &str) -> std::io::Result<()> {
+        if text.trim().is_empty() {
+            return Ok(());
         }
+        let sample_index = self.samples_logged;
+        let board_timestamp = self.board_time();
+        let event = MarkerEvent::new(sample_index, board_timestamp, text.trim());
+        if let Some(path) = self.output_path.clone() {
+            let _ = markers::append_sidecar(&path, &event);
+        }
+        if let Some(ref mut bdf) = self.bdf_writer {
+            bdf.write_annotation(board_timestamp, 0.0, &event.label)?;
+        } else if let Some(ref mut w) = self.odf_writer {
+            writeln!(w, "{}", event.odf_line())?;
+        }
+        self.markers.push(event);
+        Ok(())
     }
 }
 
@@ -231,7 +255,39 @@ mod tests {
         assert!(body.contains("ch0,ch1,ch2,ch3,ch4,ch5,ch6,ch7"));
         assert!(!body.contains("timestamp,ch0"));
         assert!(body.contains("1.0000,2.0000,3.0000,4.0000,5.0000,6.0000,7.0000,8.0000"));
-        assert!(body.contains("% Marker: blink,0.120000"));
-        let _ = std::fs::remove_file(path);
+        assert!(body.contains("% MARKER,1,0.004000,blink"));
+        let sidecar = crate::markers::load_sidecar(&path);
+        assert_eq!(sidecar.len(), 1);
+        assert_eq!(sidecar[0].sample_index, 1);
+        assert_eq!(sidecar[0].label, "blink");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::markers::sidecar_path(&path));
+    }
+
+    #[test]
+    fn bdf_marker_is_within_one_sample() {
+        let mut logger = DataLogger::new();
+        let path = logger.start(LogFormat::BDF, 2, 250).expect("start bdf");
+        for i in 0..250 {
+            logger.log_sample(&[i as f64, 0.0], 0.0);
+            if i == 124 {
+                logger.write_marker_annotation(0.0, "mid").unwrap();
+            }
+        }
+        logger.stop();
+        let (samples, fs, n_exg, marks) =
+            crate::data_writers::bdf::read_bdf(&path).expect("read bdf");
+        assert_eq!(fs, 250);
+        assert_eq!(n_exg, 2);
+        assert_eq!(samples.len(), 250);
+        assert!((samples[0][0] - 0.0).abs() < 2.0);
+        let m = marks.iter().find(|m| m.label == "mid").expect("mid mark");
+        assert!(
+            m.sample_index.abs_diff(125) <= 1,
+            "sample_index={} wanted ~125",
+            m.sample_index
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::markers::sidecar_path(&path));
     }
 }

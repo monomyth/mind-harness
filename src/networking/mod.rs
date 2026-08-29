@@ -8,8 +8,7 @@
 //! - UDP (plain text or JSON)
 //! - OSC (Open Sound Control)
 
-// LSL support temporarily disabled (build issues with liblsl on some systems).
-// pub mod lsl_stream;
+pub mod lsl_stream;
 pub mod osc;
 pub mod udp_stream;
 
@@ -36,7 +35,7 @@ impl Default for StreamConfig {
         Self {
             protocol: Protocol::LSL,
             enabled: false,
-            target: "OpenBCI_EEG".to_string(),
+            target: crate::networking::lsl_stream::DEFAULT_EEG_NAME.to_string(),
         }
     }
 }
@@ -46,8 +45,11 @@ pub struct NetworkingManager {
     pub configs: Vec<StreamConfig>,
     udp_sender: Option<udp_stream::UdpSender>,
     osc_sender: Option<osc::OscSender>,
+    lsl: Option<lsl_stream::LslPair>,
     /// Last apply/send error, shown in the Networking widget (never silently green).
     pub last_error: Option<String>,
+    lsl_channel_count: usize,
+    lsl_sample_rate: f64,
 }
 
 impl NetworkingManager {
@@ -57,7 +59,7 @@ impl NetworkingManager {
                 StreamConfig {
                     protocol: Protocol::LSL,
                     enabled: false,
-                    target: "OpenBCI_EEG".to_string(),
+                    target: lsl_stream::DEFAULT_EEG_NAME.to_string(),
                 },
                 StreamConfig {
                     protocol: Protocol::UDP,
@@ -72,8 +74,16 @@ impl NetworkingManager {
             ],
             udp_sender: None,
             osc_sender: None,
+            lsl: None,
             last_error: None,
+            lsl_channel_count: 8,
+            lsl_sample_rate: 250.0,
         }
+    }
+
+    pub fn set_lsl_geometry(&mut self, n_ch: usize, sample_rate: f64) {
+        self.lsl_channel_count = n_ch.max(1);
+        self.lsl_sample_rate = sample_rate.max(1.0);
     }
 
     /// Called every time new data arrives from the board.
@@ -107,11 +117,24 @@ impl NetworkingManager {
                     self.last_error = Some(format!("OSC send failed: {}", e));
                 }
             }
+            if let Some(ref lsl) = self.lsl {
+                if let Err(e) = lsl.push_eeg(&eeg) {
+                    self.last_error = Some(format!("LSL send failed: {}", e));
+                }
+            }
         }
     }
 
     pub fn has_active_streams(&self) -> bool {
-        self.udp_sender.is_some() || self.osc_sender.is_some()
+        self.udp_sender.is_some() || self.osc_sender.is_some() || self.lsl.is_some()
+    }
+
+    pub fn lsl_connected(&self) -> bool {
+        self.lsl.is_some()
+    }
+
+    pub fn lsl_available() -> bool {
+        lsl_stream::lsl_linked()
     }
 
     /// Start/stop streams based on current configs.
@@ -157,6 +180,42 @@ impl NetworkingManager {
         } else if !osc_enabled {
             self.osc_sender = None;
         }
+
+        let lsl_config = self.configs.iter().find(|c| c.protocol == Protocol::LSL);
+        let lsl_enabled = lsl_config.is_some_and(|c| c.enabled);
+        if lsl_enabled && self.lsl.is_none() {
+            if !lsl_stream::lsl_linked() {
+                self.last_error = Some(
+                    "LSL is not linked in this binary (Homebrew lsl.framework missing at build)"
+                        .into(),
+                );
+                if let Some(c) = self.configs.iter_mut().find(|c| c.protocol == Protocol::LSL) {
+                    c.enabled = false;
+                }
+            } else {
+                let name = lsl_config
+                    .map(|c| c.target.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(lsl_stream::DEFAULT_EEG_NAME);
+                match lsl_stream::LslPair::start(name, self.lsl_channel_count, self.lsl_sample_rate)
+                {
+                    Ok(pair) => {
+                        self.lsl = Some(pair);
+                        tracing::info!("LSL outlet {name} (EEG + Markers)");
+                    }
+                    Err(e) => {
+                        self.last_error = Some(format!("LSL {name} — {e}"));
+                        if let Some(c) =
+                            self.configs.iter_mut().find(|c| c.protocol == Protocol::LSL)
+                        {
+                            c.enabled = false;
+                        }
+                    }
+                }
+            }
+        } else if !lsl_enabled {
+            self.lsl = None;
+        }
     }
 
     pub fn udp_connected(&self) -> bool {
@@ -174,6 +233,7 @@ impl NetworkingManager {
     pub fn stop_all(&mut self) {
         self.udp_sender = None;
         self.osc_sender = None;
+        self.lsl = None;
         for c in &mut self.configs {
             c.enabled = false;
         }
@@ -195,6 +255,8 @@ impl NetworkingManager {
         if let Some(ref mut sender) = self.osc_sender {
             let _ = sender.send_marker(timestamp, marker);
         }
-        // LSL marker would go here too
+        if let Some(ref lsl) = self.lsl {
+            let _ = lsl.push_marker(timestamp, marker);
+        }
     }
 }

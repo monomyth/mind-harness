@@ -27,4 +27,20 @@ fn main() {
     println!("cargo:rerun-if-changed={}", lib.display());
     println!("cargo:rustc-link-search=native={}", lib.display());
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
+
+    // Homebrew labstreaminglayer/tap/lsl installs lsl.framework (not -llsl).
+    let fw_candidates = [
+        PathBuf::from("/opt/homebrew/Frameworks"),
+        PathBuf::from("/usr/local/Frameworks"),
+    ];
+    if let Some(fw) = fw_candidates
+        .into_iter()
+        .find(|p| p.join("lsl.framework").exists())
+    {
+        println!("cargo:rerun-if-changed={}", fw.join("lsl.framework").display());
+        println!("cargo:rustc-link-search=framework={}", fw.display());
+        println!("cargo:rustc-link-lib=framework=lsl");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", fw.display());
+        println!("cargo:rustc-cfg=has_liblsl");
+    }
 }
