@@ -43,15 +43,27 @@ pub struct BrainFlowBoard {
     resistance_channels: Vec<usize>,
     impedance_values: Vec<Option<f64>>,
     cyton_imp_scan: Option<CytonImpScan>,
+    impedance_error: Option<String>,
 }
 
-struct CytonImpScan {
-    channel: usize,
-    since: Instant,
+#[derive(Clone, Copy)]
+enum CytonImpScan {
+    Measuring {
+        channel: usize,
+        since: Instant,
+    },
+    /// Stream held after `off`; wait before `on` so the board can ACK (Java 150 ms).
+    OffWait {
+        next: usize,
+        since: Instant,
+        resume_stream: bool,
+    },
 }
 
 /// Dwell long enough for a 1 s std window after ADS/lead-off settles.
 const CYTON_IMP_DWELL: Duration = Duration::from_millis(2000);
+const CYTON_IMP_OFF_GAP: Duration = Duration::from_millis(150);
+const BRAINFLOW_STREAM_CAP: usize = 45000;
 
 impl BrainFlowBoard {
     pub fn new(board_id: BoardIds, serial_port: Option<String>, device_id: Option<String>) -> Self {
@@ -118,6 +130,7 @@ impl BrainFlowBoard {
             resistance_channels,
             impedance_values: vec![None; num_exg],
             cyton_imp_scan: None,
+            impedance_error: None,
         }
     }
 
@@ -205,6 +218,7 @@ impl DataSource for BrainFlowBoard {
         }
         self.impedance_active = false;
         self.cyton_imp_scan = None;
+        self.impedance_error = None;
         self.impedance_values.fill(None);
         self.clear_buffers();
         Ok(())
@@ -213,6 +227,10 @@ impl DataSource for BrainFlowBoard {
     fn update(&mut self) {
         self.last_delivered = 0;
         self.last_lost = 0;
+        if self.impedance_active && self.is_ads1299() && !self.is_streaming {
+            self.tick_cyton_impedance();
+            return;
+        }
         let arr = match self.board.as_ref() {
             Some(shim) if self.is_streaming => shim
                 .get_board_data(None, BrainFlowPresets::DefaultPreset)
@@ -220,11 +238,17 @@ impl DataSource for BrainFlowBoard {
             _ => None,
         };
         let Some(arr) = arr else {
+            if self.impedance_active && self.is_ads1299() {
+                self.tick_cyton_impedance();
+            }
             return;
         };
         let n_chans = arr.nrows();
         let n_samples = arr.ncols();
         if n_samples == 0 {
+            if self.impedance_active && self.is_ads1299() {
+                self.tick_cyton_impedance();
+            }
             return;
         }
 
@@ -279,7 +303,7 @@ impl DataSource for BrainFlowBoard {
     fn start_streaming(&mut self) -> Result<(), BoardError> {
         if let Some(ref mut shim) = self.board {
             if !self.is_streaming {
-                shim.start_stream(45000, "")
+                shim.start_stream(BRAINFLOW_STREAM_CAP, "")
                     .map_err(|e| BoardError::BrainFlow(e.to_string()))?;
                 self.is_streaming = true;
                 self.last_delivered = 0;
@@ -406,9 +430,9 @@ impl DataSource for BrainFlowBoard {
         if self.is_ads1299() {
             let cmd = cyton_impedance_on_cmd(0)
                 .ok_or_else(|| BoardError::Io("Cyton has no EXG channels for impedance".into()))?;
-            self.config_board_str(&cmd)?;
+            self.cyton_config_with_stream_paused(&cmd)?;
             self.impedance_active = true;
-            self.cyton_imp_scan = Some(CytonImpScan {
+            self.cyton_imp_scan = Some(CytonImpScan::Measuring {
                 channel: 0,
                 since: Instant::now(),
             });
@@ -421,15 +445,23 @@ impl DataSource for BrainFlowBoard {
     }
 
     fn stop_impedance_test(&mut self) -> Result<(), BoardError> {
-        let scan = self.cyton_imp_scan.take();
-        if let Some(scan) = scan {
-            if let Some(cmd) = cyton_impedance_off_cmd(scan.channel) {
-                let _ = self.config_board_str(&cmd);
+        if let Some(scan) = self.cyton_imp_scan {
+            match scan {
+                CytonImpScan::Measuring { channel, .. } => {
+                    let cmd = cyton_impedance_off_cmd(channel).ok_or_else(|| {
+                        BoardError::Io("Cyton has no EXG channels for impedance".into())
+                    })?;
+                    self.cyton_config_with_stream_paused(&cmd)?;
+                }
+                CytonImpScan::OffWait { resume_stream, .. } => {
+                    self.resume_brainflow_stream(resume_stream)?;
+                }
             }
         }
         if self.is_ganglion() && self.impedance_active {
-            let _ = self.config_board_str("Z");
+            self.config_board_str("Z")?;
         }
+        self.cyton_imp_scan = None;
         self.impedance_active = false;
         self.impedance_values.fill(None);
         Ok(())
@@ -446,7 +478,7 @@ impl DataSource for BrainFlowBoard {
         }
         let mut out = vec![None; n];
         for (i, v) in self.impedance_values.iter().take(n).enumerate() {
-            out[i] = *v;
+            out[i] = v.filter(|k| *k > 0.0);
         }
         out
     }
@@ -468,11 +500,22 @@ impl DataSource for BrainFlowBoard {
     }
 
     fn impedance_scan_channel(&self) -> Option<usize> {
-        if self.impedance_active {
-            self.cyton_imp_scan.as_ref().map(|s| s.channel)
-        } else {
-            None
+        if !self.impedance_active {
+            return None;
         }
+        match self.cyton_imp_scan {
+            Some(CytonImpScan::Measuring { channel, .. }) => Some(channel),
+            Some(CytonImpScan::OffWait { next, .. }) => Some(next),
+            None => None,
+        }
+    }
+
+    fn impedance_test_active(&self) -> bool {
+        self.impedance_active
+    }
+
+    fn take_impedance_error(&mut self) -> Option<String> {
+        self.impedance_error.take()
     }
 }
 
@@ -507,6 +550,56 @@ impl BrainFlowBoard {
         Ok(())
     }
 
+    /// BrainFlow cannot ACK Cyton `x`/`z` while the serial stream is running.
+    fn pause_brainflow_stream(&mut self) -> bool {
+        if !self.is_streaming {
+            return false;
+        }
+        if let Some(shim) = self.board.as_ref() {
+            let _ = shim.stop_stream();
+        }
+        self.is_streaming = false;
+        true
+    }
+
+    fn resume_brainflow_stream(&mut self, was_streaming: bool) -> Result<(), BoardError> {
+        if !was_streaming || self.is_streaming {
+            return Ok(());
+        }
+        let shim = self.board.as_ref().ok_or(BoardError::NotInitialized)?;
+        shim.start_stream(BRAINFLOW_STREAM_CAP, "")
+            .map_err(|e| BoardError::BrainFlow(e.to_string()))?;
+        self.is_streaming = true;
+        self.last_delivered = 0;
+        self.last_lost = 0;
+        if let Some(t) = self.index_tracker.as_mut() {
+            t.reset();
+        }
+        self.clear_buffers();
+        Ok(())
+    }
+
+    fn cyton_config_with_stream_paused(&mut self, cmd: &str) -> Result<(), BoardError> {
+        let was = self.pause_brainflow_stream();
+        let send = self.config_board_str(cmd);
+        let resume = self.resume_brainflow_stream(was);
+        match send {
+            Err(e) => {
+                let _ = resume;
+                Err(e)
+            }
+            Ok(()) => resume,
+        }
+    }
+
+    fn abort_cyton_impedance(&mut self, err: BoardError, resume_stream: bool) {
+        tracing::warn!("Cyton impedance aborted: {err}");
+        self.impedance_error = Some(err.to_string());
+        self.impedance_active = false;
+        self.cyton_imp_scan = None;
+        let _ = self.resume_brainflow_stream(resume_stream);
+    }
+
     fn ingest_ganglion_resistance(&mut self, rows: &[Vec<f64>]) {
         let n = self.exg_channels.len();
         if self.impedance_values.len() != n {
@@ -528,39 +621,57 @@ impl BrainFlowBoard {
         if n == 0 {
             return;
         }
-        let ch = {
-            let Some(scan) = self.cyton_imp_scan.as_ref() else {
-                return;
-            };
-            if scan.since.elapsed() < CYTON_IMP_DWELL {
-                return;
+        match self.cyton_imp_scan {
+            Some(CytonImpScan::Measuring { channel, since })
+                if since.elapsed() >= CYTON_IMP_DWELL =>
+            {
+                if let Some(kohm) = self.cyton_kohm_for_channel(channel) {
+                    if channel < self.impedance_values.len() {
+                        self.impedance_values[channel] = Some(kohm);
+                    }
+                }
+                let next = (channel + 1) % n;
+                let Some(off) = cyton_impedance_off_cmd(channel) else {
+                    return;
+                };
+                let was = self.pause_brainflow_stream();
+                if let Err(e) = self.config_board_str(&off) {
+                    self.abort_cyton_impedance(e, was);
+                    return;
+                }
+                self.cyton_imp_scan = Some(CytonImpScan::OffWait {
+                    next,
+                    since: Instant::now(),
+                    resume_stream: was,
+                });
             }
-            scan.channel
-        };
-        if let Some(kohm) = self.cyton_kohm_for_channel(ch) {
-            if ch < self.impedance_values.len() {
-                self.impedance_values[ch] = Some(kohm);
+            Some(CytonImpScan::OffWait {
+                next,
+                since,
+                resume_stream,
+            }) if since.elapsed() >= CYTON_IMP_OFF_GAP => {
+                let Some(on) = cyton_impedance_on_cmd(next) else {
+                    self.abort_cyton_impedance(
+                        BoardError::Io("Cyton has no EXG channels for impedance".into()),
+                        resume_stream,
+                    );
+                    return;
+                };
+                if let Err(e) = self.config_board_str(&on) {
+                    self.abort_cyton_impedance(e, resume_stream);
+                    return;
+                }
+                if let Err(e) = self.resume_brainflow_stream(resume_stream) {
+                    self.abort_cyton_impedance(e, false);
+                    return;
+                }
+                self.cyton_imp_scan = Some(CytonImpScan::Measuring {
+                    channel: next,
+                    since: Instant::now(),
+                });
             }
+            _ => {}
         }
-        let next = (ch + 1) % n;
-        let Some(off) = cyton_impedance_off_cmd(ch) else {
-            return;
-        };
-        let Some(on) = cyton_impedance_on_cmd(next) else {
-            return;
-        };
-        let cmd = format!("{off}{on}");
-        if let Err(e) = self.config_board_str(&cmd) {
-            tracing::warn!("Cyton impedance channel switch failed: {e}");
-            let _ = self.config_board_str(&off);
-            self.impedance_active = false;
-            self.cyton_imp_scan = None;
-            return;
-        }
-        self.cyton_imp_scan = Some(CytonImpScan {
-            channel: next,
-            since: Instant::now(),
-        });
     }
 
     fn cyton_kohm_for_channel(&self, ch: usize) -> Option<f64> {
@@ -646,8 +757,10 @@ mod tests {
         assert_eq!(b.impedance_quality_kohm(), (750.0, 2500.0));
         assert_eq!(b.get_impedance(), vec![None; 8]);
         assert!(b.start_impedance_test(&[0]).is_err());
+        assert!(!b.impedance_test_active());
         assert!(!b.impedance_is_simulated());
         assert_eq!(b.get_impedance(), vec![None; 8]);
+        assert!(b.take_impedance_error().is_none());
     }
 
     #[test]
@@ -658,10 +771,12 @@ mod tests {
         assert_eq!(b.impedance_quality_kohm(), (5.0, 15.0));
         assert_eq!(b.get_impedance(), vec![None; 8]);
         b.start_impedance_test(&[0, 1]).unwrap();
+        assert!(b.impedance_test_active());
         let vals = b.get_impedance();
         assert_eq!(vals.len(), 8);
         assert!(vals.iter().all(|v| v.is_some()));
         b.stop_impedance_test().unwrap();
+        assert!(!b.impedance_test_active());
         assert!(b.get_impedance().iter().all(|v| v.is_none()));
     }
 
@@ -673,6 +788,7 @@ mod tests {
         assert_eq!(b.impedance_quality_kohm(), (50.0, 150.0));
         assert_eq!(b.get_impedance(), vec![None; 4]);
         assert!(b.start_impedance_test(&[0]).is_err());
+        assert!(!b.impedance_test_active());
         assert_eq!(b.get_impedance(), vec![None; 4]);
     }
 }

@@ -14,7 +14,6 @@ use eframe::egui;
 
 pub struct WImpedance {
     title: String,
-    testing: bool,
     last_values: Vec<Option<f64>>,
     pending_start: bool,
     pending_stop: bool,
@@ -24,7 +23,6 @@ impl WImpedance {
     pub fn new() -> Self {
         Self {
             title: "Impedance".to_string(),
-            testing: false,
             last_values: vec![],
             pending_start: false,
             pending_stop: false,
@@ -43,11 +41,6 @@ impl WImpedance {
         self.pending_start = false;
         self.pending_stop = false;
     }
-
-    pub fn notify_start_failed(&mut self) {
-        self.testing = false;
-        self.pending_start = false;
-    }
 }
 
 impl Default for WImpedance {
@@ -62,7 +55,6 @@ impl Widget for WImpedance {
     }
 
     fn update(&mut self, source: &dyn DataSource) {
-        // Always pull latest (cheap) so the UI shows numbers even when not "testing"
         if source.supports_impedance() {
             self.last_values = source.get_impedance();
         }
@@ -72,7 +64,7 @@ impl Widget for WImpedance {
         &mut self,
         ui: &mut egui::Ui,
         source: &dyn DataSource,
-        ctx: &mut crate::widget_context::WidgetContext,
+        _ctx: &mut crate::widget_context::WidgetContext,
     ) {
         let supports = source.supports_impedance();
         let n = source.exg_channels().len();
@@ -92,27 +84,16 @@ impl Widget for WImpedance {
             );
         }
 
+        let testing = source.impedance_test_active();
         ui.horizontal(|ui| {
-            if !self.testing {
+            if !testing {
                 if ui.button("▶ Start Impedance Test").clicked() {
                     self.pending_start = true;
-                    self.testing = true;
-                    ctx.log_event(
-                        crate::event_log::LogLevel::Info,
-                        "Impedance",
-                        "Impedance test started",
-                    );
                 }
             } else if ui.button("⏹ Stop Test").clicked() {
                 self.pending_stop = true;
-                self.testing = false;
-                ctx.log_event(
-                    crate::event_log::LogLevel::Info,
-                    "Impedance",
-                    "Impedance test stopped",
-                );
             }
-            if self.testing {
+            if testing {
                 ui.colored_label(egui::Color32::from_rgb(80, 200, 120), "● Testing...");
             }
             if let Some(ch) = source.impedance_scan_channel() {
@@ -129,7 +110,6 @@ impl Widget for WImpedance {
 
         let (green_max, yellow_max) = source.impedance_quality_kohm();
 
-        // Classic per-channel readout table
         egui::Grid::new("imp_grid").striped(true).show(ui, |ui| {
             ui.strong("Ch");
             ui.strong("Impedance (kΩ)");
@@ -139,7 +119,7 @@ impl Widget for WImpedance {
             for (i, val) in self.last_values.iter().enumerate().take(n) {
                 ui.label(format!("{}", i + 1));
                 match val {
-                    Some(v) => {
+                    Some(v) if *v > 0.0 => {
                         let v = *v;
                         let (color, qual) = if v < green_max {
                             (egui::Color32::from_rgb(60, 180, 90), "Good")
@@ -151,7 +131,7 @@ impl Widget for WImpedance {
                         ui.colored_label(color, format!("{:.1}", v));
                         ui.colored_label(color, qual);
                     }
-                    None => {
+                    _ => {
                         ui.label("—");
                         ui.label(if source.impedance_is_simulated() {
                             "n/a"

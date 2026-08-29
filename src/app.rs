@@ -1133,7 +1133,6 @@ impl eframe::App for OpenBciGuiApp {
                                 self.event_log.log_system("Impedance test started on board");
                             }
                             Err(e) => {
-                                imp.notify_start_failed();
                                 self.event_log
                                     .log_error(&format!("Impedance start failed: {e}"));
                             }
@@ -1141,13 +1140,20 @@ impl eframe::App for OpenBciGuiApp {
                         imp.clear_pending();
                     }
                     if imp.wants_stop() {
-                        if let Err(e) = b.stop_impedance_test() {
-                            self.event_log
-                                .log_error(&format!("Impedance stop failed: {e}"));
-                        } else {
-                            self.event_log.log_system("Impedance test stopped");
+                        match b.stop_impedance_test() {
+                            Ok(()) => {
+                                self.event_log.log_system("Impedance test stopped");
+                            }
+                            Err(e) => {
+                                self.event_log
+                                    .log_error(&format!("Impedance stop failed: {e}"));
+                            }
                         }
                         imp.clear_pending();
+                    }
+                    if let Some(e) = b.take_impedance_error() {
+                        self.event_log
+                            .log_error(&format!("Impedance scan aborted: {e}"));
                     }
                 }
             }

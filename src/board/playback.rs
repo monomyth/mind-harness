@@ -42,6 +42,7 @@ pub struct PlaybackBoard {
     /// Filtered copy of `samples` (EXG columns only). Rebuilt when notch/bandpass change.
     filtered: Vec<Vec<f64>>,
     filter_dirty: bool,
+    impedance_active: bool,
 }
 
 impl PlaybackBoard {
@@ -176,6 +177,7 @@ impl PlaybackBoard {
             filter_settings: FilterSettings::new(n_exg_for_filters),
             filtered: vec![],
             filter_dirty: true,
+            impedance_active: false,
         };
         board.apply_pending_filters();
         Ok(board)
@@ -366,9 +368,11 @@ impl DataSource for PlaybackBoard {
         true
     }
     fn start_impedance_test(&mut self, _channels: &[usize]) -> Result<(), BoardError> {
+        self.impedance_active = true;
         Ok(())
     }
     fn stop_impedance_test(&mut self) -> Result<(), BoardError> {
+        self.impedance_active = false;
         Ok(())
     }
     fn get_impedance(&self) -> Vec<Option<f64>> {
@@ -381,6 +385,10 @@ impl DataSource for PlaybackBoard {
 
     fn impedance_is_simulated(&self) -> bool {
         true
+    }
+
+    fn impedance_test_active(&self) -> bool {
+        self.impedance_active
     }
 
     fn get_filter_settings(&self) -> Option<&FilterSettings> {
@@ -540,6 +548,33 @@ mod tests {
             "1–50 Hz display buffer should settle near 0 on DC, last={}",
             last_filt
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn playback_impedance_is_labelled_simulated() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("openbci_playback_test_impedance.txt");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "OpenBCI Data Format (Rust port)").unwrap();
+        writeln!(f, "Sample Rate: 250 Hz, Channels: 2").unwrap();
+        writeln!(f, "ch0,ch1").unwrap();
+        writeln!(f, "1.0,2.0").unwrap();
+        drop(f);
+
+        let mut pb = PlaybackBoard::from_file(&path).unwrap();
+        assert!(pb.supports_impedance());
+        assert!(pb.impedance_is_simulated());
+        assert_eq!(pb.impedance_quality_kohm(), (5.0, 15.0));
+        assert!(!pb.impedance_test_active());
+        let vals = pb.get_impedance();
+        assert_eq!(vals.len(), pb.exg_channels().len());
+        assert!(vals.iter().all(|v| v.is_some()));
+        pb.start_impedance_test(&[0]).unwrap();
+        assert!(pb.impedance_test_active());
+        assert!(pb.impedance_is_simulated());
+        pb.stop_impedance_test().unwrap();
+        assert!(!pb.impedance_test_active());
         let _ = std::fs::remove_file(path);
     }
 }

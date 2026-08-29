@@ -146,6 +146,16 @@ pub trait DataSource: Send + Sync {
     fn impedance_scan_channel(&self) -> Option<usize> {
         None
     }
+
+    /// True while Start Impedance has succeeded and Stop has not (drives the Testing LED).
+    fn impedance_test_active(&self) -> bool {
+        false
+    }
+
+    /// Drain a mid-scan `config_board` failure so the app can log it.
+    fn take_impedance_error(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Copy EXG columns out of a full BrainFlow row (which also holds index, timestamp, accel, …).
