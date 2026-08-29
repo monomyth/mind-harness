@@ -180,7 +180,10 @@ impl EmgProcessor {
         let sr = sample_rate as f64;
         for i in 0..n {
             let col = exg[i];
-            let series: Vec<f64> = rows.iter().map(|r| r.get(col).copied().unwrap_or(0.0)).collect();
+            let series: Vec<f64> = rows
+                .iter()
+                .map(|r| r.get(col).copied().unwrap_or(0.0))
+                .collect();
             process_channel(&mut self.channels[i], &series, sr);
         }
     }
@@ -258,11 +261,7 @@ mod tests {
     fn constant_under_limit_is_the_average() {
         let mut ch = EmgChannelState::default();
         process_channel(&mut ch, &const_series(250, 20.0), 250.0);
-        assert!(
-            (ch.average_uv - 20.0).abs() < 1e-9,
-            "avg={}",
-            ch.average_uv
-        );
+        assert!((ch.average_uv - 20.0).abs() < 1e-9, "avg={}", ch.average_uv);
     }
 
     #[test]
@@ -270,11 +269,7 @@ mod tests {
         let mut ch = EmgChannelState::default();
         ch.settings.uv_limit = EmgUvLimit::Fifty;
         process_channel(&mut ch, &const_series(250, 500.0), 250.0);
-        assert!(
-            (ch.average_uv - 50.0).abs() < 1e-9,
-            "avg={}",
-            ch.average_uv
-        );
+        assert!((ch.average_uv - 50.0).abs() < 1e-9, "avg={}", ch.average_uv);
     }
 
     #[test]

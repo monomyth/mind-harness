@@ -1,6 +1,6 @@
 # OpenBCI GUI Rust Port — Feature Parity & Status
 
-**Date**: 2026-08-27 (resume + correctness + chrome pass)  
+**Date**: 2026-08-28 (v0.3.0 — live ADS1299 impedance path; not hardware-verified this run)  
 **Current State**: The May 2026 Phase 8 tree is the base. This pass fixed launch and data-path bugs that would have produced wrong recordings / silent hardware lies, then aligned chrome and default layout with the Java GUI.
 
 **Launch notes (macOS 26)**: eframe 0.28 crashed in `NSScreen` enumeration (`q` vs `Q`). The GUI now uses **eframe/egui 0.32 + egui_plot 0.33** (winit 0.30.12+). `build.rs` embeds an rpath to BrainFlow's `lib/` so `target/debug/openbci_gui` loads `libBoardController.dylib`.
@@ -24,6 +24,7 @@ This document tracks parity with the canonical Java/Processing implementation (`
 | **EventLog + Console**         | ✅ **Phase 7**       | Filterable, searchable, live, Save with rfd, 8 categories, mini-preview in status |
 | **Playback roundtrip**         | ✅ **Phase 7**       | Parser for Rust ODF .txt (and Java), rfd picker, "record → End → pick exact file" flow, logs to Console, widgets receive data intent |
 | Recording (BDF + ODF)          | ✅ Production        | DataLogger + BDF writer + annotations for markers |
+| Impedance (Cyton ADS1299)      | ⚠️ Code complete     | Java lead-off: `x…Xz…Z` one channel at a time, kΩ = `(√2·std_µV·1e-6)/6nA − 2.2kΩ`. Ganglion: BrainFlow `z`/`Z` + `resistance_channels`/2. Synthetic/Playback still labelled simulated. **Not verified on a live Cyton this run** — do not treat as production until a lead-lift changes kΩ on hardware. |
 | Filtering (Notch + BP)         | ✅ Production        | Notch: None / 50 / 60 / 50+60 (Java labels); BP 1–50 Hz; live + Playback |
 | EMG                            | ✅ Production        | WEmg — envelope circles + 0–1 bar, Java EmgSettingsValues |
 | EMG Joystick                   | ✅ Production        | WEmgJoystick — ±X/±Y channel map, unit-circle + lerp |
@@ -85,7 +86,7 @@ Last-used settings are persisted across app restarts for delightful QOL:
 ## Remaining High-Value Items
 
 - **Ganglion Native BLE** now talks to BrainFlow with a MAC/name field (no Synthetic fallback). There is still no BLE scanner UI.
-- **Impedance on live Cyton/Ganglion** is honest: Start/Stop send `config_board` commands, but kΩ values are only synthesized for Synthetic/Playback and labelled as simulated. Real ADS1299 impedance still needs a confirmed BrainFlow path.
+- **Impedance on live Cyton/Ganglion**: Start/Stop no longer send the bogus `startimp`/`stopimp`. Cyton uses the Java ADS1299 lead-off command set and std→kΩ formula; Ganglion uses `z`/`Z` and resistance columns. Live boards fail closed (`None`, no simulated banner, no fake green contacts). Synthetic/Playback remain labelled simulated. **Hardware verification: not done this run** (no live Cyton session showed kΩ changing on a lifted lead).
 - **LSL output** remains disabled (macOS bind issues). UDP/OSC validate `host:port` and no longer show green when bind fails.
 - **SD Card reader** still not implemented (Record → Playback is the workflow).
 - **Java widgets not in this port**: Pulse Sensor, Analog Read, Digital Read, Playback History widget, Widget Template. Spectrogram, EMG, and EMG Joystick are in the layout customizer.

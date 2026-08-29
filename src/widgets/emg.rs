@@ -1,9 +1,7 @@
 //! W_EMG — per-channel EMG envelope circles + normalized bars (Java `W_emg`).
 
 use crate::board::DataSource;
-use crate::emg::{
-    EmgProcessor, EmgUvLimit, EmgWindow, LOWER_MIN_UV, MIN_DELTA_UV,
-};
+use crate::emg::{EmgProcessor, EmgUvLimit, EmgWindow, LOWER_MIN_UV, MIN_DELTA_UV};
 use crate::theme;
 use crate::widgets::Widget;
 use eframe::egui;
@@ -118,7 +116,12 @@ fn channel_toggles(ui: &mut egui::Ui, n: usize, visible: &mut [bool]) {
     });
 }
 
-pub fn paint_emg_cell(ui: &egui::Ui, rect: Rect, channel: usize, state: &crate::emg::EmgChannelState) {
+pub fn paint_emg_cell(
+    ui: &egui::Ui,
+    rect: Rect,
+    channel: usize,
+    state: &crate::emg::EmgChannelState,
+) {
     let painter = ui.painter_at(rect);
     let color = theme::channel_color(channel);
     let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 200);
@@ -195,12 +198,20 @@ pub fn emg_settings_ui(ui: &mut egui::Ui, emg: &mut EmgProcessor) {
                     combo_limit(ui, i, &mut ch.settings.uv_limit);
                     combo_creep(ui, format!("ci{i}"), &mut ch.settings.creep_increasing);
                     combo_creep(ui, format!("cd{i}"), &mut ch.settings.creep_decreasing);
-                    combo_f64(ui, format!("md{i}"), &mut ch.settings.minimum_delta_uv, &MIN_DELTA_UV, |v| {
-                        format!("{:.0} uV", v)
-                    });
-                    combo_f64(ui, format!("lm{i}"), &mut ch.settings.lower_threshold_minimum, &LOWER_MIN_UV, |v| {
-                        format!("{:.0} uV", v)
-                    });
+                    combo_f64(
+                        ui,
+                        format!("md{i}"),
+                        &mut ch.settings.minimum_delta_uv,
+                        &MIN_DELTA_UV,
+                        |v| format!("{:.0} uV", v),
+                    );
+                    combo_f64(
+                        ui,
+                        format!("lm{i}"),
+                        &mut ch.settings.lower_threshold_minimum,
+                        &LOWER_MIN_UV,
+                        |v| format!("{:.0} uV", v),
+                    );
                     ui.end_row();
                 }
             });
@@ -230,10 +241,18 @@ fn combo_limit(ui: &mut egui::Ui, i: usize, val: &mut EmgUvLimit) {
 }
 
 fn combo_creep(ui: &mut egui::Ui, id: String, val: &mut f64) {
-    combo_f64(ui, id, val, &crate::emg::EmgCreep::ALL_INC, |v| format!("{}", v));
+    combo_f64(ui, id, val, &crate::emg::EmgCreep::ALL_INC, |v| {
+        format!("{}", v)
+    });
 }
 
-fn combo_f64(ui: &mut egui::Ui, id: String, val: &mut f64, options: &[f64], label: impl Fn(f64) -> String) {
+fn combo_f64(
+    ui: &mut egui::Ui,
+    id: String,
+    val: &mut f64,
+    options: &[f64],
+    label: impl Fn(f64) -> String,
+) {
     let text = label(*val);
     egui::ComboBox::from_id_salt(id)
         .selected_text(text)

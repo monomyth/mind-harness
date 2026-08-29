@@ -164,7 +164,12 @@ impl Widget for WBandPower {
                 Bar::new(i as f64, log_p - LOG_YMIN)
                     .base_offset(LOG_YMIN)
                     .name(BAND_PLOT_LABELS[i])
-                    .fill(egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 200))
+                    .fill(egui::Color32::from_rgba_unmultiplied(
+                        c.r(),
+                        c.g(),
+                        c.b(),
+                        200,
+                    ))
                     .width(0.8)
             })
             .collect();

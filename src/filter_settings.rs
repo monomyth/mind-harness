@@ -201,12 +201,11 @@ pub fn filter_exg_rows(
         if board_ch >= n_cols {
             continue;
         }
-        let mut col: Vec<f64> = rows.iter().map(|r| r.get(board_ch).copied().unwrap_or(0.0)).collect();
-        let filt = settings
-            .channels
-            .get(logical)
-            .cloned()
-            .unwrap_or_default();
+        let mut col: Vec<f64> = rows
+            .iter()
+            .map(|r| r.get(board_ch).copied().unwrap_or(0.0))
+            .collect();
+        let filt = settings.channels.get(logical).cloned().unwrap_or_default();
         apply_exg_filter(&mut col, sample_rate, &filt);
         for (row, v) in rows.iter_mut().zip(col) {
             if board_ch < row.len() {
@@ -260,7 +259,10 @@ mod tests {
 
     #[test]
     fn old_bool_config_maps_to_java_defaults() {
-        assert_eq!(NotchMode::from_legacy_enabled(true), NotchMode::FiftyAndSixty);
+        assert_eq!(
+            NotchMode::from_legacy_enabled(true),
+            NotchMode::FiftyAndSixty
+        );
         assert_eq!(NotchMode::from_legacy_enabled(false), NotchMode::Off);
     }
 
@@ -306,7 +308,9 @@ mod tests {
         let sr = 250usize;
         let n = sr * 2;
         let sig: Vec<f64> = (0..n)
-            .map(|i| 5000.0 + 200.0 * (2.0 * std::f64::consts::PI * 2.0 * i as f64 / sr as f64).sin())
+            .map(|i| {
+                5000.0 + 200.0 * (2.0 * std::f64::consts::PI * 2.0 * i as f64 / sr as f64).sin()
+            })
             .collect();
         let filt = ChannelFilter {
             notch_enabled: false,
@@ -346,8 +350,7 @@ mod tests {
         let n = sr * 2;
         let sig: Vec<f64> = (0..n)
             .map(|i| {
-                5000.0
-                    + 200.0 * (2.0 * std::f64::consts::PI * 2.0 * i as f64 / sr as f64).sin()
+                5000.0 + 200.0 * (2.0 * std::f64::consts::PI * 2.0 * i as f64 / sr as f64).sin()
             })
             .collect();
         let mut rows: Vec<Vec<f64>> = sig.iter().map(|&v| vec![v]).collect();

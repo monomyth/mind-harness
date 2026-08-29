@@ -81,7 +81,11 @@ impl Widget for WEmgJoystick {
         source: &dyn DataSource,
         ctx: &mut crate::widget_context::WidgetContext,
     ) {
-        let n = source.exg_channels().len().min(ctx.emg.channels.len()).max(1);
+        let n = source
+            .exg_channels()
+            .len()
+            .min(ctx.emg.channels.len())
+            .max(1);
         for i in 0..4 {
             self.inputs[i] = self.inputs[i].min(n - 1);
         }
@@ -101,7 +105,10 @@ impl Widget for WEmgJoystick {
                 .selected_text(cur)
                 .show_ui(ui, |ui| {
                     for &(lab, v) in SMOOTH {
-                        if ui.selectable_label((self.smoothing - v).abs() < 1e-9, lab).clicked() {
+                        if ui
+                            .selectable_label((self.smoothing - v).abs() < 1e-9, lab)
+                            .clicked()
+                        {
                             self.smoothing = v;
                         }
                     }
@@ -124,7 +131,8 @@ impl Widget for WEmgJoystick {
 
         let avail = ui.available_size();
         let side = avail.x.min(avail.y).max(80.0);
-        let (plot_rect, _) = ui.allocate_exact_size(egui::vec2(avail.x, side.max(120.0)), egui::Sense::hover());
+        let (plot_rect, _) =
+            ui.allocate_exact_size(egui::vec2(avail.x, side.max(120.0)), egui::Sense::hover());
         paint_joystick(ui, plot_rect, self.x, self.y);
 
         let mini_h = 56.0_f32;
@@ -134,7 +142,8 @@ impl Widget for WEmgJoystick {
                 let ch = self.inputs[i];
                 ui.vertical(|ui| {
                     ui.small(format!("{lab} ch{}", ch + 1));
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(88.0, mini_h), egui::Sense::hover());
+                    let (r, _) =
+                        ui.allocate_exact_size(egui::vec2(88.0, mini_h), egui::Sense::hover());
                     if let Some(state) = ctx.emg.channels.get(ch) {
                         paint_emg_cell(ui, r, ch, state);
                     }

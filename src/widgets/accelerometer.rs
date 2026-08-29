@@ -96,9 +96,21 @@ impl Widget for WAccelerometer {
             .x_axis_formatter(|mark, _| crate::widgets::axis_tick_label(mark.value))
             .y_axis_formatter(|mark, _| crate::widgets::axis_tick_label(mark.value))
             .show(ui, |plot_ui| {
-                plot_ui.line(Line::new("X", x_points).color(crate::theme::ACCEL_X).width(1.2_f32));
-                plot_ui.line(Line::new("Y", y_points).color(crate::theme::ACCEL_Y).width(1.2_f32));
-                plot_ui.line(Line::new("Z", z_points).color(crate::theme::ACCEL_Z).width(1.2_f32));
+                plot_ui.line(
+                    Line::new("X", x_points)
+                        .color(crate::theme::ACCEL_X)
+                        .width(1.2_f32),
+                );
+                plot_ui.line(
+                    Line::new("Y", y_points)
+                        .color(crate::theme::ACCEL_Y)
+                        .width(1.2_f32),
+                );
+                plot_ui.line(
+                    Line::new("Z", z_points)
+                        .color(crate::theme::ACCEL_Z)
+                        .width(1.2_f32),
+                );
             });
 
         ui.small("Accel X/Y/Z (g)");

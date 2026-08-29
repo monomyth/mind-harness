@@ -69,8 +69,7 @@ impl Widget for WSpectrogram {
             .iter()
             .map(|row| row.get(ch).copied().unwrap_or(0.0))
             .collect();
-        let (_freqs, mags) =
-            compute_fft_magnitude(&samples, source.sample_rate() as f64, 60.0);
+        let (_freqs, mags) = compute_fft_magnitude(&samples, source.sample_rate() as f64, 60.0);
         if mags.is_empty() {
             return;
         }
@@ -79,7 +78,8 @@ impl Widget for WSpectrogram {
         for (i, slot) in col.iter_mut().enumerate() {
             let start = (i as f32 * step) as usize;
             let end = ((i as f32 + 1.0) * step) as usize;
-            let slice = &mags[start.min(mags.len())..end.min(mags.len()).max(start + 1).min(mags.len())];
+            let slice =
+                &mags[start.min(mags.len())..end.min(mags.len()).max(start + 1).min(mags.len())];
             if !slice.is_empty() {
                 *slot = slice.iter().copied().fold(f64::NEG_INFINITY, f64::max) as f32;
             }
@@ -153,7 +153,10 @@ impl Widget for WSpectrogram {
                 let y = rect.bottom() - (bi as f32 + 1.0) * bin_h;
                 let t = ((v - min_v) / (max_v - min_v + 1e-3)).clamp(0.0, 1.0);
                 painter.rect_filled(
-                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(col_w.ceil(), bin_h.ceil())),
+                    egui::Rect::from_min_size(
+                        egui::pos2(x, y),
+                        egui::vec2(col_w.ceil(), bin_h.ceil()),
+                    ),
                     0.0,
                     mag_to_color(t),
                 );

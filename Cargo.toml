@@ -1,6 +1,6 @@
 [package]
 name = "openbci_gui"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["OpenBCI Community"]
 description = "OpenBCI GUI - Native macOS application for EEG visualization and recording"
@@ -89,7 +89,7 @@ identifier = "com.openbci.gui"
 # Phase 8 foundations alignment: icon under resources/ (same dir as embedded fonts). Place sketch.icns (from Java OpenBCI_GUI/sketch.icns) as resources/icon.icns.
 # `cargo bundle --release` will succeed once a real .icns exists (expected for packaging foundations; no .icns shipped in this phase).
 icon = ["resources/icon.icns"]
-version = "0.2.0"
+version = "0.3.0"
 resources = ["resources/"]
 copyright = "Copyright © 2026 OpenBCI"
 category = "public.app-category.education"

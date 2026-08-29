@@ -14,7 +14,7 @@ use crate::widget_context::WidgetContext;
 use crate::widget_manager::WidgetManager;
 use crate::widgets::{
     WAccelerometer, WBandPower, WEmg, WEmgJoystick, WFocus, WHeadPlot, WImpedance, WMarker,
-    WNetworking, WSpectrogram, WTimeSeries, WFFT, Widget,
+    WNetworking, WSpectrogram, WTimeSeries, Widget, WFFT,
 };
 use directories::ProjectDirs;
 use eframe::egui;
@@ -204,16 +204,29 @@ impl OpenBciGuiApp {
                 let mut m = HashMap::new();
                 // Java-numbered layouts (WidgetManager.pde). Default is layout 5.
                 m.insert(1, vec!["Time Series".into()]);
-                m.insert(2, vec![
-                    "Time Series".into(),
-                    "FFT Plot".into(),
-                    "Band Power".into(),
-                    "Accelerometer".into(),
-                ]);
+                m.insert(
+                    2,
+                    vec![
+                        "Time Series".into(),
+                        "FFT Plot".into(),
+                        "Band Power".into(),
+                        "Accelerometer".into(),
+                    ],
+                );
                 m.insert(3, vec!["Time Series".into(), "FFT Plot".into()]);
                 m.insert(4, vec!["Time Series".into(), "FFT Plot".into()]);
-                m.insert(5, vec!["Time Series".into(), "FFT Plot".into(), "Head Plot".into()]);
-                m.insert(6, vec!["Time Series".into(), "FFT Plot".into(), "Spectrogram".into()]);
+                m.insert(
+                    5,
+                    vec!["Time Series".into(), "FFT Plot".into(), "Head Plot".into()],
+                );
+                m.insert(
+                    6,
+                    vec![
+                        "Time Series".into(),
+                        "FFT Plot".into(),
+                        "Spectrogram".into(),
+                    ],
+                );
                 m
             },
             show_layout_customizer: false,
@@ -346,10 +359,16 @@ impl OpenBciGuiApp {
     fn rebuild_grid_widgets_for_current_layout(&mut self) {
         let count = WidgetManager::container_count_for(self.current_layout);
 
-        let assignment = self.grid_layout_assignments
+        let assignment = self
+            .grid_layout_assignments
             .entry(self.current_layout)
             .or_insert_with(|| {
-                vec!["Time Series".into(), "FFT Plot".into(), "Band Power".into(), "Accelerometer".into()]
+                vec![
+                    "Time Series".into(),
+                    "FFT Plot".into(),
+                    "Band Power".into(),
+                    "Accelerometer".into(),
+                ]
             });
 
         // Ensure correct length
@@ -1109,14 +1128,26 @@ impl eframe::App for OpenBciGuiApp {
                 if let Some(imp) = t.as_any_mut().downcast_mut::<WImpedance>() {
                     if imp.wants_start() {
                         let chs: Vec<usize> = (0..b.exg_channels().len()).collect();
-                        let _ = b.start_impedance_test(&chs);
+                        match b.start_impedance_test(&chs) {
+                            Ok(()) => {
+                                self.event_log.log_system("Impedance test started on board");
+                            }
+                            Err(e) => {
+                                imp.notify_start_failed();
+                                self.event_log
+                                    .log_error(&format!("Impedance start failed: {e}"));
+                            }
+                        }
                         imp.clear_pending();
-                        self.event_log.log_system("Impedance test started on board");
                     }
                     if imp.wants_stop() {
-                        let _ = b.stop_impedance_test();
+                        if let Err(e) = b.stop_impedance_test() {
+                            self.event_log
+                                .log_error(&format!("Impedance stop failed: {e}"));
+                        } else {
+                            self.event_log.log_system("Impedance test stopped");
+                        }
                         imp.clear_pending();
-                        self.event_log.log_system("Impedance test stopped");
                     }
                 }
             }
@@ -1492,7 +1523,10 @@ impl eframe::App for OpenBciGuiApp {
                                         // Visual card for each tool
                                         egui::Frame::NONE
                                             .fill(theme::WHITE)
-                                            .stroke(egui::Stroke::new(1.0_f32, theme::OBJECT_BORDER_GREY))
+                                            .stroke(egui::Stroke::new(
+                                                1.0_f32,
+                                                theme::OBJECT_BORDER_GREY,
+                                            ))
                                             .inner_margin(6.0)
                                             .show(ui, |ui| {
                                                 ui.strong(tool.title());
@@ -1514,7 +1548,10 @@ impl eframe::App for OpenBciGuiApp {
                                     };
                                     egui::Frame::NONE
                                         .fill(theme::WHITE)
-                                        .stroke(egui::Stroke::new(1.0_f32, theme::OBJECT_BORDER_GREY))
+                                        .stroke(egui::Stroke::new(
+                                            1.0_f32,
+                                            theme::OBJECT_BORDER_GREY,
+                                        ))
                                         .inner_margin(6.0)
                                         .show(ui, |ui| {
                                             ui.strong("Packet Loss");

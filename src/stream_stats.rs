@@ -14,7 +14,11 @@ pub fn format_hz(hz: f64) -> String {
 }
 
 pub fn format_loss(percent: f64) -> String {
-    format!("Loss {:>width$.1}%", percent.clamp(0.0, 100.0), width = LOSS_WIDTH)
+    format!(
+        "Loss {:>width$.1}%",
+        percent.clamp(0.0, 100.0),
+        width = LOSS_WIDTH
+    )
 }
 
 pub fn loss_color(percent: f64) -> Color32 {

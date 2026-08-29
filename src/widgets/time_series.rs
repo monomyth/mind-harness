@@ -85,10 +85,14 @@ fn uv_std(xs: &[f64]) -> f64 {
         return 0.0;
     }
     let mean = xs.iter().sum::<f64>() / xs.len() as f64;
-    let var = xs.iter().map(|x| {
-        let d = x - mean;
-        d * d
-    }).sum::<f64>() / xs.len() as f64;
+    let var = xs
+        .iter()
+        .map(|x| {
+            let d = x - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / xs.len() as f64;
     var.sqrt()
 }
 
@@ -279,10 +283,7 @@ impl Widget for WTimeSeries {
                 .show_ui(ui, |ui| {
                     for (i, &sc) in scales.iter().enumerate() {
                         if ui
-                            .selectable_label(
-                                (self.y_scale_uv - sc).abs() < 0.1,
-                                scale_labels[i],
-                            )
+                            .selectable_label((self.y_scale_uv - sc).abs() < 0.1, scale_labels[i])
                             .clicked()
                         {
                             self.y_scale_uv = sc;
@@ -341,8 +342,10 @@ impl Widget for WTimeSeries {
                 |ui| {
                     let layout = channel_bar_layout(ui.available_width());
                     // Numbered electrode circle (Java on/off button)
-                    let (circ_resp, painter) =
-                        ui.allocate_painter(egui::vec2(ELECTRODE_W - 4.0, 22.0), egui::Sense::click());
+                    let (circ_resp, painter) = ui.allocate_painter(
+                        egui::vec2(ELECTRODE_W - 4.0, 22.0),
+                        egui::Sense::click(),
+                    );
                     let center = circ_resp.rect.center();
                     painter.circle_filled(center, 10.0, color);
                     painter.text(
@@ -359,7 +362,10 @@ impl Widget for WTimeSeries {
                     // Remaining width after the electrode button — identical on every row.
                     // ± / RMS overlay the trace so RMS digits cannot shift time.
                     let (plot_rect, _) = ui.allocate_exact_size(
-                        egui::vec2(layout.plot_w.min(ui.available_width()), (row_h - 2.0).max(8.0)),
+                        egui::vec2(
+                            layout.plot_w.min(ui.available_width()),
+                            (row_h - 2.0).max(8.0),
+                        ),
                         egui::Sense::hover(),
                     );
                     paint_channel_trace(
@@ -385,12 +391,9 @@ impl Widget for WTimeSeries {
                                 let next = (eff_scale * 2.0).min(10000.0);
                                 self.per_channel_y_scales[i] = next;
                             }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::TOP),
-                                |ui| {
-                                    ui.colored_label(color, format!("{:.2} uVrms", rms));
-                                },
-                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                ui.colored_label(color, format!("{:.2} uVrms", rms));
+                            });
                         });
                     });
                 },
@@ -407,11 +410,7 @@ impl Widget for WTimeSeries {
                 for i in hidden {
                     let color = theme::channel_color(i);
                     if ui
-                        .add(
-                            egui::Button::new(format!("{}", i + 1))
-                                .fill(color)
-                                .small(),
-                        )
+                        .add(egui::Button::new(format!("{}", i + 1)).fill(color).small())
                         .clicked()
                     {
                         self.visible_channels[i] = true;
@@ -450,7 +449,11 @@ mod tests {
         ys.extend(std::iter::repeat(0.0).take(250));
         let last_sec = super::uv_std_last_second(&ys, sr);
         let whole = super::uv_std(&ys);
-        assert!(last_sec.abs() < 1e-9, "last 1 s is constant 0, std={}", last_sec);
+        assert!(
+            last_sec.abs() < 1e-9,
+            "last 1 s is constant 0, std={}",
+            last_sec
+        );
         assert!(whole > 1.0, "full-window std should see the 10 µV block");
     }
 

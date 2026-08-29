@@ -3,11 +3,16 @@
 //! This is the Rust equivalent of the Java `BoardBrainFlow` + its subclasses.
 //! It can represent Synthetic, Cyton (Serial/WiFi), Ganglion (Native/BLE/WiFi), etc.
 
+use crate::board::impedance::{
+    column_window, cyton_impedance_off_cmd, cyton_impedance_on_cmd, ganglion_kohm,
+    kohm_from_lead_off_std_uv, population_std,
+};
 use crate::board::{BoardError, DataSource};
 use brainflow::board_shim::BoardShim;
 use brainflow::brainflow_input_params::BrainFlowInputParamsBuilder;
 use brainflow::{BoardIds, BrainFlowPresets, NoiseTypes};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub struct BrainFlowBoard {
     board: Option<BoardShim>,
@@ -33,10 +38,20 @@ pub struct BrainFlowBoard {
     package_num_channel: Option<usize>,
     index_tracker: Option<crate::stream_stats::SampleIndexTracker>,
 
-    /// Impedance check currently running (UI Start/Stop). Hardware path is best-effort;
-    /// Synthetic returns clearly-labelled simulated values only while this is true.
+    /// Impedance check currently running (UI Start/Stop).
     impedance_active: bool,
+    resistance_channels: Vec<usize>,
+    impedance_values: Vec<Option<f64>>,
+    cyton_imp_scan: Option<CytonImpScan>,
 }
+
+struct CytonImpScan {
+    channel: usize,
+    since: Instant,
+}
+
+/// Dwell long enough for a 1 s std window after ADS/lead-off settles.
+const CYTON_IMP_DWELL: Duration = Duration::from_millis(2000);
 
 impl BrainFlowBoard {
     pub fn new(board_id: BoardIds, serial_port: Option<String>, device_id: Option<String>) -> Self {
@@ -57,6 +72,12 @@ impl BrainFlowBoard {
                 .collect();
 
         let num_exg = exg_channels.len();
+
+        let resistance_channels: Vec<usize> = brainflow::board_shim::get_resistance_channels(
+            board_id,
+            BrainFlowPresets::DefaultPreset,
+        )
+        .unwrap_or_default();
 
         let package_num_channel = brainflow::board_shim::get_package_num_channel(
             board_id,
@@ -94,6 +115,9 @@ impl BrainFlowBoard {
             package_num_channel,
             index_tracker,
             impedance_active: false,
+            resistance_channels,
+            impedance_values: vec![None; num_exg],
+            cyton_imp_scan: None,
         }
     }
 
@@ -108,7 +132,9 @@ impl BrainFlowBoard {
         } else {
             board.exg_channels.truncate(n);
         }
-        board.filter_settings = crate::filter_settings::FilterSettings::new(board.exg_channels.len());
+        let n = board.exg_channels.len();
+        board.filter_settings = crate::filter_settings::FilterSettings::new(n);
+        board.impedance_values = vec![None; n];
         board
     }
 
@@ -162,6 +188,9 @@ impl DataSource for BrainFlowBoard {
     }
 
     fn uninitialize(&mut self) -> Result<(), BoardError> {
+        if self.impedance_active {
+            let _ = self.stop_impedance_test();
+        }
         if let Some(shim) = self.board.take() {
             if self.is_streaming {
                 let _ = shim.stop_stream();
@@ -174,6 +203,9 @@ impl DataSource for BrainFlowBoard {
         if let Some(t) = self.index_tracker.as_mut() {
             t.reset();
         }
+        self.impedance_active = false;
+        self.cyton_imp_scan = None;
+        self.impedance_values.fill(None);
         self.clear_buffers();
         Ok(())
     }
@@ -181,59 +213,66 @@ impl DataSource for BrainFlowBoard {
     fn update(&mut self) {
         self.last_delivered = 0;
         self.last_lost = 0;
-        if let Some(ref mut shim) = self.board {
-            if self.is_streaming {
-                if let Ok(arr) = shim.get_board_data(None, BrainFlowPresets::DefaultPreset) {
-                    let n_chans = arr.nrows();
-                    let n_samples = arr.ncols();
-                    if n_samples == 0 {
-                        return;
-                    }
+        let arr = match self.board.as_ref() {
+            Some(shim) if self.is_streaming => shim
+                .get_board_data(None, BrainFlowPresets::DefaultPreset)
+                .ok(),
+            _ => None,
+        };
+        let Some(arr) = arr else {
+            return;
+        };
+        let n_chans = arr.nrows();
+        let n_samples = arr.ncols();
+        if n_samples == 0 {
+            return;
+        }
 
-                    // Convert 2D array to row-major samples. Do **not** IIR here:
-                    // BrainFlow typically returns ~4–8 columns per 60 fps frame, and a
-                    // cold Butterworth on that length destroys blinks / slow EEG.
-                    let mut new_samples = Vec::with_capacity(n_samples);
-                    for s in 0..n_samples {
-                        let mut row = Vec::with_capacity(n_chans);
-                        for c in 0..n_chans {
-                            row.push(arr[[c, s]]);
-                        }
-                        new_samples.push(row);
-                    }
+        // Convert 2D array to row-major samples. Do **not** IIR here:
+        // BrainFlow typically returns ~4–8 columns per 60 fps frame, and a
+        // cold Butterworth on that length destroys blinks / slow EEG.
+        let mut new_samples = Vec::with_capacity(n_samples);
+        for s in 0..n_samples {
+            let mut row = Vec::with_capacity(n_chans);
+            for c in 0..n_chans {
+                row.push(arr[[c, s]]);
+            }
+            new_samples.push(row);
+        }
 
-                    let delivered = new_samples.len();
-                    if let (Some(pkg), Some(tracker)) =
-                        (self.package_num_channel, self.index_tracker.as_mut())
-                    {
-                        let mut lost = 0u64;
-                        for row in &new_samples {
-                            if let Some(&v) = row.get(pkg) {
-                                lost += tracker.observe(v as i32);
-                            }
-                        }
-                        self.last_lost = lost as usize;
-                    }
-                    let max_keep =
-                        crate::filter_settings::display_buffer_keep(self.sample_rate as usize);
-                    let filtered = if let Ok(mut guard) = self.latest_data.lock() {
-                        crate::filter_settings::append_raw_and_filter(
-                            &mut guard,
-                            new_samples,
-                            max_keep,
-                            &self.exg_channels,
-                            self.sample_rate as usize,
-                            &self.filter_settings,
-                        )
-                    } else {
-                        Vec::new()
-                    };
-                    if let Ok(mut fg) = self.filtered_data.lock() {
-                        *fg = filtered;
-                    }
-                    self.last_delivered = delivered;
+        let delivered = new_samples.len();
+        if let (Some(pkg), Some(tracker)) = (self.package_num_channel, self.index_tracker.as_mut())
+        {
+            let mut lost = 0u64;
+            for row in &new_samples {
+                if let Some(&v) = row.get(pkg) {
+                    lost += tracker.observe(v as i32);
                 }
             }
+            self.last_lost = lost as usize;
+        }
+        if self.impedance_active && self.is_ganglion() {
+            self.ingest_ganglion_resistance(&new_samples);
+        }
+        let max_keep = crate::filter_settings::display_buffer_keep(self.sample_rate as usize);
+        let filtered = if let Ok(mut guard) = self.latest_data.lock() {
+            crate::filter_settings::append_raw_and_filter(
+                &mut guard,
+                new_samples,
+                max_keep,
+                &self.exg_channels,
+                self.sample_rate as usize,
+                &self.filter_settings,
+            )
+        } else {
+            Vec::new()
+        };
+        if let Ok(mut fg) = self.filtered_data.lock() {
+            *fg = filtered;
+        }
+        self.last_delivered = delivered;
+        if self.impedance_active && self.is_ads1299() {
+            self.tick_cyton_impedance();
         }
     }
 
@@ -341,27 +380,58 @@ impl DataSource for BrainFlowBoard {
     }
 
     fn supports_impedance(&self) -> bool {
-        matches!(
-            self.board_id,
-            BoardIds::CytonBoard | BoardIds::CytonDaisyBoard | BoardIds::GanglionNativeBoard
-        )
+        self.is_ads1299() || self.is_ganglion() || self.board_id == BoardIds::SyntheticBoard
     }
 
     fn start_impedance_test(&mut self, _channels: &[usize]) -> Result<(), BoardError> {
-        self.impedance_active = true;
-        if let Some(ref mut shim) = self.board {
-            // Best-effort BrainFlow command. Real kΩ values are only synthesized for
-            // SyntheticBoard; Cyton/Ganglion return None until a confirmed API exists.
-            let _ = shim.config_board("startimp");
+        let n = self.exg_channels.len();
+        self.impedance_values = vec![None; n];
+        self.cyton_imp_scan = None;
+
+        if self.board_id == BoardIds::SyntheticBoard {
+            self.impedance_active = true;
+            return Ok(());
         }
-        Ok(())
+
+        if self.board.is_none() {
+            return Err(BoardError::NotInitialized);
+        }
+
+        if self.is_ganglion() {
+            self.config_board_str("z")?;
+            self.impedance_active = true;
+            return Ok(());
+        }
+
+        if self.is_ads1299() {
+            let cmd = cyton_impedance_on_cmd(0)
+                .ok_or_else(|| BoardError::Io("Cyton has no EXG channels for impedance".into()))?;
+            self.config_board_str(&cmd)?;
+            self.impedance_active = true;
+            self.cyton_imp_scan = Some(CytonImpScan {
+                channel: 0,
+                since: Instant::now(),
+            });
+            return Ok(());
+        }
+
+        Err(BoardError::Io(
+            "impedance is not supported on this board".into(),
+        ))
     }
 
     fn stop_impedance_test(&mut self) -> Result<(), BoardError> {
-        self.impedance_active = false;
-        if let Some(ref mut shim) = self.board {
-            let _ = shim.config_board("stopimp");
+        let scan = self.cyton_imp_scan.take();
+        if let Some(scan) = scan {
+            if let Some(cmd) = cyton_impedance_off_cmd(scan.channel) {
+                let _ = self.config_board_str(&cmd);
+            }
         }
+        if self.is_ganglion() && self.impedance_active {
+            let _ = self.config_board_str("Z");
+        }
+        self.impedance_active = false;
+        self.impedance_values.fill(None);
         Ok(())
     }
 
@@ -370,17 +440,39 @@ impl DataSource for BrainFlowBoard {
         if !self.impedance_active {
             return vec![None; n];
         }
-        // Only Synthetic is allowed to invent numbers, and the UI labels them as simulated.
+        // Only Synthetic may invent numbers; the UI labels them simulated.
         if self.board_id == BoardIds::SyntheticBoard {
-            return (0..n)
-                .map(|i| Some(5.0 + (i as f64) * 0.8))
-                .collect();
+            return (0..n).map(|i| Some(5.0 + (i as f64) * 0.8)).collect();
         }
-        vec![None; n]
+        let mut out = vec![None; n];
+        for (i, v) in self.impedance_values.iter().take(n).enumerate() {
+            out[i] = *v;
+        }
+        out
     }
 
     fn impedance_is_simulated(&self) -> bool {
         self.board_id == BoardIds::SyntheticBoard
+    }
+
+    fn impedance_quality_kohm(&self) -> (f64, f64) {
+        if self.board_id == BoardIds::SyntheticBoard {
+            (5.0, 15.0)
+        } else if self.is_ads1299() {
+            (750.0, 2500.0)
+        } else if self.is_ganglion() {
+            (50.0, 150.0)
+        } else {
+            (5.0, 15.0)
+        }
+    }
+
+    fn impedance_scan_channel(&self) -> Option<usize> {
+        if self.impedance_active {
+            self.cyton_imp_scan.as_ref().map(|s| s.channel)
+        } else {
+            None
+        }
     }
 }
 
@@ -397,6 +489,89 @@ fn tail_locked(buf: &Mutex<Vec<Vec<f64>>>, max_samples: usize) -> Vec<Vec<f64>> 
 // Inherent methods for BrainFlowBoard (filter controls + internal use)
 // Note: set_* are also provided via DataSource trait override so they work on Box<dyn DataSource>
 impl BrainFlowBoard {
+    fn is_ads1299(&self) -> bool {
+        matches!(
+            self.board_id,
+            BoardIds::CytonBoard | BoardIds::CytonDaisyBoard
+        )
+    }
+
+    fn is_ganglion(&self) -> bool {
+        matches!(self.board_id, BoardIds::GanglionNativeBoard)
+    }
+
+    fn config_board_str(&self, cmd: &str) -> Result<(), BoardError> {
+        let shim = self.board.as_ref().ok_or(BoardError::NotInitialized)?;
+        shim.config_board(cmd)
+            .map_err(|e| BoardError::BrainFlow(e.to_string()))?;
+        Ok(())
+    }
+
+    fn ingest_ganglion_resistance(&mut self, rows: &[Vec<f64>]) {
+        let n = self.exg_channels.len();
+        if self.impedance_values.len() != n {
+            self.impedance_values.resize(n, None);
+        }
+        for row in rows {
+            for (i, &col) in self.resistance_channels.iter().take(n).enumerate() {
+                if let Some(&v) = row.get(col) {
+                    if let Some(kohm) = ganglion_kohm(v) {
+                        self.impedance_values[i] = Some(kohm);
+                    }
+                }
+            }
+        }
+    }
+
+    fn tick_cyton_impedance(&mut self) {
+        let n = self.exg_channels.len();
+        if n == 0 {
+            return;
+        }
+        let ch = {
+            let Some(scan) = self.cyton_imp_scan.as_ref() else {
+                return;
+            };
+            if scan.since.elapsed() < CYTON_IMP_DWELL {
+                return;
+            }
+            scan.channel
+        };
+        if let Some(kohm) = self.cyton_kohm_for_channel(ch) {
+            if ch < self.impedance_values.len() {
+                self.impedance_values[ch] = Some(kohm);
+            }
+        }
+        let next = (ch + 1) % n;
+        let Some(off) = cyton_impedance_off_cmd(ch) else {
+            return;
+        };
+        let Some(on) = cyton_impedance_on_cmd(next) else {
+            return;
+        };
+        let cmd = format!("{off}{on}");
+        if let Err(e) = self.config_board_str(&cmd) {
+            tracing::warn!("Cyton impedance channel switch failed: {e}");
+            let _ = self.config_board_str(&off);
+            self.impedance_active = false;
+            self.cyton_imp_scan = None;
+            return;
+        }
+        self.cyton_imp_scan = Some(CytonImpScan {
+            channel: next,
+            since: Instant::now(),
+        });
+    }
+
+    fn cyton_kohm_for_channel(&self, ch: usize) -> Option<f64> {
+        let col = *self.exg_channels.get(ch)?;
+        let window = self.sample_rate.max(1) as usize;
+        let guard = self.latest_data.lock().ok()?;
+        let xs = column_window(&guard, col, window)?;
+        let std = population_std(&xs)?;
+        Some(kohm_from_lead_off_std_uv(std))
+    }
+
     fn clear_buffers(&mut self) {
         if let Ok(mut g) = self.latest_data.lock() {
             g.clear();
@@ -461,5 +636,43 @@ mod tests {
     fn ganglion_exg_skips_package_num_column() {
         let b = BrainFlowBoard::ganglion_native("test");
         assert_eq!(b.exg_channels(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn cyton_impedance_is_live_not_simulated() {
+        let mut b = BrainFlowBoard::cyton_serial("/dev/null");
+        assert!(b.supports_impedance());
+        assert!(!b.impedance_is_simulated());
+        assert_eq!(b.impedance_quality_kohm(), (750.0, 2500.0));
+        assert_eq!(b.get_impedance(), vec![None; 8]);
+        assert!(b.start_impedance_test(&[0]).is_err());
+        assert!(!b.impedance_is_simulated());
+        assert_eq!(b.get_impedance(), vec![None; 8]);
+    }
+
+    #[test]
+    fn synthetic_impedance_is_labelled_simulated() {
+        let mut b = BrainFlowBoard::synthetic(8);
+        assert!(b.supports_impedance());
+        assert!(b.impedance_is_simulated());
+        assert_eq!(b.impedance_quality_kohm(), (5.0, 15.0));
+        assert_eq!(b.get_impedance(), vec![None; 8]);
+        b.start_impedance_test(&[0, 1]).unwrap();
+        let vals = b.get_impedance();
+        assert_eq!(vals.len(), 8);
+        assert!(vals.iter().all(|v| v.is_some()));
+        b.stop_impedance_test().unwrap();
+        assert!(b.get_impedance().iter().all(|v| v.is_none()));
+    }
+
+    #[test]
+    fn ganglion_impedance_is_live_not_simulated() {
+        let mut b = BrainFlowBoard::ganglion_native("test");
+        assert!(b.supports_impedance());
+        assert!(!b.impedance_is_simulated());
+        assert_eq!(b.impedance_quality_kohm(), (50.0, 150.0));
+        assert_eq!(b.get_impedance(), vec![None; 4]);
+        assert!(b.start_impedance_test(&[0]).is_err());
+        assert_eq!(b.get_impedance(), vec![None; 4]);
     }
 }

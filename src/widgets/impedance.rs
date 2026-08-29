@@ -3,7 +3,8 @@
 //! Matches the spirit of the original OpenBCI GUI "Impedance" / "Hardware Settings" flow.
 //! - Start / Stop buttons drive the board into impedance measurement mode.
 //! - Per-channel readings (kΩ) with classic color coding (green good, yellow marginal, red poor).
-//! - Works for live hardware (when BrainFlow supports) and beautifully in Playback (simulated values).
+//! - Live Cyton/Ganglion: kΩ from ADS1299 lead-off / Ganglion resistance columns (never faked).
+//! - Synthetic and Playback keep labelled simulated readings.
 //! - The widget requests actions via internal flags; the app polls with downcast_mut and
 //!   calls the DataSource mut methods. This keeps the Widget trait surface unchanged.
 
@@ -41,6 +42,11 @@ impl WImpedance {
     pub fn clear_pending(&mut self) {
         self.pending_start = false;
         self.pending_stop = false;
+    }
+
+    pub fn notify_start_failed(&mut self) {
+        self.testing = false;
+        self.pending_start = false;
     }
 }
 
@@ -97,19 +103,20 @@ impl Widget for WImpedance {
                         "Impedance test started",
                     );
                 }
-            } else {
-                if ui.button("⏹ Stop Test").clicked() {
-                    self.pending_stop = true;
-                    self.testing = false;
-                    ctx.log_event(
-                        crate::event_log::LogLevel::Info,
-                        "Impedance",
-                        "Impedance test stopped",
-                    );
-                }
+            } else if ui.button("⏹ Stop Test").clicked() {
+                self.pending_stop = true;
+                self.testing = false;
+                ctx.log_event(
+                    crate::event_log::LogLevel::Info,
+                    "Impedance",
+                    "Impedance test stopped",
+                );
             }
             if self.testing {
                 ui.colored_label(egui::Color32::from_rgb(80, 200, 120), "● Testing...");
+            }
+            if let Some(ch) = source.impedance_scan_channel() {
+                ui.small(format!("measuring ch {} (ADS1299 lead-off)", ch + 1));
             }
         });
 
@@ -119,6 +126,8 @@ impl Widget for WImpedance {
             ui.small(format!("Waiting for {} channel readings…", n));
             return;
         }
+
+        let (green_max, yellow_max) = source.impedance_quality_kohm();
 
         // Classic per-channel readout table
         egui::Grid::new("imp_grid").striped(true).show(ui, |ui| {
@@ -132,9 +141,9 @@ impl Widget for WImpedance {
                 match val {
                     Some(v) => {
                         let v = *v;
-                        let (color, qual) = if v < 5.0 {
+                        let (color, qual) = if v < green_max {
                             (egui::Color32::from_rgb(60, 180, 90), "Good")
-                        } else if v < 15.0 {
+                        } else if v < yellow_max {
                             (egui::Color32::from_rgb(230, 180, 60), "OK")
                         } else {
                             (egui::Color32::from_rgb(230, 80, 70), "Poor / dry")
@@ -155,7 +164,16 @@ impl Widget for WImpedance {
             }
         });
 
-        ui.small("Typical dry-electrode targets: < 5 kΩ excellent, 5–15 acceptable, >15 re-prep.");
+        if source.impedance_is_simulated() {
+            ui.small(
+                "Typical dry-electrode targets: < 5 kΩ excellent, 5–15 acceptable, >15 re-prep.",
+            );
+        } else {
+            ui.small(format!(
+                "Live lead-off (not simulated): < {:.0} kΩ good, {:.0}–{:.0} acceptable.",
+                green_max, green_max, yellow_max
+            ));
+        }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

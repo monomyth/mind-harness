@@ -11,6 +11,7 @@
 //! - LSL stream in (future)
 
 pub mod brainflow_board;
+pub mod impedance;
 pub mod playback;
 pub mod synthetic;
 
@@ -135,6 +136,16 @@ pub trait DataSource: Send + Sync {
     fn impedance_is_simulated(&self) -> bool {
         false
     }
+
+    /// `(green_max_kΩ, yellow_max_kΩ)` for contact coloring. Live Cyton uses Java 750 / 2500.
+    fn impedance_quality_kohm(&self) -> (f64, f64) {
+        (5.0, 15.0)
+    }
+
+    /// 0-based EXG index currently injecting lead-off (Cyton scan), if any.
+    fn impedance_scan_channel(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// Copy EXG columns out of a full BrainFlow row (which also holds index, timestamp, accel, …).
@@ -174,7 +185,10 @@ mod tests {
         // Typical Cyton-style row: sample index, 8 EXG, then extras.
         let row = vec![42.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 0.1, 0.2];
         let exg = vec![1, 2, 3, 4, 5, 6, 7, 8];
-        assert_eq!(extract_exg(&row, &exg), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(
+            extract_exg(&row, &exg),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
     }
 
     #[test]

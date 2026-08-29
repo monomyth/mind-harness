@@ -33,8 +33,8 @@ impl WFFT {
     pub fn new() -> Self {
         Self {
             title: "FFT Plot".to_string(),
-            max_freq: 60.0, // Java `xLimOptions[2]`
-            max_uv: 100.0,  // Java `yLimOptions[2]`
+            max_freq: 60.0,     // Java `xLimOptions[2]`
+            max_uv: 100.0,      // Java `yLimOptions[2]`
             smoothing_index: 2, // default 0.75 — matches original Java GUI
             prev_mags: vec![],
         }
@@ -99,7 +99,10 @@ impl Widget for WFFT {
                 .show_ui(ui, |ui| {
                     for &uv in MAX_UV_OPTIONS {
                         if ui
-                            .selectable_label((self.max_uv - uv).abs() < 0.1, format!("{:.0} uV", uv))
+                            .selectable_label(
+                                (self.max_uv - uv).abs() < 0.1,
+                                format!("{:.0} uV", uv),
+                            )
                             .clicked()
                         {
                             self.max_uv = uv;

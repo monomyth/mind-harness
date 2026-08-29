@@ -398,7 +398,8 @@ impl DataSource for PlaybackBoard {
     }
 
     fn set_bandpass_filter(&mut self, channel: usize, enabled: bool, low: f64, high: f64) {
-        self.filter_settings.set_bandpass(channel, enabled, low, high);
+        self.filter_settings
+            .set_bandpass(channel, enabled, low, high);
         self.filter_dirty = true;
     }
 
