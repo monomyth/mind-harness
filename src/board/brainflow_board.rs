@@ -11,6 +11,7 @@ use crate::board::{BoardError, DataSource};
 use brainflow::board_shim::BoardShim;
 use brainflow::brainflow_input_params::BrainFlowInputParamsBuilder;
 use brainflow::{BoardIds, BrainFlowPresets, NoiseTypes};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -44,6 +45,10 @@ pub struct BrainFlowBoard {
     impedance_values: Vec<Option<f64>>,
     cyton_imp_scan: Option<CytonImpScan>,
     impedance_error: Option<String>,
+    imp_io_busy: bool,
+    imp_io_rx: Mutex<Option<Receiver<CytonImpIoResult>>>,
+    imp_pending_kind: Option<CytonImpIoKind>,
+    imp_stop_queued: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -60,10 +65,85 @@ enum CytonImpScan {
     },
 }
 
+#[derive(Clone, Copy)]
+enum CytonImpIoKind {
+    StartOn {
+        channel: usize,
+    },
+    SwitchOff {
+        from: usize,
+        next: usize,
+        want_resume: bool,
+    },
+    SwitchOn {
+        next: usize,
+    },
+    StopOff {
+        channel: usize,
+    },
+    StopResume,
+}
+
+struct CytonImpIoResult {
+    kind: CytonImpIoKind,
+    sent: bool,
+    streaming: bool,
+    err: Option<String>,
+}
+
 /// Dwell long enough for a 1 s std window after ADS/lead-off settles.
 const CYTON_IMP_DWELL: Duration = Duration::from_millis(2000);
 const CYTON_IMP_OFF_GAP: Duration = Duration::from_millis(150);
 const BRAINFLOW_STREAM_CAP: usize = 45000;
+
+/// Pause / `config_board` / resume for Cyton `x`/`z`. Runs off the eframe thread
+/// because BrainFlow waits ~1 s for `$$$` when the stream is stopped.
+fn run_cyton_serial_io(
+    board_id: BoardIds,
+    serial_port: Option<String>,
+    cmd: Option<String>,
+    stop_first: bool,
+    start_after: bool,
+) -> (bool, bool, Option<String>) {
+    let mut builder = BrainFlowInputParamsBuilder::default();
+    if let Some(port) = serial_port {
+        builder = builder.serial_port(port);
+    }
+    let params = builder.build();
+    let shim = match BoardShim::new(board_id, params) {
+        Ok(s) => s,
+        Err(e) => return (false, stop_first, Some(e.to_string())),
+    };
+    let mut streaming = stop_first;
+    if stop_first {
+        match shim.stop_stream() {
+            Ok(()) => streaming = false,
+            Err(e) => return (false, true, Some(e.to_string())),
+        }
+    }
+    let sent = if let Some(cmd) = cmd {
+        match shim.config_board(&cmd) {
+            Ok(_) => true,
+            Err(e) => {
+                if start_after && !streaming {
+                    if shim.start_stream(BRAINFLOW_STREAM_CAP, "").is_ok() {
+                        streaming = true;
+                    }
+                }
+                return (false, streaming, Some(e.to_string()));
+            }
+        }
+    } else {
+        true
+    };
+    if start_after && !streaming {
+        match shim.start_stream(BRAINFLOW_STREAM_CAP, "") {
+            Ok(()) => streaming = true,
+            Err(e) => return (sent, false, Some(e.to_string())),
+        }
+    }
+    (sent, streaming, None)
+}
 
 impl BrainFlowBoard {
     pub fn new(board_id: BoardIds, serial_port: Option<String>, device_id: Option<String>) -> Self {
@@ -131,6 +211,10 @@ impl BrainFlowBoard {
             impedance_values: vec![None; num_exg],
             cyton_imp_scan: None,
             impedance_error: None,
+            imp_io_busy: false,
+            imp_io_rx: Mutex::new(None),
+            imp_pending_kind: None,
+            imp_stop_queued: false,
         }
     }
 
@@ -201,12 +285,29 @@ impl DataSource for BrainFlowBoard {
     }
 
     fn uninitialize(&mut self) -> Result<(), BoardError> {
-        if self.impedance_active {
-            let _ = self.stop_impedance_test();
+        self.drain_cyton_imp_io();
+        if self.impedance_active && self.is_ads1299() {
+            // Session teardown can hitch; restore ADS before releasing the port.
+            if let Some(ch) = self.impedance_scan_off_channel() {
+                if let Some(cmd) = cyton_impedance_off_cmd(ch) {
+                    let _ = run_cyton_serial_io(
+                        self.board_id,
+                        self.serial_port.clone(),
+                        Some(cmd),
+                        self.is_streaming,
+                        self.is_streaming,
+                    );
+                }
+            } else if self.is_streaming {
+                let _ =
+                    run_cyton_serial_io(self.board_id, self.serial_port.clone(), None, false, true);
+            }
         }
         if let Some(shim) = self.board.take() {
             if self.is_streaming {
-                let _ = shim.stop_stream();
+                if shim.stop_stream().is_ok() {
+                    self.is_streaming = false;
+                }
             }
             let _ = shim.release_session();
         }
@@ -219,6 +320,9 @@ impl DataSource for BrainFlowBoard {
         self.impedance_active = false;
         self.cyton_imp_scan = None;
         self.impedance_error = None;
+        self.imp_io_busy = false;
+        self.imp_stop_queued = false;
+        self.imp_pending_kind = None;
         self.impedance_values.fill(None);
         self.clear_buffers();
         Ok(())
@@ -227,6 +331,10 @@ impl DataSource for BrainFlowBoard {
     fn update(&mut self) {
         self.last_delivered = 0;
         self.last_lost = 0;
+        self.poll_cyton_imp_io();
+        if self.imp_io_busy {
+            return;
+        }
         if self.impedance_active && self.is_ads1299() && !self.is_streaming {
             self.tick_cyton_impedance();
             return;
@@ -301,6 +409,9 @@ impl DataSource for BrainFlowBoard {
     }
 
     fn start_streaming(&mut self) -> Result<(), BoardError> {
+        if self.imp_io_busy {
+            return Err(BoardError::Io("board busy with impedance command".into()));
+        }
         if let Some(ref mut shim) = self.board {
             if !self.is_streaming {
                 shim.start_stream(BRAINFLOW_STREAM_CAP, "")
@@ -320,9 +431,13 @@ impl DataSource for BrainFlowBoard {
     }
 
     fn stop_streaming(&mut self) -> Result<(), BoardError> {
+        if self.imp_io_busy {
+            return Err(BoardError::Io("board busy with impedance command".into()));
+        }
         if let Some(ref mut shim) = self.board {
             if self.is_streaming {
-                let _ = shim.stop_stream();
+                shim.stop_stream()
+                    .map_err(|e| BoardError::BrainFlow(e.to_string()))?;
                 self.is_streaming = false;
             }
         }
@@ -408,9 +523,11 @@ impl DataSource for BrainFlowBoard {
     }
 
     fn start_impedance_test(&mut self, _channels: &[usize]) -> Result<(), BoardError> {
+        self.poll_cyton_imp_io();
         let n = self.exg_channels.len();
         self.impedance_values = vec![None; n];
         self.cyton_imp_scan = None;
+        self.imp_stop_queued = false;
 
         if self.board_id == BoardIds::SyntheticBoard {
             self.impedance_active = true;
@@ -430,12 +547,23 @@ impl DataSource for BrainFlowBoard {
         if self.is_ads1299() {
             let cmd = cyton_impedance_on_cmd(0)
                 .ok_or_else(|| BoardError::Io("Cyton has no EXG channels for impedance".into()))?;
-            self.cyton_config_with_stream_paused(&cmd)?;
+            // Keep Measuring before ACK so Stop can restore if resume fails after `on`.
             self.impedance_active = true;
             self.cyton_imp_scan = Some(CytonImpScan::Measuring {
                 channel: 0,
                 since: Instant::now(),
             });
+            let streaming = self.is_streaming;
+            if let Err(e) = self.launch_cyton_io(
+                Some(cmd),
+                streaming,
+                streaming,
+                CytonImpIoKind::StartOn { channel: 0 },
+            ) {
+                self.impedance_active = false;
+                self.cyton_imp_scan = None;
+                return Err(e);
+            }
             return Ok(());
         }
 
@@ -445,26 +573,12 @@ impl DataSource for BrainFlowBoard {
     }
 
     fn stop_impedance_test(&mut self) -> Result<(), BoardError> {
-        if let Some(scan) = self.cyton_imp_scan {
-            match scan {
-                CytonImpScan::Measuring { channel, .. } => {
-                    let cmd = cyton_impedance_off_cmd(channel).ok_or_else(|| {
-                        BoardError::Io("Cyton has no EXG channels for impedance".into())
-                    })?;
-                    self.cyton_config_with_stream_paused(&cmd)?;
-                }
-                CytonImpScan::OffWait { resume_stream, .. } => {
-                    self.resume_brainflow_stream(resume_stream)?;
-                }
-            }
+        self.poll_cyton_imp_io();
+        if self.imp_io_busy {
+            self.imp_stop_queued = true;
+            return Ok(());
         }
-        if self.is_ganglion() && self.impedance_active {
-            self.config_board_str("Z")?;
-        }
-        self.cyton_imp_scan = None;
-        self.impedance_active = false;
-        self.impedance_values.fill(None);
-        Ok(())
+        self.begin_cyton_imp_stop()
     }
 
     fn get_impedance(&self) -> Vec<Option<f64>> {
@@ -550,54 +664,212 @@ impl BrainFlowBoard {
         Ok(())
     }
 
-    /// BrainFlow cannot ACK Cyton `x`/`z` while the serial stream is running.
-    fn pause_brainflow_stream(&mut self) -> bool {
-        if !self.is_streaming {
-            return false;
+    fn impedance_scan_off_channel(&self) -> Option<usize> {
+        match self.cyton_imp_scan {
+            Some(CytonImpScan::Measuring { channel, .. }) => Some(channel),
+            Some(CytonImpScan::OffWait { .. }) => None,
+            None => None,
         }
-        if let Some(shim) = self.board.as_ref() {
-            let _ = shim.stop_stream();
-        }
-        self.is_streaming = false;
-        true
     }
 
-    fn resume_brainflow_stream(&mut self, was_streaming: bool) -> Result<(), BoardError> {
-        if !was_streaming || self.is_streaming {
-            return Ok(());
+    fn launch_cyton_io(
+        &mut self,
+        cmd: Option<String>,
+        stop_first: bool,
+        start_after: bool,
+        kind: CytonImpIoKind,
+    ) -> Result<(), BoardError> {
+        if self.imp_io_busy {
+            return Err(BoardError::Io(
+                "impedance command already in progress".into(),
+            ));
         }
-        let shim = self.board.as_ref().ok_or(BoardError::NotInitialized)?;
-        shim.start_stream(BRAINFLOW_STREAM_CAP, "")
-            .map_err(|e| BoardError::BrainFlow(e.to_string()))?;
-        self.is_streaming = true;
-        self.last_delivered = 0;
-        self.last_lost = 0;
-        if let Some(t) = self.index_tracker.as_mut() {
-            t.reset();
+        let board_id = self.board_id;
+        let port = self.serial_port.clone();
+        let (tx, rx) = mpsc::channel();
+        if let Ok(mut slot) = self.imp_io_rx.lock() {
+            *slot = Some(rx);
         }
-        self.clear_buffers();
+        self.imp_io_busy = true;
+        self.imp_pending_kind = Some(kind);
+        let spawn = std::thread::Builder::new()
+            .name("cyton-imp".into())
+            .spawn(move || {
+                let (sent, streaming, err) =
+                    run_cyton_serial_io(board_id, port, cmd, stop_first, start_after);
+                let _ = tx.send(CytonImpIoResult {
+                    kind,
+                    sent,
+                    streaming,
+                    err,
+                });
+            });
+        if let Err(e) = spawn {
+            self.imp_io_busy = false;
+            self.imp_pending_kind = None;
+            if let Ok(mut slot) = self.imp_io_rx.lock() {
+                *slot = None;
+            }
+            return Err(BoardError::Io(e.to_string()));
+        }
         Ok(())
     }
 
-    fn cyton_config_with_stream_paused(&mut self, cmd: &str) -> Result<(), BoardError> {
-        let was = self.pause_brainflow_stream();
-        let send = self.config_board_str(cmd);
-        let resume = self.resume_brainflow_stream(was);
-        match send {
-            Err(e) => {
-                let _ = resume;
-                Err(e)
+    fn drain_cyton_imp_io(&mut self) {
+        let rx = self.imp_io_rx.lock().ok().and_then(|mut g| g.take());
+        if let Some(rx) = rx {
+            let _ = rx.recv_timeout(Duration::from_secs(5));
+        }
+        self.imp_io_busy = false;
+        self.imp_pending_kind = None;
+    }
+
+    fn poll_cyton_imp_io(&mut self) {
+        let result = {
+            let Ok(mut slot) = self.imp_io_rx.lock() else {
+                return;
+            };
+            let Some(rx) = slot.as_mut() else {
+                return;
+            };
+            match rx.try_recv() {
+                Ok(r) => {
+                    *slot = None;
+                    Some(r)
+                }
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => {
+                    *slot = None;
+                    let kind = self.imp_pending_kind.unwrap_or(CytonImpIoKind::StopResume);
+                    Some(CytonImpIoResult {
+                        kind,
+                        sent: false,
+                        streaming: self.is_streaming,
+                        err: Some("impedance worker disconnected".into()),
+                    })
+                }
             }
-            Ok(()) => resume,
+        };
+        let Some(result) = result else {
+            return;
+        };
+        self.imp_io_busy = false;
+        self.imp_pending_kind = None;
+        self.apply_cyton_imp_io_result(result);
+        if self.imp_stop_queued && !self.imp_io_busy && self.impedance_active {
+            self.imp_stop_queued = false;
+            let _ = self.begin_cyton_imp_stop();
         }
     }
 
-    fn abort_cyton_impedance(&mut self, err: BoardError, resume_stream: bool) {
-        tracing::warn!("Cyton impedance aborted: {err}");
-        self.impedance_error = Some(err.to_string());
-        self.impedance_active = false;
-        self.cyton_imp_scan = None;
-        let _ = self.resume_brainflow_stream(resume_stream);
+    fn apply_cyton_imp_io_result(&mut self, result: CytonImpIoResult) {
+        let was_streaming = self.is_streaming;
+        self.is_streaming = result.streaming;
+        if result.streaming && !was_streaming {
+            self.last_delivered = 0;
+            self.last_lost = 0;
+            if let Some(t) = self.index_tracker.as_mut() {
+                t.reset();
+            }
+            self.clear_buffers();
+        }
+        if let Some(e) = result.err {
+            tracing::warn!("Cyton impedance IO: {e}");
+            self.impedance_error = Some(e);
+        }
+        match result.kind {
+            CytonImpIoKind::StartOn { channel } => {
+                if result.sent {
+                    self.impedance_active = true;
+                    self.cyton_imp_scan = Some(CytonImpScan::Measuring {
+                        channel,
+                        since: Instant::now(),
+                    });
+                } else {
+                    self.impedance_active = false;
+                    self.cyton_imp_scan = None;
+                }
+            }
+            CytonImpIoKind::SwitchOff {
+                from,
+                next,
+                want_resume,
+            } => {
+                if result.sent {
+                    self.cyton_imp_scan = Some(CytonImpScan::OffWait {
+                        next,
+                        since: Instant::now(),
+                        resume_stream: want_resume,
+                    });
+                } else {
+                    self.cyton_imp_scan = Some(CytonImpScan::Measuring {
+                        channel: from,
+                        since: Instant::now(),
+                    });
+                }
+            }
+            CytonImpIoKind::SwitchOn { next } => {
+                if result.sent {
+                    self.impedance_active = true;
+                    self.cyton_imp_scan = Some(CytonImpScan::Measuring {
+                        channel: next,
+                        since: Instant::now(),
+                    });
+                } else {
+                    self.cyton_imp_scan = None;
+                    self.impedance_active = false;
+                }
+            }
+            CytonImpIoKind::StopOff { channel } => {
+                if result.sent {
+                    self.cyton_imp_scan = None;
+                    self.impedance_active = false;
+                    self.impedance_values.fill(None);
+                } else {
+                    self.impedance_active = true;
+                    self.cyton_imp_scan = Some(CytonImpScan::Measuring {
+                        channel,
+                        since: Instant::now(),
+                    });
+                }
+            }
+            CytonImpIoKind::StopResume => {
+                self.cyton_imp_scan = None;
+                self.impedance_active = false;
+                self.impedance_values.fill(None);
+            }
+        }
+    }
+
+    fn begin_cyton_imp_stop(&mut self) -> Result<(), BoardError> {
+        if self.is_ganglion() && self.impedance_active {
+            self.config_board_str("Z")?;
+            self.impedance_active = false;
+            self.impedance_values.fill(None);
+            return Ok(());
+        }
+        match self.cyton_imp_scan {
+            Some(CytonImpScan::Measuring { channel, .. }) => {
+                let cmd = cyton_impedance_off_cmd(channel).ok_or_else(|| {
+                    BoardError::Io("Cyton has no EXG channels for impedance".into())
+                })?;
+                let streaming = self.is_streaming;
+                self.launch_cyton_io(
+                    Some(cmd),
+                    streaming,
+                    streaming,
+                    CytonImpIoKind::StopOff { channel },
+                )
+            }
+            Some(CytonImpScan::OffWait { resume_stream, .. }) => {
+                self.launch_cyton_io(None, false, resume_stream, CytonImpIoKind::StopResume)
+            }
+            None => {
+                self.impedance_active = false;
+                self.impedance_values.fill(None);
+                Ok(())
+            }
+        }
     }
 
     fn ingest_ganglion_resistance(&mut self, rows: &[Vec<f64>]) {
@@ -617,6 +889,9 @@ impl BrainFlowBoard {
     }
 
     fn tick_cyton_impedance(&mut self) {
+        if self.imp_io_busy {
+            return;
+        }
         let n = self.exg_channels.len();
         if n == 0 {
             return;
@@ -634,16 +909,19 @@ impl BrainFlowBoard {
                 let Some(off) = cyton_impedance_off_cmd(channel) else {
                     return;
                 };
-                let was = self.pause_brainflow_stream();
-                if let Err(e) = self.config_board_str(&off) {
-                    self.abort_cyton_impedance(e, was);
-                    return;
+                let want_resume = self.is_streaming;
+                if let Err(e) = self.launch_cyton_io(
+                    Some(off),
+                    want_resume,
+                    false,
+                    CytonImpIoKind::SwitchOff {
+                        from: channel,
+                        next,
+                        want_resume,
+                    },
+                ) {
+                    self.impedance_error = Some(e.to_string());
                 }
-                self.cyton_imp_scan = Some(CytonImpScan::OffWait {
-                    next,
-                    since: Instant::now(),
-                    resume_stream: was,
-                });
             }
             Some(CytonImpScan::OffWait {
                 next,
@@ -651,24 +929,22 @@ impl BrainFlowBoard {
                 resume_stream,
             }) if since.elapsed() >= CYTON_IMP_OFF_GAP => {
                 let Some(on) = cyton_impedance_on_cmd(next) else {
-                    self.abort_cyton_impedance(
-                        BoardError::Io("Cyton has no EXG channels for impedance".into()),
-                        resume_stream,
-                    );
+                    self.impedance_error = Some("Cyton has no EXG channels for impedance".into());
+                    self.cyton_imp_scan = None;
+                    self.impedance_active = false;
+                    if resume_stream {
+                        let _ = self.launch_cyton_io(None, false, true, CytonImpIoKind::StopResume);
+                    }
                     return;
                 };
-                if let Err(e) = self.config_board_str(&on) {
-                    self.abort_cyton_impedance(e, resume_stream);
-                    return;
+                if let Err(e) = self.launch_cyton_io(
+                    Some(on),
+                    false,
+                    resume_stream,
+                    CytonImpIoKind::SwitchOn { next },
+                ) {
+                    self.impedance_error = Some(e.to_string());
                 }
-                if let Err(e) = self.resume_brainflow_stream(resume_stream) {
-                    self.abort_cyton_impedance(e, false);
-                    return;
-                }
-                self.cyton_imp_scan = Some(CytonImpScan::Measuring {
-                    channel: next,
-                    since: Instant::now(),
-                });
             }
             _ => {}
         }
@@ -790,5 +1066,63 @@ mod tests {
         assert!(b.start_impedance_test(&[0]).is_err());
         assert!(!b.impedance_test_active());
         assert_eq!(b.get_impedance(), vec![None; 4]);
+    }
+
+    #[test]
+    fn cyton_on_sent_keeps_scan_if_resume_fails() {
+        let mut b = BrainFlowBoard::cyton_serial("/dev/null");
+        b.apply_cyton_imp_io_result(CytonImpIoResult {
+            kind: CytonImpIoKind::StartOn { channel: 0 },
+            sent: true,
+            streaming: false,
+            err: Some("start_stream failed".into()),
+        });
+        assert!(b.impedance_test_active());
+        assert_eq!(b.impedance_scan_channel(), Some(0));
+        assert!(!b.is_streaming());
+        assert!(b.take_impedance_error().is_some());
+    }
+
+    #[test]
+    fn cyton_switch_on_sent_keeps_next_channel_if_resume_fails() {
+        let mut b = BrainFlowBoard::cyton_serial("/dev/null");
+        b.apply_cyton_imp_io_result(CytonImpIoResult {
+            kind: CytonImpIoKind::SwitchOn { next: 3 },
+            sent: true,
+            streaming: false,
+            err: Some("start_stream failed".into()),
+        });
+        assert!(b.impedance_test_active());
+        assert_eq!(b.impedance_scan_channel(), Some(3));
+    }
+
+    #[test]
+    fn cyton_off_not_sent_keeps_previous_channel() {
+        let mut b = BrainFlowBoard::cyton_serial("/dev/null");
+        b.impedance_active = true;
+        b.apply_cyton_imp_io_result(CytonImpIoResult {
+            kind: CytonImpIoKind::SwitchOff {
+                from: 2,
+                next: 3,
+                want_resume: true,
+            },
+            sent: false,
+            streaming: true,
+            err: Some("config_board failed".into()),
+        });
+        assert_eq!(b.impedance_scan_channel(), Some(2));
+    }
+
+    #[test]
+    fn cyton_stop_off_not_sent_keeps_measuring() {
+        let mut b = BrainFlowBoard::cyton_serial("/dev/null");
+        b.apply_cyton_imp_io_result(CytonImpIoResult {
+            kind: CytonImpIoKind::StopOff { channel: 1 },
+            sent: false,
+            streaming: false,
+            err: Some("off failed".into()),
+        });
+        assert!(b.impedance_test_active());
+        assert_eq!(b.impedance_scan_channel(), Some(1));
     }
 }
