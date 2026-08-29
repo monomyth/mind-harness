@@ -210,7 +210,10 @@ impl Drop for FocusAudio {
 pub struct WFocus {
     title: String,
     focus_value: f32, // 0.0 to 1.0 (clamped)
+    // Sparkline buffer kept for the decoder; the rack no longer paints it.
+    #[allow(dead_code)]
     history: Vec<f32>,
+    #[allow(dead_code)]
     max_points: usize,
 
     // --- MLModel state (Phase 6) ---
@@ -378,6 +381,23 @@ impl WFocus {
         // Map to a pleasant 0.25–0.85 range so the meter moves nicely
         (0.25 + ratio * 0.6) as f32
     }
+
+    /// Compact transport chip: scaled ring (percent in the center) + value.
+    pub fn paint_transport_chip(&self, ui: &mut egui::Ui) {
+        let value = self.focus_value;
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.horizontal(|ui| {
+                ui.set_max_height(24.0);
+                paint_focus_ring(ui, value, 22.0);
+                ui.label(
+                    egui::RichText::new(format!("{:.2}", value))
+                        .small()
+                        .color(crate::theme::TEXT),
+                );
+            });
+        });
+    }
 }
 
 impl Drop for WFocus {
@@ -480,30 +500,18 @@ impl Widget for WFocus {
         self.prev_focus = self.focus_value;
     }
 
+    /// ML / audio / threshold only. The meter lives on the transport, not here.
     fn show(
         &mut self,
         ui: &mut egui::Ui,
         _source: &dyn DataSource,
         ctx: &mut crate::widget_context::WidgetContext,
     ) {
-        // Header
-        ui.horizontal(|ui| {
-            ui.heading("Focus / Neurofeedback");
-            ui.label(
-                egui::RichText::new("●").color(if self.use_ml && self.ml_prepared {
-                    egui::Color32::from_rgb(80, 180, 80)
-                } else {
-                    egui::Color32::from_rgb(180, 140, 80)
-                }),
-            );
-            ui.small(if self.use_ml && self.ml_prepared {
-                &self.last_ml_status
-            } else {
-                "Proxy mode"
-            });
+        ui.small(if self.use_ml && self.ml_prepared {
+            &self.last_ml_status
+        } else {
+            "Proxy mode"
         });
-
-        ui.add_space(6.0);
 
         // === ML Controls ===
         ui.group(|ui| {
@@ -606,44 +614,7 @@ impl Widget for WFocus {
             }
         });
 
-        ui.add_space(8.0);
-
         let pct = (self.focus_value * 100.0).clamp(0.0, 100.0);
-        ui.horizontal(|ui| {
-            paint_focus_ring(ui, self.focus_value);
-            ui.vertical(|ui| {
-                ui.small(if self.use_ml && self.ml_prepared {
-                    "BrainFlow ML (5-band features)"
-                } else {
-                    "Proxy: relative alpha (FFT)"
-                });
-                ui.small(format!("value  {:.2}", self.focus_value));
-            });
-        });
-
-        ui.add_space(4.0);
-
-        // === History Sparkline ===
-        if !self.history.is_empty() {
-            let points: Vec<[f64; 2]> = self
-                .history
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| [i as f64, v as f64])
-                .collect();
-
-            crate::widgets::lock_plot_interaction(egui_plot::Plot::new("focus_history"))
-                .height(72.0)
-                .show(ui, |plot_ui| {
-                    plot_ui.line(
-                        egui_plot::Line::new("focus", points)
-                            .color(crate::theme::ACCENT)
-                            .width(1.5_f32),
-                    );
-                });
-        }
-
-        ui.add_space(6.0);
 
         // === Audio Feedback (Phase 6 highlight) ===
         ui.group(|ui| {
@@ -735,13 +706,15 @@ impl Widget for WFocus {
     }
 }
 
-fn paint_focus_ring(ui: &mut egui::Ui, value: f32) {
-    let size = egui::vec2(88.0, 88.0);
+fn paint_focus_ring(ui: &mut egui::Ui, value: f32, diameter: f32) {
+    let d = diameter.max(12.0);
+    let size = egui::vec2(d, d);
     let (resp, painter) = ui.allocate_painter(size, egui::Sense::hover());
     let c = resp.rect.center();
-    let r = 32.0_f32;
-    painter.circle_stroke(c, r, egui::Stroke::new(3.5_f32, crate::theme::HAIRLINE));
-    let steps = 72usize;
+    let stroke = if d < 36.0 { 2.0_f32 } else { 3.5_f32 };
+    let r = (d * 0.5 - stroke).max(4.0);
+    painter.circle_stroke(c, r, egui::Stroke::new(stroke, crate::theme::HAIRLINE));
+    let steps = if d < 36.0 { 36usize } else { 72usize };
     let filled = ((value.clamp(0.0, 1.0) * steps as f32).round() as usize).min(steps);
     if filled >= 1 {
         let mut pts = Vec::with_capacity(filled + 1);
@@ -753,15 +726,16 @@ fn paint_focus_ring(ui: &mut egui::Ui, value: f32) {
         if pts.len() >= 2 {
             painter.add(egui::Shape::line(
                 pts,
-                egui::Stroke::new(3.5_f32, crate::theme::ACCENT),
+                egui::Stroke::new(stroke, crate::theme::ACCENT),
             ));
         }
     }
+    let font = (d * 0.32).clamp(7.0, 16.0);
     painter.text(
         c,
         egui::Align2::CENTER_CENTER,
         format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0),
-        egui::FontId::proportional(16.0),
+        egui::FontId::proportional(font),
         crate::theme::TEXT,
     );
 }

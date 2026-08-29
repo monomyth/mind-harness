@@ -5,16 +5,15 @@ use crate::board::{extract_exg, recent_raw_rows, DataSource};
 use crate::data_logger::{DataLogger, LogFormat};
 use crate::markers::MarkerEvent;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Parallel proof recordings must not write the same Recordings/ filename.
+static RECORD_LOCK: Mutex<()> = Mutex::new(());
 
 /// 10 s at the usual Cyton/Synthetic rate.
 pub const SESSION_SAMPLES: usize = 2500;
-pub const MARKS: &[(u64, &str)] = &[
-    (500, "alpha_start"),
-    (1250, "blink"),
-    (2000, "end_task"),
-];
+pub const MARKS: &[(u64, &str)] = &[(500, "alpha_start"), (1250, "blink"), (2000, "end_task")];
 
 static SYNTH_10S: OnceLock<(Vec<Vec<f64>>, i32)> = OnceLock::new();
 
@@ -54,6 +53,7 @@ pub fn synthetic_10s_exg() -> &'static (Vec<Vec<f64>>, i32) {
 }
 
 pub fn record_marked_session(format: LogFormat) -> PathBuf {
+    let _guard = RECORD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (samples, sr) = synthetic_10s_exg();
     let n_ch = samples[0].len();
     let mut logger = DataLogger::new();
@@ -111,7 +111,9 @@ mod item3_markers {
             .unwrap()
             .read_to_string(&mut body)
             .unwrap();
-        body.lines().filter_map(markers::parse_odf_marker_line).collect()
+        body.lines()
+            .filter_map(markers::parse_odf_marker_line)
+            .collect()
     }
 
     fn cleanup(path: &std::path::Path) {
@@ -146,8 +148,7 @@ mod item3_markers {
         let path = record_marked_session(LogFormat::BDF);
         let sidecar = markers::load_sidecar(&path);
         assert_marks_within_one_sample(&sidecar);
-        let (_samples, _fs, _n, tal) =
-            crate::data_writers::bdf::read_bdf(&path).expect("read bdf");
+        let (_samples, _fs, _n, tal) = crate::data_writers::bdf::read_bdf(&path).expect("read bdf");
         assert_marks_within_one_sample(&tal);
         let pb = PlaybackBoard::from_file(&path).expect("playback BDF");
         assert_marks_within_one_sample(pb.session_markers());

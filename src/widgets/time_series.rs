@@ -8,6 +8,14 @@ use egui::{pos2, Color32, Pos2, Rect, Shape, Stroke};
 
 /// Java ChannelBar: electrode button is outside the plot; ± / RMS overlay the plot.
 const ELECTRODE_W: f32 = 26.0;
+/// Left text column (montage name or `Ch N`), beside the numbered on/off circle.
+const LABEL_COL_W: f32 = 40.0;
+/// 1px gutter so plot rects do not touch.
+const ROW_GUTTER_Y: f32 = 1.0;
+/// Unused space under the last row so the 22px status bar does not clip the axis.
+const BOTTOM_PAD: f32 = 12.0;
+/// Extra height on the last visible row for the time-axis ticks/labels.
+const LAST_ROW_AXIS: f32 = 10.0;
 
 pub struct WTimeSeries {
     time_window_sec: f32,
@@ -172,12 +180,53 @@ fn channel_bar_x_range(window_sec: f32) -> (f64, f64) {
 }
 
 struct ChannelBarLayout {
+    label_w: f32,
     plot_w: f32,
 }
 
 fn channel_bar_layout(row_width: f32) -> ChannelBarLayout {
     ChannelBarLayout {
-        plot_w: (row_width - ELECTRODE_W).max(16.0),
+        label_w: LABEL_COL_W,
+        plot_w: (row_width - LABEL_COL_W - ELECTRODE_W).max(16.0),
+    }
+}
+
+pub(crate) struct TraceStackLayout {
+    pub row_h: f32,
+    pub gutter: f32,
+    pub bottom_pad: f32,
+    pub last_row_extra: f32,
+}
+
+/// Do not consume 100% of available height: gutters + last-row axis + bottom pad.
+pub(crate) fn trace_stack_layout(available_height: f32, visible_count: usize) -> TraceStackLayout {
+    let n = visible_count.max(1);
+    let gutter = ROW_GUTTER_Y;
+    let bottom_pad = BOTTOM_PAD;
+    let last_row_extra = LAST_ROW_AXIS;
+    let gutters = (n.saturating_sub(1) as f32) * gutter;
+    let reserved = bottom_pad + last_row_extra + gutters;
+    let usable = (available_height - reserved).max(28.0);
+    let row_h = (usable / n as f32).max(28.0);
+    TraceStackLayout {
+        row_h,
+        gutter,
+        bottom_pad,
+        last_row_extra,
+    }
+}
+
+pub(crate) fn last_row_height(layout: &TraceStackLayout) -> f32 {
+    layout.row_h + layout.last_row_extra
+}
+
+/// Left-column text: board montage name if present, otherwise `Ch N`.
+pub(crate) fn left_channel_label(logical: usize, board_label: &str) -> String {
+    let t = board_label.trim();
+    if t.is_empty() {
+        format!("Ch {}", logical + 1)
+    } else {
+        t.to_string()
     }
 }
 
@@ -374,7 +423,8 @@ impl Widget for WTimeSeries {
             .filter(|&i| self.visible_channels.get(i).copied().unwrap_or(false))
             .count()
             .max(1);
-        let row_h = (available_height / visible_count as f32).max(28.0);
+        let stack = trace_stack_layout(available_height, visible_count);
+        ui.spacing_mut().item_spacing.y = stack.gutter;
         let last_visible = (0..num_channels)
             .rev()
             .find(|&i| self.visible_channels.get(i).copied().unwrap_or(false));
@@ -384,11 +434,7 @@ impl Widget for WTimeSeries {
                 continue;
             }
 
-            let powered = source
-                .channel_powered()
-                .get(i)
-                .copied()
-                .unwrap_or(true);
+            let powered = source.channel_powered().get(i).copied().unwrap_or(true);
             let color = if powered {
                 theme::channel_color(i)
             } else {
@@ -398,12 +444,30 @@ impl Widget for WTimeSeries {
             let scale = self.scale_for_trace(i, &ys);
             let eff_scale = scale as f32;
             let rms = uv_std_last_second(&ys, sample_rate);
+            let row_h = if last_visible == Some(i) {
+                last_row_height(&stack)
+            } else {
+                stack.row_h
+            };
+            let row_label = left_channel_label(i, &source.channel_label(i));
 
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), row_h),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
                     let layout = channel_bar_layout(ui.available_width());
+                    let (label_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(layout.label_w, 22.0_f32.min(row_h).max(16.0)),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().text(
+                        pos2(label_rect.left(), label_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        &row_label,
+                        egui::FontId::proportional(11.0),
+                        theme::TEXT,
+                    );
                     // Numbered electrode circle (Java on/off button)
                     let (circ_resp, painter) = ui.allocate_painter(
                         egui::vec2(ELECTRODE_W - 4.0, 22.0),
@@ -495,6 +559,8 @@ impl Widget for WTimeSeries {
                 }
             });
         }
+
+        ui.add_space(stack.bottom_pad);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -579,7 +645,61 @@ mod tests {
     #[test]
     fn channel_bar_plot_width_is_independent_of_rms_digits() {
         let layout = super::channel_bar_layout(400.0);
-        assert_eq!(layout.plot_w, 400.0 - super::ELECTRODE_W);
+        assert_eq!(
+            layout.plot_w,
+            400.0 - super::LABEL_COL_W - super::ELECTRODE_W
+        );
+        assert_eq!(layout.label_w, super::LABEL_COL_W);
         assert!(layout.plot_w > 200.0);
+    }
+
+    #[test]
+    fn channel_rows_have_one_pixel_gutter() {
+        assert_eq!(super::ROW_GUTTER_Y, 1.0);
+        let layout = super::trace_stack_layout(400.0, 8);
+        assert_eq!(layout.gutter, 1.0);
+        let mut y = 0.0;
+        for i in 0..8 {
+            let h = if i == 7 {
+                super::last_row_height(&layout)
+            } else {
+                layout.row_h
+            };
+            let bottom = y + h;
+            if i < 7 {
+                assert!((bottom + layout.gutter - bottom - 1.0).abs() < 1e-5);
+            }
+            y = bottom + layout.gutter;
+        }
+    }
+
+    #[test]
+    fn last_row_leaves_bottom_pad_and_axis() {
+        let available = 400.0;
+        let layout = super::trace_stack_layout(available, 8);
+        assert!(layout.bottom_pad >= 8.0);
+        assert!(layout.last_row_extra > 0.0);
+        let n = 8.0;
+        let used = layout.row_h * (n - 1.0)
+            + super::last_row_height(&layout)
+            + layout.gutter * (n - 1.0)
+            + layout.bottom_pad;
+        assert!(
+            used <= available + 1e-3,
+            "used {used} available {available}"
+        );
+        assert!(
+            layout.row_h * n < available,
+            "rows must not consume 100% of available height"
+        );
+    }
+
+    #[test]
+    fn left_label_uses_montage_or_ch_n() {
+        assert_eq!(super::left_channel_label(0, ""), "Ch 1");
+        assert_eq!(super::left_channel_label(15, "   "), "Ch 16");
+        assert_eq!(super::left_channel_label(0, "Ch 1"), "Ch 1");
+        assert_eq!(super::left_channel_label(0, "Fp1"), "Fp1");
+        assert_eq!(super::left_channel_label(7, "O2"), "O2");
     }
 }

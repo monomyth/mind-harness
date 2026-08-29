@@ -206,6 +206,11 @@ pub trait DataSource: Send + Sync {
     fn playhead_sample(&self) -> Option<usize> {
         None
     }
+
+    /// Left-column Time Series label. Override for montage names; default is `Ch N`.
+    fn channel_label(&self, logical: usize) -> String {
+        format!("Ch {}", logical + 1)
+    }
 }
 
 /// Copy EXG columns out of a full BrainFlow row (which also holds index, timestamp, accel, …).

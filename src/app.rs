@@ -207,6 +207,9 @@ pub struct OpenBciGuiApp {
     persisted_ts_per_channel_y_scales: Vec<f32>,
     persisted_ads_channels: Vec<AdsChannel>,
     last_recording_path: Option<std::path::PathBuf>,
+
+    /// Exclusive PROPERTIES accordion. Session is independent and not stored here.
+    properties_open: Option<String>,
 }
 
 impl OpenBciGuiApp {
@@ -313,6 +316,7 @@ impl OpenBciGuiApp {
             persisted_ts_per_channel_y_scales: vec![0.0; 16],
             persisted_ads_channels: vec![],
             last_recording_path: None,
+            properties_open: None,
         };
 
         // === Phase 8: Load persisted settings (silent on any error / missing file) ===
@@ -476,6 +480,7 @@ impl OpenBciGuiApp {
     /// is no longer hidden. Marker and Networking controls are also always at hand.
     fn populate_tool_widgets(&mut self) {
         self.tool_widgets.clear();
+        self.properties_open = None;
         self.tool_widgets.push(Box::new(WMarker::new()));
         self.tool_widgets.push(Box::new(WNetworking::new()));
         self.tool_widgets.push(Box::new(WFocus::new()));
@@ -967,8 +972,7 @@ impl OpenBciGuiApp {
                                 .map(std::path::PathBuf::from)
                         });
                         match path {
-                            Some(p) => match crate::board::playback::PlaybackBoard::from_file(&p)
-                            {
+                            Some(p) => match crate::board::playback::PlaybackBoard::from_file(&p) {
                                 Ok(pb) => {
                                     match crate::export::export_next_to(
                                         &p,
@@ -985,7 +989,8 @@ impl OpenBciGuiApp {
                                             ));
                                         }
                                         Err(e) => {
-                                            self.event_log.log_error(&format!("Export failed: {e}"));
+                                            self.event_log
+                                                .log_error(&format!("Export failed: {e}"));
                                         }
                                     }
                                 }
@@ -1599,89 +1604,100 @@ impl eframe::App for OpenBciGuiApp {
                     .inner_margin(egui::Margin::symmetric(8, 2)),
             )
             .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let stream_label = if self.streaming { "Stop" } else { "Start" };
-                let stream_fill = if self.streaming {
-                    theme::STOP
-                } else {
-                    theme::START
-                };
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(stream_label).color(theme::TEXT).small(),
+                ui.horizontal(|ui| {
+                    let stream_label = if self.streaming { "Stop" } else { "Start" };
+                    let stream_fill = if self.streaming {
+                        theme::STOP
+                    } else {
+                        theme::START
+                    };
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(stream_label).color(theme::TEXT).small(),
+                            )
+                            .fill(stream_fill)
+                            .min_size(egui::vec2(52.0, 18.0)),
                         )
-                        .fill(stream_fill)
-                        .min_size(egui::vec2(52.0, 18.0)),
-                    )
-                    .clicked()
-                {
-                    if let Some(ref mut b) = self.board {
-                        if self.streaming {
-                            let _ = b.stop_streaming();
-                            self.streaming = false;
-                            self.event_log.log_system("Streaming stopped");
-                        } else if let Err(e) = b.start_streaming() {
-                            tracing::error!("Start failed: {:?}", e);
-                            self.event_log
-                                .log_error(&format!("Failed to start streaming: {}", e));
-                        } else {
-                            self.streaming = true;
-                            self.event_log.log_system("Streaming started");
+                        .clicked()
+                    {
+                        if let Some(ref mut b) = self.board {
+                            if self.streaming {
+                                let _ = b.stop_streaming();
+                                self.streaming = false;
+                                self.event_log.log_system("Streaming stopped");
+                            } else if let Err(e) = b.start_streaming() {
+                                tracing::error!("Start failed: {:?}", e);
+                                self.event_log
+                                    .log_error(&format!("Failed to start streaming: {}", e));
+                            } else {
+                                self.streaming = true;
+                                self.event_log.log_system("Streaming started");
+                            }
                         }
                     }
-                }
 
-                if ui
-                    .add(
-                        egui::Button::new(egui::RichText::new("End").color(theme::TEXT).small())
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("End").color(theme::TEXT).small(),
+                            )
                             .fill(theme::PANEL)
                             .stroke(theme::hairline())
                             .min_size(egui::vec2(40.0, 18.0)),
-                    )
-                    .clicked()
-                {
-                    self.end_session();
-                }
+                        )
+                        .clicked()
+                    {
+                        self.end_session();
+                    }
 
-                ui.separator();
+                    ui.separator();
 
-                if let Some(ref b) = self.board {
-                    let run = if self.streaming { "live" } else { "stop" };
-                    ui.label(
-                        egui::RichText::new(format!("{}  {run}", b.name()))
+                    if let Some(ref b) = self.board {
+                        let run = if self.streaming { "live" } else { "stop" };
+                        ui.label(
+                            egui::RichText::new(format!("{}  {run}", b.name()))
+                                .small()
+                                .color(theme::TEXT),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}  {}",
+                                crate::stream_stats::format_hz(self.current_sample_rate).trim(),
+                                crate::stream_stats::format_loss(self.packet_loss_percent).trim()
+                            ))
                             .small()
-                            .color(theme::TEXT),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{}  {}",
-                            crate::stream_stats::format_hz(self.current_sample_rate).trim(),
-                            crate::stream_stats::format_loss(self.packet_loss_percent).trim()
-                        ))
-                        .small()
-                        .monospace()
-                        .color(crate::stream_stats::loss_color(self.packet_loss_percent)),
-                    );
-                }
+                            .monospace()
+                            .color(crate::stream_stats::loss_color(self.packet_loss_percent)),
+                        );
+                    }
 
-                if self.data_logger.is_logging() {
-                    let dur = self
-                        .data_logger
-                        .recording_duration()
-                        .map(|d| format!("{}:{:02}", d.as_secs() / 60, d.as_secs() % 60))
-                        .unwrap_or_default();
-                    ui.colored_label(theme::STOP, format!("REC {dur}"));
-                }
+                    if self.data_logger.is_logging() {
+                        let dur = self
+                            .data_logger
+                            .recording_duration()
+                            .map(|d| format!("{}:{:02}", d.as_secs() / 60, d.as_secs() % 60))
+                            .unwrap_or_default();
+                        ui.colored_label(theme::STOP, format!("REC {dur}"));
+                    }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.small(
-                        egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                            .color(theme::HAIRLINE),
-                    );
+                    if let Some(focus) = self
+                        .tool_widgets
+                        .iter()
+                        .find_map(|t| t.as_any().downcast_ref::<WFocus>())
+                    {
+                        ui.separator();
+                        focus.paint_transport_chip(ui);
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.small(
+                            egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                .color(theme::HAIRLINE),
+                        );
+                    });
                 });
             });
-        });
 
         if !self.tool_widgets.is_empty() {
             egui::SidePanel::right("tool_panel")
@@ -1701,26 +1717,27 @@ impl eframe::App for OpenBciGuiApp {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false; 2])
                             .show(ui, |ui| {
-                                self.draw_session_rack(ui);
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                                properties_card(ui, |ui| {
+                                    self.draw_session_rack(ui);
+                                });
+                                let mut open = self.properties_open.take();
                                 if let Some(board) = self.board.as_deref() {
-                                    let mut widget_ctx = WidgetContext::new(
-                                        &mut self.networking,
-                                        &mut self.data_logger,
-                                        &mut self.last_marker,
-                                        &mut self.event_log,
-                                        &mut self.emg,
-                                    );
-
-                                    for tool in &mut self.tool_widgets {
-                                        let open = matches!(
-                                            tool.title(),
-                                            "Focus" | "Impedance" | "Hardware Settings" | "Marker"
+                                    {
+                                        let mut widget_ctx = WidgetContext::new(
+                                            &mut self.networking,
+                                            &mut self.data_logger,
+                                            &mut self.last_marker,
+                                            &mut self.event_log,
+                                            &mut self.emg,
                                         );
-                                        egui::CollapsingHeader::new(tool.title())
-                                            .default_open(open)
-                                            .show(ui, |ui| {
+
+                                        for tool in &mut self.tool_widgets {
+                                            let title = tool.title().to_string();
+                                            draw_exclusive_section(ui, &mut open, &title, |ui| {
                                                 tool.show(ui, board, &mut widget_ctx);
                                             });
+                                        }
                                     }
 
                                     // Phase 7 WPacketLoss visual (sparkline + reset) — lives in SidePanel.
@@ -1728,66 +1745,54 @@ impl eframe::App for OpenBciGuiApp {
                                     // Playback always shows ~0% (perfect replay). Reset clears history + logs.
                                     let loss = self.packet_loss_percent;
                                     let loss_color = crate::stream_stats::loss_color(loss);
-                                    egui::CollapsingHeader::new("Packet Loss")
-                                        .default_open(false)
-                                        .show(ui, |ui| {
-                                            ui.horizontal(|ui| {
-                                                ui.colored_label(
-                                                    loss_color,
-                                                    format!("{:.1}%", loss),
-                                                );
-                                                if ui.button("Reset").clicked() {
-                                                    self.packet_loss_history.clear();
-                                                    self.packet_loss_percent = 0.0;
-                                                    self.window_samples = 0;
-                                                    self.window_lost = 0;
-                                                    self.last_sample_time = None;
-                                                    self.samples_received = 0;
-                                                    self.event_log.log_system(
-                                                        "Packet loss stats reset by user",
-                                                    );
-                                                }
-                                            });
-                                            // Compact sparkline (last ~60 samples) — egui 0.28 compatible
-                                            let hist = &self.packet_loss_history;
-                                            if !hist.is_empty() {
-                                                let desired =
-                                                    egui::vec2(ui.available_width(), 42.0);
-                                                let (resp, painter) = ui.allocate_painter(
-                                                    desired,
-                                                    egui::Sense::hover(),
-                                                );
-                                                let rect = resp.rect;
-                                                let max_l = hist
-                                                    .iter()
-                                                    .copied()
-                                                    .fold(0.0f32, |a, b| a.max(b))
-                                                    .max(1.0);
-                                                let n = hist.len() as f32;
-                                                for (i, &v) in hist.iter().enumerate() {
-                                                    let x =
-                                                        rect.min.x + (i as f32 / n) * rect.width();
-                                                    let y_norm = (v / max_l).min(1.0);
-                                                    let y = rect.max.y - y_norm * rect.height();
-                                                    if i > 0 {
-                                                        let px = rect.min.x
-                                                            + ((i - 1) as f32 / n) * rect.width();
-                                                        let py_norm =
-                                                            (hist[i - 1] / max_l).min(1.0);
-                                                        let py =
-                                                            rect.max.y - py_norm * rect.height();
-                                                        painter.line_segment(
-                                                            [egui::pos2(px, py), egui::pos2(x, y)],
-                                                            egui::Stroke::new(1.5_f32, loss_color),
-                                                        );
-                                                    }
-                                                }
-                                            } else {
-                                                ui.small("(no loss history yet)");
+                                    draw_exclusive_section(ui, &mut open, "Packet Loss", |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.colored_label(loss_color, format!("{:.1}%", loss));
+                                            if ui.button("Reset").clicked() {
+                                                self.packet_loss_history.clear();
+                                                self.packet_loss_percent = 0.0;
+                                                self.window_samples = 0;
+                                                self.window_lost = 0;
+                                                self.last_sample_time = None;
+                                                self.samples_received = 0;
+                                                self.event_log
+                                                    .log_system("Packet loss stats reset by user");
                                             }
                                         });
-                                    ui.add_space(6.0);
+                                        // Compact sparkline (last ~60 samples) — egui 0.28 compatible
+                                        let hist = &self.packet_loss_history;
+                                        if !hist.is_empty() {
+                                            let desired = egui::vec2(ui.available_width(), 42.0);
+                                            let (resp, painter) =
+                                                ui.allocate_painter(desired, egui::Sense::hover());
+                                            let rect = resp.rect;
+                                            let max_l = hist
+                                                .iter()
+                                                .copied()
+                                                .fold(0.0f32, |a, b| a.max(b))
+                                                .max(1.0);
+                                            let n = hist.len() as f32;
+                                            for (i, &v) in hist.iter().enumerate() {
+                                                let x = rect.min.x + (i as f32 / n) * rect.width();
+                                                let y_norm = (v / max_l).min(1.0);
+                                                let y = rect.max.y - y_norm * rect.height();
+                                                if i > 0 {
+                                                    let px = rect.min.x
+                                                        + ((i - 1) as f32 / n) * rect.width();
+                                                    let py_norm = (hist[i - 1] / max_l).min(1.0);
+                                                    let py = rect.max.y - py_norm * rect.height();
+                                                    painter.line_segment(
+                                                        [egui::pos2(px, py), egui::pos2(x, y)],
+                                                        egui::Stroke::new(1.5_f32, loss_color),
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            ui.small("(no loss history yet)");
+                                        }
+                                    });
                                 }
+                                self.properties_open = open;
                             });
                     });
                 });
@@ -1796,26 +1801,26 @@ impl eframe::App for OpenBciGuiApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::CANVAS))
             .show(ctx, |ui| {
-            // Phase 7: as_deref() yields Option<&dyn DataSource> — uniform for Playback + live boards
-            if let Some(board) = self.board.as_deref() {
-                self.widget_manager.update(board);
+                // Phase 7: as_deref() yields Option<&dyn DataSource> — uniform for Playback + live boards
+                if let Some(board) = self.board.as_deref() {
+                    self.widget_manager.update(board);
 
-                // Create a fresh WidgetContext for this frame. This gives every widget
-                // (especially Marker and the new configurable WNetworking) the ability
-                // to send markers, reconfigure networking, etc. in a clean, borrow-checker
-                // friendly way. This is the Phase 4 architectural foundation.
-                // Phase 7: also passes the EventLog so WConsole and all widgets can emit
-                // structured, filterable events for the live audit trail.
-                let mut widget_ctx = WidgetContext::new(
-                    &mut self.networking,
-                    &mut self.data_logger,
-                    &mut self.last_marker,
-                    &mut self.event_log,
-                    &mut self.emg,
-                );
-                self.widget_manager.draw(ui, board, &mut widget_ctx);
-            }
-        });
+                    // Create a fresh WidgetContext for this frame. This gives every widget
+                    // (especially Marker and the new configurable WNetworking) the ability
+                    // to send markers, reconfigure networking, etc. in a clean, borrow-checker
+                    // friendly way. This is the Phase 4 architectural foundation.
+                    // Phase 7: also passes the EventLog so WConsole and all widgets can emit
+                    // structured, filterable events for the live audit trail.
+                    let mut widget_ctx = WidgetContext::new(
+                        &mut self.networking,
+                        &mut self.data_logger,
+                        &mut self.last_marker,
+                        &mut self.event_log,
+                        &mut self.emg,
+                    );
+                    self.widget_manager.draw(ui, board, &mut widget_ctx);
+                }
+            });
 
         egui::TopBottomPanel::bottom("status_bar")
             .exact_height(22.0)
@@ -1825,110 +1830,109 @@ impl eframe::App for OpenBciGuiApp {
                     .inner_margin(egui::Margin::symmetric(8, 1)),
             )
             .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-
-                // Phase 7 Playback polish: compact interactive controls for the magical roundtrip.
-                // Lets the user pause, change speed, and scrub the exact recording they just made
-                // while Focus ML+audio, markers (sent during replay), Networking, and Console
-                // continue to work exactly as in the live session. This makes validation and
-                // neurofeedback rehearsal trivial without hardware.
-                if let Some(b) = self.board.as_deref_mut() {
-                    if let Some((pos, total)) = b.playback_progress() {
-                        ui.group(|ui| {
-                            ui.horizontal(|ui| {
-                                // Pause / Play
-                                let is_paused = !b.is_streaming();
-                                let pause_label = if is_paused { "▶ Play" } else { "⏸ Pause" };
-                                if ui.button(pause_label).clicked() {
-                                    b.toggle_playback_pause();
-                                    self.event_log.log_system(if is_paused {
-                                        "Playback resumed"
-                                    } else {
-                                        "Playback paused"
-                                    });
-                                }
-
-                                // Speed presets
-                                for &s in &[0.5, 1.0, 2.0] {
-                                    let lbl = format!("{:.1}x", s);
-                                    if ui
-                                        .selectable_label(
-                                            b.playback_speed()
-                                                .is_some_and(|cur| (cur - s).abs() < 0.01),
-                                            lbl,
-                                        )
-                                        .clicked()
-                                    {
-                                        b.set_playback_speed(s);
-                                        self.event_log
-                                            .log_system(&format!("Playback speed set to {}x", s));
+                ui.horizontal(|ui| {
+                    // Phase 7 Playback polish: compact interactive controls for the magical roundtrip.
+                    // Lets the user pause, change speed, and scrub the exact recording they just made
+                    // while Focus ML+audio, markers (sent during replay), Networking, and Console
+                    // continue to work exactly as in the live session. This makes validation and
+                    // neurofeedback rehearsal trivial without hardware.
+                    if let Some(b) = self.board.as_deref_mut() {
+                        if let Some((pos, total)) = b.playback_progress() {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    // Pause / Play
+                                    let is_paused = !b.is_streaming();
+                                    let pause_label =
+                                        if is_paused { "▶ Play" } else { "⏸ Pause" };
+                                    if ui.button(pause_label).clicked() {
+                                        b.toggle_playback_pause();
+                                        self.event_log.log_system(if is_paused {
+                                            "Playback resumed"
+                                        } else {
+                                            "Playback paused"
+                                        });
                                     }
-                                }
 
-                                // Progress text + manual seek slider (0..1)
-                                let frac = if total > 0 {
-                                    pos as f32 / total as f32
-                                } else {
-                                    0.0
-                                };
-                                let secs = pos as f64 / b.sample_rate().max(1) as f64;
-                                let total_secs = total as f64 / b.sample_rate().max(1) as f64;
-                                ui.label(format!("{:.1}/{:.1}s", secs, total_secs));
+                                    // Speed presets
+                                    for &s in &[0.5, 1.0, 2.0] {
+                                        let lbl = format!("{:.1}x", s);
+                                        if ui
+                                            .selectable_label(
+                                                b.playback_speed()
+                                                    .is_some_and(|cur| (cur - s).abs() < 0.01),
+                                                lbl,
+                                            )
+                                            .clicked()
+                                        {
+                                            b.set_playback_speed(s);
+                                            self.event_log.log_system(&format!(
+                                                "Playback speed set to {}x",
+                                                s
+                                            ));
+                                        }
+                                    }
 
-                                let mut new_frac = frac;
-                                if ui
-                                    .add(
-                                        egui::Slider::new(&mut new_frac, 0.0..=1.0)
-                                            .show_value(false),
-                                    )
-                                    .changed()
-                                {
-                                    b.seek_to_fraction(new_frac);
-                                    self.event_log.log_system(&format!(
-                                        "Playback seeked to {:.0}%",
-                                        new_frac * 100.0
-                                    ));
-                                }
+                                    // Progress text + manual seek slider (0..1)
+                                    let frac = if total > 0 {
+                                        pos as f32 / total as f32
+                                    } else {
+                                        0.0
+                                    };
+                                    let secs = pos as f64 / b.sample_rate().max(1) as f64;
+                                    let total_secs = total as f64 / b.sample_rate().max(1) as f64;
+                                    ui.label(format!("{:.1}/{:.1}s", secs, total_secs));
+
+                                    let mut new_frac = frac;
+                                    if ui
+                                        .add(
+                                            egui::Slider::new(&mut new_frac, 0.0..=1.0)
+                                                .show_value(false),
+                                        )
+                                        .changed()
+                                    {
+                                        b.seek_to_fraction(new_frac);
+                                        self.event_log.log_system(&format!(
+                                            "Playback seeked to {:.0}%",
+                                            new_frac * 100.0
+                                        ));
+                                    }
+                                });
                             });
-                        });
+                            ui.separator();
+                        }
+                    }
+
+                    if self.networking.has_active_streams() {
+                        ui.colored_label(egui::Color32::from_rgb(100, 180, 255), "📡 Net");
+                    }
+
+                    if !self.last_marker.is_empty() {
+                        ui.colored_label(theme::ACCENT, format!("Last: {}", self.last_marker));
+                    }
+
+                    // Mini live log preview (last 2-3 events, color coded) — Phase 7 polish: newest first so the live tail is immediately visible
+                    let recent = self.event_log.last_n(3);
+                    if !recent.is_empty() {
                         ui.separator();
+                        for entry in &recent {
+                            let col = entry.level.color();
+                            ui.colored_label(
+                                col,
+                                format!(
+                                    "[{}] {}",
+                                    &entry.category[..entry.category.len().min(4)],
+                                    &entry.message[..entry.message.len().min(45)]
+                                ),
+                            );
+                        }
                     }
-                }
 
-                if self.networking.has_active_streams() {
-                    ui.colored_label(egui::Color32::from_rgb(100, 180, 255), "📡 Net");
-                }
-
-                if !self.last_marker.is_empty() {
-                    ui.colored_label(
-                        theme::ACCENT,
-                        format!("Last: {}", self.last_marker),
-                    );
-                }
-
-                // Mini live log preview (last 2-3 events, color coded) — Phase 7 polish: newest first so the live tail is immediately visible
-                let recent = self.event_log.last_n(3);
-                if !recent.is_empty() {
-                    ui.separator();
-                    for entry in &recent {
-                        let col = entry.level.color();
-                        ui.colored_label(
-                            col,
-                            format!(
-                                "[{}] {}",
-                                &entry.category[..entry.category.len().min(4)],
-                                &entry.message[..entry.message.len().min(45)]
-                            ),
-                        );
-                    }
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.small(format!("Frame:{:>6}", self.frame_count));
-                    ui.small(format!("Log: {} events", self.event_log.len()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.small(format!("Frame:{:>6}", self.frame_count));
+                        ui.small(format!("Log: {} events", self.event_log.len()));
+                    });
                 });
             });
-        });
 
         // Full Console window (filterable, searchable, live) — opens when user clicks the Console button
         if self.console_show_window {
@@ -2141,5 +2145,99 @@ impl eframe::App for OpenBciGuiApp {
         }
 
         ctx.request_repaint();
+    }
+}
+
+fn properties_card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::NONE
+        .stroke(theme::hairline())
+        .inner_margin(8.0)
+        .show(ui, add_contents);
+    ui.add_space(8.0);
+}
+
+/// PROPERTIES accordion: Session is independent. At most one other section is open.
+pub(crate) fn exclusive_section_open(current: &Option<String>, id: &str) -> bool {
+    current.as_deref() == Some(id)
+}
+
+pub(crate) fn exclusive_section_clicked(current: &mut Option<String>, id: &str) {
+    if current.as_deref() == Some(id) {
+        *current = None;
+    } else {
+        *current = Some(id.to_string());
+    }
+}
+
+fn draw_exclusive_section(
+    ui: &mut egui::Ui,
+    current: &mut Option<String>,
+    id: &str,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let is_open = exclusive_section_open(current, id);
+    properties_card(ui, |ui| {
+        let resp = egui::CollapsingHeader::new(id)
+            .open(Some(is_open))
+            .show(ui, add_contents);
+        if resp.header_response.clicked() {
+            exclusive_section_clicked(current, id);
+        }
+    });
+}
+
+#[cfg(test)]
+mod properties_rack_tests {
+    use super::{exclusive_section_clicked, exclusive_section_open};
+
+    #[test]
+    fn accordion_starts_with_none_open() {
+        let current: Option<String> = None;
+        for id in [
+            "Focus",
+            "Impedance",
+            "Hardware Settings",
+            "Marker",
+            "Networking",
+            "Head Plot",
+            "Analog Read",
+            "Digital Read",
+            "Pulse Sensor",
+            "Packet Loss",
+        ] {
+            assert!(
+                !exclusive_section_open(&current, id),
+                "{id} must not default-open"
+            );
+        }
+    }
+
+    #[test]
+    fn opening_one_section_closes_the_other() {
+        let mut current = None;
+        exclusive_section_clicked(&mut current, "Impedance");
+        assert!(exclusive_section_open(&current, "Impedance"));
+        exclusive_section_clicked(&mut current, "Marker");
+        assert!(!exclusive_section_open(&current, "Impedance"));
+        assert!(exclusive_section_open(&current, "Marker"));
+        assert!(!exclusive_section_open(&current, "Hardware Settings"));
+        assert!(!exclusive_section_open(&current, "Focus"));
+    }
+
+    #[test]
+    fn clicking_open_section_closes_it() {
+        let mut current = Some("Focus".into());
+        exclusive_section_clicked(&mut current, "Focus");
+        assert!(current.is_none());
+    }
+
+    #[test]
+    fn session_is_not_an_accordion_member() {
+        let mut current = Some("Marker".into());
+        assert!(exclusive_section_open(&current, "Marker"));
+        assert!(!exclusive_section_open(&current, "Session"));
+        exclusive_section_clicked(&mut current, "Hardware Settings");
+        assert!(!exclusive_section_open(&current, "Session"));
+        assert!(exclusive_section_open(&current, "Hardware Settings"));
     }
 }
