@@ -17,6 +17,7 @@ pub mod impedance;
 pub mod marker;
 pub mod networking;
 pub mod pulse;
+pub mod slow_waves;
 pub mod spectrogram;
 pub mod time_series;
 
@@ -34,6 +35,7 @@ pub use impedance::WImpedance;
 pub use marker::WMarker;
 pub use networking::WNetworking;
 pub use pulse::WPulseSensor;
+pub use slow_waves::WSlowWaves;
 pub use spectrogram::WSpectrogram;
 pub use time_series::WTimeSeries;
 

@@ -34,6 +34,11 @@ impl Default for WHeadPlot {
     }
 }
 
+/// Uniform radius: 0.40 × min(w,h), floor 40. No 85 cap.
+pub(crate) fn head_canvas_radius(width: f32, height: f32) -> f32 {
+    (width.min(height) * 0.40).max(40.0)
+}
+
 impl Widget for WHeadPlot {
     fn title(&self) -> &str {
         &self.title
@@ -86,12 +91,13 @@ impl Widget for WHeadPlot {
         ui.small("Color & size = smoothed power (blue=low → red=high) • labels ≈ 10-20 positions");
         ui.add_space(2.0);
 
-        // Allocate drawing canvas (fixed reasonable height so it plays nice in scrollable side panel)
-        let desired = egui::vec2(ui.available_width().max(200.0), 210.0);
+        // Fill the pane. Uniform scale so the head stays a circle (not stretched).
+        let avail = ui.available_size();
+        let desired = egui::vec2(avail.x.max(40.0), (avail.y - 8.0).max(40.0));
         let (resp, painter) = ui.allocate_painter(desired, egui::Sense::hover());
         let rect = resp.rect;
         let center = rect.center();
-        let radius = (rect.width().min(rect.height()) * 0.40).min(85.0);
+        let radius = head_canvas_radius(rect.width(), rect.height());
 
         // Head (skin)
         painter.circle_filled(center, radius, egui::Color32::from_rgb(255, 218, 195));
@@ -244,5 +250,26 @@ impl Widget for WHeadPlot {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn radius_fills_large_pane_without_85_cap() {
+        let r = super::head_canvas_radius(400.0, 400.0);
+        assert!((r - 160.0).abs() < 1e-3, "got {r}");
+        assert!(r > 85.0);
+    }
+
+    #[test]
+    fn radius_floor_for_rack_card() {
+        assert_eq!(super::head_canvas_radius(50.0, 50.0), 40.0);
+    }
+
+    #[test]
+    fn radius_uses_min_side_so_head_is_a_circle() {
+        let r = super::head_canvas_radius(800.0, 200.0);
+        assert!((r - 80.0).abs() < 1e-3, "got {r}");
     }
 }

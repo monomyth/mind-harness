@@ -16,6 +16,7 @@ mod fft;
 mod filter_settings;
 mod markers;
 mod networking;
+mod slow_waves;
 mod stream_stats;
 mod theme;
 mod widget_context;

@@ -15,8 +15,8 @@ use crate::widget_context::WidgetContext;
 use crate::widget_manager::WidgetManager;
 use crate::widgets::{
     WAccelerometer, WAnalogRead, WBandPower, WDigitalRead, WEmg, WEmgJoystick, WFocus,
-    WHardwareSettings, WHeadPlot, WImpedance, WMarker, WNetworking, WPulseSensor, WSpectrogram,
-    WTimeSeries, Widget, WFFT,
+    WHardwareSettings, WHeadPlot, WImpedance, WMarker, WNetworking, WPulseSensor, WSlowWaves,
+    WSpectrogram, WTimeSeries, Widget, WFFT,
 };
 use directories::ProjectDirs;
 use eframe::egui;
@@ -238,7 +238,7 @@ impl OpenBciGuiApp {
                         "Accelerometer".into(),
                     ],
                 );
-                m.insert(3, vec!["Time Series".into(), "FFT Plot".into()]);
+                m.insert(3, vec!["Time Series".into(), "Head Plot".into()]);
                 m.insert(4, vec!["Time Series".into(), "FFT Plot".into()]);
                 m.insert(
                     5,
@@ -485,6 +485,7 @@ impl OpenBciGuiApp {
         self.tool_widgets.push(Box::new(WNetworking::new()));
         self.tool_widgets.push(Box::new(WFocus::new()));
         self.tool_widgets.push(Box::new(WHeadPlot::new()));
+        self.tool_widgets.push(Box::new(WSlowWaves::new()));
         self.tool_widgets.push(Box::new(WImpedance::new()));
         self.tool_widgets.push(Box::new(WHardwareSettings::new()));
         self.tool_widgets.push(Box::new(WAnalogRead::new()));
@@ -2200,6 +2201,7 @@ mod properties_rack_tests {
             "Marker",
             "Networking",
             "Head Plot",
+            "Slow Waves",
             "Analog Read",
             "Digital Read",
             "Pulse Sensor",

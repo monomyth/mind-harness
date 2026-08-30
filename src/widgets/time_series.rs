@@ -6,7 +6,7 @@ use crate::widgets::Widget;
 use eframe::egui;
 use egui::{pos2, Color32, Pos2, Rect, Shape, Stroke};
 
-/// Java ChannelBar: electrode button is outside the plot; ± / RMS overlay the plot.
+/// Java ChannelBar: electrode button is outside the plot; RMS overlays the plot.
 const ELECTRODE_W: f32 = 26.0;
 /// Left text column (montage name or `Ch N`), beside the numbered on/off circle.
 const LABEL_COL_W: f32 = 40.0;
@@ -282,20 +282,6 @@ fn paint_channel_trace(
 
     let label_color = theme::TEXT;
     let font = egui::FontId::proportional(10.0);
-    painter.text(
-        pos2(rect.left() + 4.0, rect.top() + 2.0),
-        egui::Align2::LEFT_TOP,
-        format!("+{:.0}uV", scale),
-        font.clone(),
-        label_color,
-    );
-    painter.text(
-        pos2(rect.left() + 4.0, rect.bottom() - 2.0),
-        egui::Align2::LEFT_BOTTOM,
-        format!("-{:.0}uV", scale),
-        font.clone(),
-        label_color,
-    );
 
     if !ys.is_empty() && rect.width() >= 1.0 {
         let n = ys.len();
@@ -527,7 +513,7 @@ impl Widget for WTimeSeries {
                                 let next = (eff_scale / 2.0).max(10.0);
                                 self.per_channel_y_scales[i] = next;
                             }
-                            ui.small(format!("{:.0}", eff_scale));
+                            ui.small(format!("{:.0} uV", eff_scale));
                             if ui.small_button("+").clicked() {
                                 let next = (eff_scale * 2.0).min(10000.0);
                                 self.per_channel_y_scales[i] = next;
