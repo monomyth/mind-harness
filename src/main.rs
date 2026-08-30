@@ -14,6 +14,7 @@ mod event_log;
 mod export;
 mod fft;
 mod filter_settings;
+mod laterality;
 mod markers;
 mod networking;
 mod slow_waves;

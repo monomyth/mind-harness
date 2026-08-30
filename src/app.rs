@@ -15,8 +15,8 @@ use crate::widget_context::WidgetContext;
 use crate::widget_manager::WidgetManager;
 use crate::widgets::{
     WAccelerometer, WAnalogRead, WBandPower, WDigitalRead, WEmg, WEmgJoystick, WFocus,
-    WHardwareSettings, WHeadPlot, WImpedance, WMarker, WNetworking, WPulseSensor, WSlowWaves,
-    WSpectrogram, WTimeSeries, Widget, WFFT,
+    WHardwareSettings, WHeadPlot, WHemispheres, WImpedance, WMarker, WNetworking, WPulseSensor,
+    WSlowWaves, WSpectrogram, WTimeSeries, Widget, WFFT,
 };
 use directories::ProjectDirs;
 use eframe::egui;
@@ -486,6 +486,7 @@ impl OpenBciGuiApp {
         self.tool_widgets.push(Box::new(WFocus::new()));
         self.tool_widgets.push(Box::new(WHeadPlot::new()));
         self.tool_widgets.push(Box::new(WSlowWaves::new()));
+        self.tool_widgets.push(Box::new(WHemispheres::new()));
         self.tool_widgets.push(Box::new(WImpedance::new()));
         self.tool_widgets.push(Box::new(WHardwareSettings::new()));
         self.tool_widgets.push(Box::new(WAnalogRead::new()));
@@ -2202,6 +2203,7 @@ mod properties_rack_tests {
             "Networking",
             "Head Plot",
             "Slow Waves",
+            "Hemispheres",
             "Analog Read",
             "Digital Read",
             "Pulse Sensor",
