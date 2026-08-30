@@ -190,6 +190,61 @@ pub fn fft_display_uv(samples: &[f64], sample_rate: f64, max_freq_hz: f64) -> (V
         .unzip()
 }
 
+/// Java `avgPowerInBins` one-bin PSD (µV)²/Hz.
+fn psdx_at(i: usize, n_half: usize, mag: f64, n_f: f64, sample_rate: f64) -> f64 {
+    if i != 0 && i != n_half {
+        mag * mag * n_f / sample_rate / 4.0
+    } else {
+        mag * mag * n_f / sample_rate
+    }
+}
+
+fn psd_sum_in_range(
+    freqs: &[f64],
+    mags: &[f64],
+    n: usize,
+    sample_rate: f64,
+    low: f64,
+    high: f64,
+    exclude: Option<(f64, f64)>,
+) -> f64 {
+    if high <= low {
+        return 0.0;
+    }
+    let n_half = freqs.len().saturating_sub(1);
+    let n_f = n as f64;
+    let mut sum = 0.0;
+    for (i, (&f, &mag)) in freqs.iter().zip(mags.iter()).enumerate() {
+        if f < low || f >= high {
+            continue;
+        }
+        if let Some((elo, ehi)) = exclude {
+            if f >= elo && f < ehi {
+                continue;
+            }
+        }
+        sum += psdx_at(i, n_half, mag, n_f, sample_rate);
+    }
+    sum
+}
+
+/// Sum of single-sided PSD in `[low, high)` Hz. Same formula as [`band_powers_psd`].
+/// `exclude` skips `[lo, hi)` (notch hole at 60).
+pub fn band_psd_excluding(
+    samples: &[f64],
+    sample_rate: f64,
+    low: f64,
+    high: f64,
+    exclude: Option<(f64, f64)>,
+) -> f64 {
+    if samples.is_empty() || sample_rate <= 0.0 {
+        return 0.0;
+    }
+    let n = samples.len().next_power_of_two();
+    let (freqs, mags) = fft_single_sided_uv(samples, sample_rate);
+    psd_sum_in_range(&freqs, &mags, n, sample_rate, low, high, exclude)
+}
+
 /// Java `avgPowerInBins`: sum of single-sided PSD in each band, (µV)²/Hz.
 pub fn band_powers_psd(samples: &[f64], sample_rate: f64) -> [f64; 5] {
     if samples.is_empty() || sample_rate <= 0.0 {
@@ -197,22 +252,9 @@ pub fn band_powers_psd(samples: &[f64], sample_rate: f64) -> [f64; 5] {
     }
     let n = samples.len().next_power_of_two();
     let (freqs, mags) = fft_single_sided_uv(samples, sample_rate);
-    let n_half = freqs.len().saturating_sub(1);
-    let n_f = n as f64;
     let mut out = [0.0; 5];
     for (b, &(_, low, high)) in EEG_BANDS.iter().enumerate() {
-        let mut sum = 0.0;
-        for (i, (&f, &mag)) in freqs.iter().zip(mags.iter()).enumerate() {
-            if f >= low && f < high {
-                let psdx = if i != 0 && i != n_half {
-                    mag * mag * n_f / sample_rate / 4.0
-                } else {
-                    mag * mag * n_f / sample_rate
-                };
-                sum += psdx;
-            }
-        }
-        out[b] = sum;
+        out[b] = psd_sum_in_range(&freqs, &mags, n, sample_rate, low, high, None);
     }
     out
 }

@@ -111,6 +111,36 @@ impl NotchMode {
             NotchMode::Off
         }
     }
+
+    pub fn punches_60(self) -> bool {
+        matches!(self, NotchMode::Sixty | NotchMode::FiftyAndSixty)
+    }
+}
+
+pub const DEFAULT_BANDPASS_LOW: f64 = 1.0;
+pub const DEFAULT_BANDPASS_HIGH: f64 = 50.0;
+const NYQUIST_EPS_HZ: f64 = 0.5;
+
+pub fn nyquist_hz(sample_rate: f64) -> f64 {
+    sample_rate.max(2.0) / 2.0
+}
+
+pub fn nyquist_readout(sample_rate: f64) -> String {
+    format!("Nyquist {:.0} Hz", nyquist_hz(sample_rate))
+}
+
+/// Visible high may sit above Nyquist; the board gets `min(high, nyquist − ε)`.
+pub fn applied_bandpass_corners(low: f64, high: f64, sample_rate: f64) -> (f64, f64) {
+    let cap = (nyquist_hz(sample_rate) - NYQUIST_EPS_HZ).max(1.0);
+    let mut lo = low.max(0.05);
+    let mut hi = high.min(cap);
+    if hi <= lo {
+        hi = (lo + 1.0).min(cap);
+        if hi <= lo {
+            lo = (hi - 1.0).max(0.05);
+        }
+    }
+    (lo, hi)
 }
 
 /// Apply bandpass then notch (Java `DataProcessing.processChannel` order).
@@ -265,6 +295,32 @@ mod tests {
     fn display_buffer_matches_java_20_plus_2_seconds() {
         assert_eq!(DISPLAY_BUFFER_SECONDS, 22);
         assert_eq!(display_buffer_keep(250), 250 * 22);
+    }
+
+    #[test]
+    fn nyquist_readout_is_half_sample_rate() {
+        assert_eq!(nyquist_hz(250.0), 125.0);
+        assert_eq!(nyquist_readout(250.0), "Nyquist 125 Hz");
+    }
+
+    #[test]
+    fn persist_uses_visible_corners_not_hardcoded_fifty() {
+        let (lo, hi) = applied_bandpass_corners(1.0, 40.0, 250.0);
+        assert!((lo - 1.0).abs() < 1e-12);
+        assert!((hi - 40.0).abs() < 1e-12);
+        let (lo50, hi50) = applied_bandpass_corners(1.0, 50.0, 250.0);
+        assert!((lo50 - 1.0).abs() < 1e-12);
+        assert!((hi50 - 50.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn high_above_nyquist_is_applied_just_below_nyquist() {
+        let typed = 200.0;
+        let (lo, hi) = applied_bandpass_corners(1.0, typed, 250.0);
+        assert!((lo - 1.0).abs() < 1e-12);
+        assert!(hi < 125.0, "applied high {hi} must be below Nyquist");
+        assert!(hi > 120.0, "applied high {hi} should sit near Nyquist − ε");
+        assert_eq!(typed, 200.0, "typed high is not mutated");
     }
 
     fn blink_like(sr: usize, seconds: f64, amp: f64, hz: f64) -> Vec<f64> {

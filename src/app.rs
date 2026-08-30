@@ -66,6 +66,10 @@ struct PersistedSettings {
     #[serde(default)]
     filter_notch_mode: Option<NotchMode>,
     filter_bandpass_enabled: bool,
+    #[serde(default = "default_bp_low")]
+    filter_bandpass_low: f64,
+    #[serde(default = "default_bp_high")]
+    filter_bandpass_high: f64,
     udp_enabled: bool,
     udp_target: String,
     osc_enabled: bool,
@@ -99,6 +103,14 @@ fn default_layout_id() -> usize {
     5
 }
 
+fn default_bp_low() -> f64 {
+    crate::filter_settings::DEFAULT_BANDPASS_LOW
+}
+
+fn default_bp_high() -> f64 {
+    crate::filter_settings::DEFAULT_BANDPASS_HIGH
+}
+
 impl Default for PersistedSettings {
     fn default() -> Self {
         Self {
@@ -111,6 +123,8 @@ impl Default for PersistedSettings {
             filter_notch_enabled: true,
             filter_notch_mode: Some(NotchMode::FiftyAndSixty),
             filter_bandpass_enabled: true,
+            filter_bandpass_low: crate::filter_settings::DEFAULT_BANDPASS_LOW,
+            filter_bandpass_high: crate::filter_settings::DEFAULT_BANDPASS_HIGH,
             udp_enabled: false,
             udp_target: "127.0.0.1:12345".to_string(),
             osc_enabled: false,
@@ -198,6 +212,8 @@ pub struct OpenBciGuiApp {
     // Phase 8: last-known global filter prefs (notch / bandpass) restored on new boards
     last_persisted_notch_mode: NotchMode,
     last_persisted_filter_bandpass: bool,
+    last_persisted_filter_bandpass_low: f64,
+    last_persisted_filter_bandpass_high: f64,
 
     // Post-Phase 8 "Finish the current wave": persisted graph speed/stability settings
     persisted_ts_time_window_sec: f32,
@@ -307,6 +323,8 @@ impl OpenBciGuiApp {
             // Phase 8 persistence defaults (overridden by load below)
             last_persisted_notch_mode: NotchMode::FiftyAndSixty,
             last_persisted_filter_bandpass: true,
+            last_persisted_filter_bandpass_low: crate::filter_settings::DEFAULT_BANDPASS_LOW,
+            last_persisted_filter_bandpass_high: crate::filter_settings::DEFAULT_BANDPASS_HIGH,
 
             // Will be overwritten by load_persisted_settings below
             persisted_ts_time_window_sec: 5.0,
@@ -344,6 +362,8 @@ impl OpenBciGuiApp {
             .filter_notch_mode
             .unwrap_or_else(|| NotchMode::from_legacy_enabled(persisted.filter_notch_enabled));
         app.last_persisted_filter_bandpass = persisted.filter_bandpass_enabled;
+        app.last_persisted_filter_bandpass_low = persisted.filter_bandpass_low;
+        app.last_persisted_filter_bandpass_high = persisted.filter_bandpass_high;
 
         // Load graph speed/stability settings (Time Window + Smoothing wave)
         app.persisted_ts_time_window_sec = persisted.ts_time_window_sec;
@@ -714,6 +734,8 @@ impl OpenBciGuiApp {
             filter_notch_enabled: self.last_persisted_notch_mode != NotchMode::Off,
             filter_notch_mode: Some(self.last_persisted_notch_mode),
             filter_bandpass_enabled: self.last_persisted_filter_bandpass,
+            filter_bandpass_low: self.last_persisted_filter_bandpass_low,
+            filter_bandpass_high: self.last_persisted_filter_bandpass_high,
             udp_enabled,
             udp_target,
             osc_enabled,
@@ -772,9 +794,15 @@ impl OpenBciGuiApp {
             .unwrap_or(0);
         if let Some(ref mut board) = self.board {
             let (enabled, noise) = self.last_persisted_notch_mode.to_brainflow();
+            let sr = board.sample_rate() as f64;
+            let (lo, hi) = crate::filter_settings::applied_bandpass_corners(
+                self.last_persisted_filter_bandpass_low,
+                self.last_persisted_filter_bandpass_high,
+                sr,
+            );
             for ch in 0..n {
                 board.set_notch_filter(ch, enabled, noise);
-                board.set_bandpass_filter(ch, self.last_persisted_filter_bandpass, 1.0, 50.0);
+                board.set_bandpass_filter(ch, self.last_persisted_filter_bandpass, lo, hi);
             }
             board.apply_pending_filters();
         }
@@ -877,11 +905,48 @@ impl OpenBciGuiApp {
                             .log_filter(&format!("Notch set to {}", mode.label()));
                     }
                     let mut bp = self.last_persisted_filter_bandpass;
-                    if ui.checkbox(&mut bp, "BP 1–50").changed() {
+                    if ui.checkbox(&mut bp, "BP").changed() {
                         self.last_persisted_filter_bandpass = bp;
                         persist_filters = true;
                     }
+                    let mut lo = self.last_persisted_filter_bandpass_low;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut lo)
+                                .range(0.1..=500.0)
+                                .speed(0.5)
+                                .max_decimals(1)
+                                .prefix("low ")
+                                .suffix(" Hz"),
+                        )
+                        .changed()
+                    {
+                        self.last_persisted_filter_bandpass_low = lo;
+                        persist_filters = true;
+                    }
+                    let mut hi = self.last_persisted_filter_bandpass_high;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut hi)
+                                .range(0.1..=500.0)
+                                .speed(0.5)
+                                .max_decimals(1)
+                                .prefix("high ")
+                                .suffix(" Hz"),
+                        )
+                        .changed()
+                    {
+                        self.last_persisted_filter_bandpass_high = hi;
+                        persist_filters = true;
+                    }
+                    ui.small("Butterworth 4");
                 });
+                let sr = self
+                    .board
+                    .as_ref()
+                    .map(|b| b.sample_rate() as f64)
+                    .unwrap_or(250.0);
+                ui.small(crate::filter_settings::nyquist_readout(sr));
                 if persist_filters {
                     self.apply_persisted_filters_to_current_board();
                     self.save_current_persisted_settings();

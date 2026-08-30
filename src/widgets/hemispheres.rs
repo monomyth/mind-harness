@@ -1,9 +1,10 @@
 //! PROPERTIES card: pair-named laterality + relative power. Not a path on the scalp.
 
 use crate::board::DataSource;
+use crate::filter_settings::{NotchMode, DEFAULT_BANDPASS_HIGH};
 use crate::laterality::{
-    pair_band_snapshot, run_self_test, wave_presence, FlipClock, PairBandLi, SelfTestReport,
-    WaveRow, GAMMA_NOTICE, WINDOW_SEC,
+    contamination_meter, pair_band_snapshot, run_self_test, wave_presence, ContaminationMeter,
+    FlipClock, PairBandLi, SelfTestReport, WaveRow, WINDOW_SEC,
 };
 use crate::theme;
 use crate::widgets::Widget;
@@ -15,6 +16,7 @@ pub struct WHemispheres {
     clock: FlipClock,
     rows: Vec<PairBandLi>,
     waves: [WaveRow; 4],
+    contamination: ContaminationMeter,
     t0: Instant,
     self_test: Option<SelfTestReport>,
 }
@@ -26,6 +28,7 @@ impl WHemispheres {
             clock: FlipClock::new(),
             rows: Vec::new(),
             waves: wave_presence(&[], 250.0),
+            contamination: contamination_meter(&[], 250.0, DEFAULT_BANDPASS_HIGH, NotchMode::Off),
             t0: Instant::now(),
             self_test: None,
         }
@@ -66,6 +69,12 @@ impl Widget for WHemispheres {
         }
         self.rows = pair_band_snapshot(&channels, sr);
         self.waves = wave_presence(&channels, sr);
+        let (high_cut, notch) = source
+            .get_filter_settings()
+            .and_then(|s| s.channels.first())
+            .map(|ch| (ch.bandpass_high, NotchMode::from_channel(ch)))
+            .unwrap_or((DEFAULT_BANDPASS_HIGH, NotchMode::FiftyAndSixty));
+        self.contamination = contamination_meter(&channels, sr, high_cut, notch);
         self.clock
             .observe_rows(&self.rows, self.t0.elapsed().as_secs_f64());
     }
@@ -94,8 +103,15 @@ impl Widget for WHemispheres {
             }
         }
 
+        ui.add_space(6.0);
+        ui.separator();
+        ui.small("Contamination (scoring, not a filter)");
+        ui.horizontal(|ui| {
+            paint_ratio_bar(ui, self.contamination.ratio);
+            ui.small(egui::RichText::new(self.contamination.row_copy()).color(theme::TEXT));
+        });
+
         ui.add_space(4.0);
-        ui.small(GAMMA_NOTICE);
         ui.label(
             egui::RichText::new(self.clock.last_flip_line(self.t0.elapsed().as_secs_f64()))
                 .small()
@@ -166,6 +182,21 @@ fn paint_li_bar(ui: &mut egui::Ui, li: Option<f64>) {
                 egui::pos2(x, r.bottom() - 2.0),
             )
         };
+        painter.rect_filled(fill, 0.0, theme::ACCENT);
+    }
+}
+
+fn paint_ratio_bar(ui: &mut egui::Ui, ratio: f64) {
+    let (resp, painter) = ui.allocate_painter(egui::vec2(64.0, 10.0), egui::Sense::hover());
+    let r = resp.rect;
+    painter.rect_filled(r, 2.0, theme::TRANSPORT);
+    painter.rect_stroke(r, 2.0, theme::hairline(), egui::StrokeKind::Inside);
+    let t = ratio.clamp(0.0, 1.0) as f32;
+    if t > 0.0 {
+        let fill = egui::Rect::from_min_max(
+            r.min + egui::vec2(1.0, 2.0),
+            egui::pos2(r.left() + r.width() * t, r.bottom() - 2.0),
+        );
         painter.rect_filled(fill, 0.0, theme::ACCENT);
     }
 }
