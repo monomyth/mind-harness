@@ -189,7 +189,11 @@ impl NetworkingManager {
                     "LSL is not linked in this binary (Homebrew lsl.framework missing at build)"
                         .into(),
                 );
-                if let Some(c) = self.configs.iter_mut().find(|c| c.protocol == Protocol::LSL) {
+                if let Some(c) = self
+                    .configs
+                    .iter_mut()
+                    .find(|c| c.protocol == Protocol::LSL)
+                {
                     c.enabled = false;
                 }
             } else {
@@ -205,8 +209,10 @@ impl NetworkingManager {
                     }
                     Err(e) => {
                         self.last_error = Some(format!("LSL {name} — {e}"));
-                        if let Some(c) =
-                            self.configs.iter_mut().find(|c| c.protocol == Protocol::LSL)
+                        if let Some(c) = self
+                            .configs
+                            .iter_mut()
+                            .find(|c| c.protocol == Protocol::LSL)
                         {
                             c.enabled = false;
                         }

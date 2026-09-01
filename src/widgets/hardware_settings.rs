@@ -1,10 +1,8 @@
-//! Hardware Settings — Cyton ADS1299 power / gain / input / bias / SRB.
+//! Board (ADS1299) — Cyton ADS1299 power / gain / input / bias / SRB.
 //!
 //! Pending commits are polled by the app (same pattern as WImpedance).
 
-use crate::board::ads_settings::{
-    AdsChannel, AdsGain, AdsInput, AdsPower, AdsYesNo,
-};
+use crate::board::ads_settings::{AdsChannel, AdsGain, AdsInput, AdsPower, AdsYesNo};
 use crate::board::DataSource;
 use crate::widgets::Widget;
 use eframe::egui;
@@ -17,7 +15,7 @@ pub struct WHardwareSettings {
 impl WHardwareSettings {
     pub fn new() -> Self {
         Self {
-            title: "Hardware Settings".to_string(),
+            title: "Board".to_string(),
             pending: None,
         }
     }
@@ -53,7 +51,9 @@ impl Widget for WHardwareSettings {
             );
             return;
         };
-        ui.small("Power Off zeros that electrode in Time Series. Live Cyton sends x…X via config_board.");
+        ui.small(
+            "Power Off zeros that electrode in Time Series. Live Cyton sends x…X via config_board.",
+        );
         egui::ScrollArea::both().max_height(280.0).show(ui, |ui| {
             egui::Grid::new("ads_grid").striped(true).show(ui, |ui| {
                 ui.strong("Ch");

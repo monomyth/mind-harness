@@ -1,6 +1,7 @@
 //! W_timeSeries — stacked per-channel EEG traces matching the Java ChannelBar look.
 
 use crate::board::DataSource;
+use crate::experiment::ExperimentOverlay;
 use crate::theme;
 use crate::widgets::Widget;
 use eframe::egui;
@@ -8,32 +9,42 @@ use egui::{pos2, Color32, Pos2, Rect, Shape, Stroke};
 
 /// Java ChannelBar: electrode button is outside the plot; RMS overlays the plot.
 const ELECTRODE_W: f32 = 26.0;
-/// Left text column (montage name or `Ch N`), beside the numbered on/off circle.
+/// Left text column: 10-20 site name (same as Head Plot holes), beside the on/off circle.
 const LABEL_COL_W: f32 = 40.0;
 /// 1px gutter so plot rects do not touch.
 const ROW_GUTTER_Y: f32 = 1.0;
-/// Unused space under the last row so the 22px status bar does not clip the axis.
+/// Unused space under the last row so the 32px status bar does not clip the axis.
 const BOTTOM_PAD: f32 = 12.0;
 /// Extra height on the last visible row for the time-axis ticks/labels.
 const LAST_ROW_AXIS: f32 = 10.0;
 
 pub struct WTimeSeries {
+    /// Active montage 10-20 names (same as Head Plot). Empty = LABELS default.
+    montage_labels: [String; 8],
     time_window_sec: f32,
     y_scale_uv: f32,
     title: String,
     visible_channels: Vec<bool>,
     per_channel_y_scales: Vec<f32>,
+    experiment_overlay: Option<ExperimentOverlay>,
 }
 
 impl WTimeSeries {
     pub fn new() -> Self {
         Self {
+            montage_labels: crate::widgets::head_plot::LABELS.map(|s| s.to_string()),
             time_window_sec: 5.0,
             y_scale_uv: 200.0,
             title: "Time Series".to_string(),
             visible_channels: vec![true; 16],
             per_channel_y_scales: vec![0.0; 16],
+            experiment_overlay: None,
         }
+    }
+
+    /// Same 10-20 names as Head Plot holes (active montage).
+    pub fn set_channel_labels(&mut self, labels: [String; 8]) {
+        self.montage_labels = labels;
     }
 
     pub fn set_time_window(&mut self, seconds: f32) {
@@ -69,6 +80,10 @@ impl WTimeSeries {
 
     pub fn per_channel_y_scales(&self) -> Vec<f32> {
         self.per_channel_y_scales.clone()
+    }
+
+    pub fn set_experiment_overlay(&mut self, overlay: Option<ExperimentOverlay>) {
+        self.experiment_overlay = overlay;
     }
 
     fn scale_for_trace(&self, ch: usize, ys: &[f64]) -> f64 {
@@ -166,6 +181,26 @@ fn paint_markers(
     }
 }
 
+fn paint_experiment_overlay(ui: &egui::Ui, rect: Rect, overlay: &ExperimentOverlay) {
+    let painter = ui.painter_at(rect);
+    painter.text(
+        pos2(rect.left() + 6.0, rect.top() + 16.0),
+        egui::Align2::LEFT_TOP,
+        overlay.line(),
+        egui::FontId::proportional(11.0),
+        theme::TEXT,
+    );
+    if let Some(next) = overlay.next_spoken {
+        painter.text(
+            pos2(rect.left() + 6.0, rect.top() + 30.0),
+            egui::Align2::LEFT_TOP,
+            next,
+            egui::FontId::proportional(10.0),
+            theme::HAIRLINE,
+        );
+    }
+}
+
 fn sample_at(row: &[f64], board_ch: usize) -> f64 {
     row.get(board_ch).copied().unwrap_or(0.0)
 }
@@ -220,14 +255,17 @@ pub(crate) fn last_row_height(layout: &TraceStackLayout) -> f32 {
     layout.row_h + layout.last_row_extra
 }
 
-/// Left-column text: board montage name if present, otherwise `Ch N`.
+/// Left-column text: 10-20 site. Never `Ch N` — traces and holes share one name.
 pub(crate) fn left_channel_label(logical: usize, board_label: &str) -> String {
     let t = board_label.trim();
-    if t.is_empty() {
-        format!("Ch {}", logical + 1)
-    } else {
-        t.to_string()
+    if !t.is_empty() && !t.eq_ignore_ascii_case(&format!("Ch {}", logical + 1)) {
+        return t.to_string();
     }
+    crate::widgets::head_plot::LABELS
+        .get(logical)
+        .copied()
+        .unwrap_or("?")
+        .to_string()
 }
 
 /// Newest sample at t=0, older samples to the left (Java time axis).
@@ -415,6 +453,7 @@ impl Widget for WTimeSeries {
             .rev()
             .find(|&i| self.visible_channels.get(i).copied().unwrap_or(false));
 
+        let mut overlay_rect: Option<Rect> = None;
         for (i, &channel_idx) in exg_channels.iter().enumerate().take(num_channels) {
             if !self.visible_channels[i] {
                 continue;
@@ -435,7 +474,13 @@ impl Widget for WTimeSeries {
             } else {
                 stack.row_h
             };
-            let row_label = left_channel_label(i, &source.channel_label(i));
+            let board = source.channel_label(i);
+            let mont = self
+                .montage_labels
+                .get(i)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let row_label = left_channel_label(i, if !mont.is_empty() { mont } else { &board });
 
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), row_h),
@@ -454,24 +499,22 @@ impl Widget for WTimeSeries {
                         egui::FontId::proportional(11.0),
                         theme::TEXT,
                     );
-                    // Numbered electrode circle (Java on/off button)
+                    // On/off circle — no channel number (10-20 name is the only label).
                     let (circ_resp, painter) = ui.allocate_painter(
                         egui::vec2(ELECTRODE_W - 4.0, 22.0),
                         egui::Sense::click(),
                     );
                     let center = circ_resp.rect.center();
                     painter.circle_filled(center, 10.0, color);
-                    painter.text(
-                        center,
-                        egui::Align2::CENTER_CENTER,
-                        if powered {
-                            format!("{}", i + 1)
-                        } else {
-                            "off".into()
-                        },
-                        egui::FontId::proportional(if powered { 12.0 } else { 9.0 }),
-                        theme::TEXT,
-                    );
+                    if !powered {
+                        painter.text(
+                            center,
+                            egui::Align2::CENTER_CENTER,
+                            "off",
+                            egui::FontId::proportional(9.0),
+                            theme::TEXT,
+                        );
+                    }
                     if circ_resp.clicked() {
                         self.visible_channels[i] = false;
                     }
@@ -495,6 +538,9 @@ impl Widget for WTimeSeries {
                         color,
                         last_visible == Some(i),
                     );
+                    if overlay_rect.is_none() {
+                        overlay_rect = Some(plot_rect);
+                    }
                     if last_visible == Some(i) {
                         paint_markers(
                             ui,
@@ -525,6 +571,10 @@ impl Widget for WTimeSeries {
                     });
                 },
             );
+        }
+
+        if let (Some(rect), Some(overlay)) = (overlay_rect, self.experiment_overlay.as_ref()) {
+            paint_experiment_overlay(ui, rect, overlay);
         }
 
         // Re-enable hidden channels (Java lets you click the numbered button to toggle).
@@ -681,10 +731,10 @@ mod tests {
     }
 
     #[test]
-    fn left_label_uses_montage_or_ch_n() {
-        assert_eq!(super::left_channel_label(0, ""), "Ch 1");
-        assert_eq!(super::left_channel_label(15, "   "), "Ch 16");
-        assert_eq!(super::left_channel_label(0, "Ch 1"), "Ch 1");
+    fn left_label_uses_10_20_not_channel_numbers() {
+        assert_eq!(super::left_channel_label(0, ""), "Fp1");
+        assert_eq!(super::left_channel_label(2, "   "), "C3");
+        assert_eq!(super::left_channel_label(0, "Ch 1"), "Fp1");
         assert_eq!(super::left_channel_label(0, "Fp1"), "Fp1");
         assert_eq!(super::left_channel_label(7, "O2"), "O2");
     }

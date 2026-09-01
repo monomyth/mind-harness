@@ -7,6 +7,7 @@ use crate::markers::{self, MarkerEvent};
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::upper_case_acronyms)]
@@ -29,6 +30,28 @@ pub struct DataLogger {
     samples_logged: u64,
     markers: Vec<MarkerEvent>,
 }
+
+/// Stable Recordings folder: crate Recordings/ if we can see Cargo.toml, else ~/Recordings.
+/// Never the process cwd (launching the app from home used to dump files there).
+pub fn recordings_dir() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors() {
+            if ancestor.join("Cargo.toml").is_file() {
+                let d = ancestor.join("Recordings");
+                let _ = std::fs::create_dir_all(&d);
+                return d;
+            }
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let d = home.join("Recordings");
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+static RECORDING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 impl DataLogger {
     pub fn new() -> Self {
@@ -55,23 +78,25 @@ impl DataLogger {
     ) -> std::io::Result<PathBuf> {
         self.stop();
 
-        std::fs::create_dir_all("Recordings")?;
+        let rec_dir = recordings_dir();
 
         // Generate timestamped filename so we never overwrite previous recordings
         let now = chrono::Local::now();
+        let seq = RECORDING_SEQ.fetch_add(1, Ordering::Relaxed);
         let timestamp = format!(
-            "{}_{}",
+            "{}_{}_{}",
             now.format("%Y-%m-%d_%H-%M-%S_%3f"),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos())
-                .unwrap_or(0)
+                .unwrap_or(0),
+            seq
         );
 
         let (path, _filename) = match format {
             LogFormat::ODF => {
                 let filename = format!("OpenBCI_{}.txt", timestamp);
-                let path = PathBuf::from("Recordings").join(&filename);
+                let path = rec_dir.join(&filename);
                 let mut file = File::create(&path)?;
                 writeln!(file, "OpenBCI Data Format (Rust port) - {}", timestamp)?;
                 writeln!(
@@ -92,7 +117,7 @@ impl DataLogger {
             }
             LogFormat::BDF => {
                 let filename = format!("OpenBCI_{}.bdf", timestamp);
-                let path = PathBuf::from("Recordings").join(&filename);
+                let path = rec_dir.join(&filename);
                 let bdf = DataWriterBDF::new(path.clone(), nb_channels, sample_rate)?;
                 self.bdf_writer = Some(bdf);
                 self.output_path = Some(path.clone());

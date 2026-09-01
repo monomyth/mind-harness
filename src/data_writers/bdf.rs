@@ -271,7 +271,11 @@ pub fn encode_tal(record_start: f64, markers: &[(f64, String)]) -> Vec<u8> {
     out
 }
 
-pub fn pack_annotation_record(record_start: f64, markers: &[(f64, String)], n_samples: usize) -> Vec<u8> {
+pub fn pack_annotation_record(
+    record_start: f64,
+    markers: &[(f64, String)],
+    n_samples: usize,
+) -> Vec<u8> {
     let mut bytes = encode_tal(record_start, markers);
     let need = n_samples * 3;
     bytes.resize(need, 0);

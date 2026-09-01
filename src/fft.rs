@@ -347,6 +347,18 @@ mod tests {
     }
 
     #[test]
+    fn longer_fft_window_has_bins_between_xmin_and_one_hz() {
+        let samples = vec![0.0_f64; 1024];
+        let (freqs, _) = fft_display_uv(&samples, 250.0, 100.0);
+        assert!(!freqs.is_empty());
+        let first = freqs[0];
+        assert!(
+            first >= FFT_DISPLAY_MIN_HZ && first <= 0.5,
+            "xmin 0.1 Hz must be a real bin, not ~1 Hz, first={first}"
+        );
+    }
+
+    #[test]
     fn demean_keeps_a_ten_hz_sine_above_a_dc_offset() {
         let sr = 256.0;
         let n = 256;

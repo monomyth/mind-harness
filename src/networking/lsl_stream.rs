@@ -98,7 +98,13 @@ impl LslPair {
                 return Err("LSL EEG stream needs at least 1 channel".into());
             }
             unsafe {
-                let eeg = create_outlet(eeg_name, DEFAULT_EEG_TYPE, n_ch as i32, sample_rate, ffi::CFT_DOUBLE64)?;
+                let eeg = create_outlet(
+                    eeg_name,
+                    DEFAULT_EEG_TYPE,
+                    n_ch as i32,
+                    sample_rate,
+                    ffi::CFT_DOUBLE64,
+                )?;
                 let markers = match create_outlet(
                     DEFAULT_MARKER_NAME,
                     DEFAULT_MARKER_TYPE,
@@ -112,11 +118,7 @@ impl LslPair {
                         return Err(e);
                     }
                 };
-                Ok(Self {
-                    eeg,
-                    markers,
-                    n_ch,
-                })
+                Ok(Self { eeg, markers, n_ch })
             }
         }
     }
@@ -180,14 +182,8 @@ unsafe fn create_outlet(
     let name = CString::new(name).map_err(|e| e.to_string())?;
     let type_ = CString::new(type_).map_err(|e| e.to_string())?;
     let src = CString::new("OpenBCI_Rust_GUI").unwrap();
-    let info = ffi::lsl_create_streaminfo(
-        name.as_ptr(),
-        type_.as_ptr(),
-        n_ch,
-        rate,
-        fmt,
-        src.as_ptr(),
-    );
+    let info =
+        ffi::lsl_create_streaminfo(name.as_ptr(), type_.as_ptr(), n_ch, rate, fmt, src.as_ptr());
     if info.is_null() {
         return Err("lsl_create_streaminfo returned null".into());
     }
@@ -206,7 +202,14 @@ fn resolve_eeg_name(name: &str, timeout_sec: f64) -> Result<String, String> {
     let value = CString::new(name).map_err(|e| e.to_string())?;
     let mut buf: [ffi::StreamInfo; 4] = [ptr::null_mut(); 4];
     let n = unsafe {
-        ffi::lsl_resolve_byprop(buf.as_mut_ptr(), 4, prop.as_ptr(), value.as_ptr(), 1, timeout_sec)
+        ffi::lsl_resolve_byprop(
+            buf.as_mut_ptr(),
+            4,
+            prop.as_ptr(),
+            value.as_ptr(),
+            1,
+            timeout_sec,
+        )
     };
     if n <= 0 {
         return Err("no LSL stream found".into());
@@ -265,9 +268,8 @@ mod tests {
         let mut got = false;
         for _ in 0..20 {
             ec = 0;
-            let ts = unsafe {
-                ffi::lsl_pull_sample_d(inlet, sample.as_mut_ptr(), 2, 0.25, &mut ec)
-            };
+            let ts =
+                unsafe { ffi::lsl_pull_sample_d(inlet, sample.as_mut_ptr(), 2, 0.25, &mut ec) };
             if ec == 0 && ts != 0.0 {
                 got = true;
                 break;

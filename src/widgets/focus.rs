@@ -25,6 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::board::DataSource;
 use crate::event_log::LogLevel;
 use crate::fft::compute_band_powers;
+use crate::laterality::latch_rails;
 use crate::widgets::Widget;
 use brainflow::{
     brainflow_model_params::BrainFlowModelParamsBuilder, data_filter, ml_model::MlModel,
@@ -234,6 +235,9 @@ pub struct WFocus {
     prev_focus: f32,
     recent_events: Vec<(f64, String)>, // (unix ts, "Focus 78%")
     max_events: usize,
+
+    railed: [bool; 8],
+    contact_ok: bool,
 }
 
 impl WFocus {
@@ -263,6 +267,9 @@ impl WFocus {
             prev_focus: 0.5,
             recent_events: Vec::new(),
             max_events: 6,
+
+            railed: [false; 8],
+            contact_ok: true,
         }
     }
 
@@ -384,17 +391,29 @@ impl WFocus {
 
     /// Compact transport chip: scaled ring (percent in the center) + value.
     pub fn paint_transport_chip(&self, ui: &mut egui::Ui) {
-        let value = self.focus_value;
+        let value = if self.contact_ok {
+            self.focus_value
+        } else {
+            0.0
+        };
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.horizontal(|ui| {
                 ui.set_max_height(24.0);
-                paint_focus_ring(ui, value, 22.0);
-                ui.label(
-                    egui::RichText::new(format!("{:.2}", value))
-                        .small()
-                        .color(crate::theme::TEXT),
-                );
+                paint_focus_ring(ui, value, 22.0, self.contact_ok);
+                if self.contact_ok {
+                    ui.label(
+                        egui::RichText::new(format!("{:.2}", value))
+                            .small()
+                            .color(crate::theme::TEXT),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("—")
+                            .small()
+                            .color(crate::theme::HAIRLINE),
+                    );
+                }
             });
         });
     }
@@ -419,6 +438,24 @@ impl Widget for WFocus {
 
     fn update(&mut self, source: &dyn DataSource) {
         let window_size = (source.sample_rate() as usize * 2).min(512);
+
+        let raw_rows = source.get_raw_data(window_size.max(32));
+        let exg = source.exg_channels();
+        let mut chs = Vec::new();
+        for &col in exg.iter().take(8) {
+            chs.push(
+                raw_rows
+                    .iter()
+                    .map(|row| row.get(col).copied().unwrap_or(0.0))
+                    .collect::<Vec<f64>>(),
+            );
+        }
+        latch_rails(&mut self.railed, &chs);
+        self.contact_ok = !self.railed.iter().any(|&r| r);
+        if !self.contact_ok {
+            self.audio.set_focus(0.0);
+            return;
+        }
 
         let new_focus = if self.use_ml && self.ml_prepared {
             // --- Real BrainFlow MLModel path ---
@@ -706,7 +743,7 @@ impl Widget for WFocus {
     }
 }
 
-fn paint_focus_ring(ui: &mut egui::Ui, value: f32, diameter: f32) {
+fn paint_focus_ring(ui: &mut egui::Ui, value: f32, diameter: f32, contact_ok: bool) {
     let d = diameter.max(12.0);
     let size = egui::vec2(d, d);
     let (resp, painter) = ui.allocate_painter(size, egui::Sense::hover());
@@ -731,11 +768,19 @@ fn paint_focus_ring(ui: &mut egui::Ui, value: f32, diameter: f32) {
         }
     }
     let font = (d * 0.32).clamp(7.0, 16.0);
+    let (center, color) = if contact_ok {
+        (
+            format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0),
+            crate::theme::TEXT,
+        )
+    } else {
+        ("—".to_string(), crate::theme::HAIRLINE)
+    };
     painter.text(
         c,
         egui::Align2::CENTER_CENTER,
-        format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0),
+        center,
         egui::FontId::proportional(font),
-        crate::theme::TEXT,
+        color,
     );
 }

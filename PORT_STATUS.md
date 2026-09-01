@@ -3,7 +3,7 @@
 **Date**: 2026-08-29 (v1.0.0 — dark studio chrome; GROK_PLAN proofs unchanged)  
 **Current State**: Chrome is Ableton/Blender/Resolve greys (`#1d1d1d` canvas, thin transport, properties rack). GROK_PLAN signal/hardware proofs are unchanged from the prior 0.3.0 rows below. Item 1 (live ADS1299 kΩ) remains **locked**: 2026-08-28 headset-off jumped ch1 15k→50k kΩ and ch2 8k→58k kΩ; UI not simulated.
 
-**Launch notes (macOS 26)**: eframe 0.28 crashed in `NSScreen` enumeration (`q` vs `Q`). The GUI now uses **eframe/egui 0.32 + egui_plot 0.33** (winit 0.30.12+). `build.rs` embeds an rpath to BrainFlow's `lib/` so `target/debug/openbci_gui` loads `libBoardController.dylib`.
+**Launch notes (macOS 26)**: eframe 0.28 crashed in `NSScreen` enumeration (`q` vs `Q`). The GUI now uses **eframe/egui 0.32 + egui_plot 0.33** (winit 0.30.12+). `build.rs` embeds an rpath to BrainFlow's `lib/` so `target/debug/openbci-gui` loads `libBoardController.dylib`.
 
 This document tracks parity with the canonical Java/Processing implementation (`~/github/OpenBCI_GUI/OpenBCI_GUI/`).
 

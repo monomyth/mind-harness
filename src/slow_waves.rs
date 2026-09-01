@@ -1,21 +1,23 @@
 //! Pairwise slow-wave lag (Hilbert PLV + lagged cross-correlation).
 //!
 //! Not a traveling-wave field. Not circular. Not an origin or path in the skull.
-//! On this Cyton 8ch montage there is no occipital pair — front is Fp1+Fp2, back is P3+P4.
+//! Default Cyton 8ch (Mark IV docs): front is Fp1+Fp2, back is O1+O2.
 //!
 //! Zero lag (including |lag| ≤ 1 sample) is treated as volume conduction, not a direction.
 
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f64::consts::PI;
 
-/// Named 10-20-ish order used by Head Plot (8ch). Do not invent O1/O2.
-pub const MONTAGE: [&str; 8] = ["Fp1", "Fp2", "F7", "F8", "C3", "C4", "P3", "P4"];
+/// Named 10-20 order used by Head Plot (official Mark IV Cyton 8ch).
+pub const MONTAGE: [&str; 8] = ["Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2"];
 pub const IDX_FP1: usize = 0;
 pub const IDX_FP2: usize = 1;
-pub const IDX_C3: usize = 4;
-pub const IDX_C4: usize = 5;
-pub const IDX_P3: usize = 6;
-pub const IDX_P4: usize = 7;
+pub const IDX_C3: usize = 2;
+pub const IDX_C4: usize = 3;
+pub const IDX_P7: usize = 4;
+pub const IDX_P8: usize = 5;
+pub const IDX_O1: usize = 6;
+pub const IDX_O2: usize = 7;
 
 pub const WINDOW_SEC: f64 = 2.0;
 /// |lag| at or below this many samples is volume conduction, not travel.
@@ -50,17 +52,42 @@ impl Band {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pair {
-    /// Fp1+Fp2 vs P3+P4 (this board has no O).
+    /// Fp1+Fp2 vs O1+O2.
     AnteriorPosterior,
     /// C3 vs C4.
     LeftRight,
+    /// Signed Which first plate: O1 vs O2.
+    O1O2,
 }
 
 impl Pair {
     pub fn label(self) -> &'static str {
         match self {
-            Pair::AnteriorPosterior => "Fp vs P",
+            Pair::AnteriorPosterior => "Fp vs O",
             Pair::LeftRight => "C3 vs C4",
+            Pair::O1O2 => "O1 vs O2",
+        }
+    }
+
+    /// Two insert holes named/filled on the Mark IV. A-P is Fp1 vs O1;
+    /// L-R is C3 vs C4. Never the other six.
+    pub fn draw_idx(self) -> [usize; 2] {
+        match self {
+            Pair::LeftRight => [IDX_C3, IDX_C4],
+            Pair::AnteriorPosterior => [IDX_FP1, IDX_O1],
+            Pair::O1O2 => [IDX_O1, IDX_O2],
+        }
+    }
+
+    pub fn site_idx(self) -> [usize; 2] {
+        self.draw_idx()
+    }
+
+    pub fn site_names(self) -> [&'static str; 2] {
+        match self {
+            Pair::LeftRight => ["C3", "C4"],
+            Pair::AnteriorPosterior => ["Fp1", "O1"],
+            Pair::O1O2 => ["O1", "O2"],
         }
     }
 }
@@ -113,19 +140,26 @@ pub fn analyze_window(channels: &[Vec<f64>], sr: f64, band: Band) -> Vec<LagResu
     vec![
         analyze_ap(channels, sr, band),
         analyze_lr(channels, sr, band),
+        analyze_o1o2(channels, sr, band),
     ]
 }
 
 fn analyze_ap(channels: &[Vec<f64>], sr: f64, band: Band) -> LagResult {
     let front = mean_channels(channels, &[IDX_FP1, IDX_FP2]);
-    let back = mean_channels(channels, &[IDX_P3, IDX_P4]);
-    pair_lag(band, Pair::AnteriorPosterior, "Fp", "P", &front, &back, sr)
+    let back = mean_channels(channels, &[IDX_O1, IDX_O2]);
+    pair_lag(band, Pair::AnteriorPosterior, "Fp", "O", &front, &back, sr)
 }
 
 fn analyze_lr(channels: &[Vec<f64>], sr: f64, band: Band) -> LagResult {
     let c3 = channels.get(IDX_C3).cloned().unwrap_or_default();
     let c4 = channels.get(IDX_C4).cloned().unwrap_or_default();
     pair_lag(band, Pair::LeftRight, "C3", "C4", &c3, &c4, sr)
+}
+
+fn analyze_o1o2(channels: &[Vec<f64>], sr: f64, band: Band) -> LagResult {
+    let o1 = channels.get(IDX_O1).cloned().unwrap_or_default();
+    let o2 = channels.get(IDX_O2).cloned().unwrap_or_default();
+    pair_lag(band, Pair::O1O2, "O1", "O2", &o1, &o2, sr)
 }
 
 /// Lag of `b` relative to `a`. Positive lag_ms ⇒ `a` leads `b`.
@@ -181,6 +215,18 @@ fn pair_lag(
         direction,
         conf,
     }
+}
+
+/// Lag of `b` relative to `a`. Positive lag_ms => `a` leads `b`.
+pub fn lag_named(
+    band: Band,
+    name_a: &str,
+    name_b: &str,
+    a: &[f64],
+    b: &[f64],
+    sr: f64,
+) -> LagResult {
+    pair_lag(band, Pair::LeftRight, name_a, name_b, a, b, sr)
 }
 
 fn mean_channels(channels: &[Vec<f64>], idxs: &[usize]) -> Vec<f64> {
@@ -261,7 +307,11 @@ fn analytic(x: &[f64]) -> Vec<Complex<f64>> {
         *bin = Complex::new(0.0, 0.0);
     }
     if n > 2 {
-        let last_pos = if n.is_multiple_of(2) { n / 2 - 1 } else { n / 2 };
+        let last_pos = if n.is_multiple_of(2) {
+            n / 2 - 1
+        } else {
+            n / 2
+        };
         for bin in buf.iter_mut().take(last_pos + 1).skip(1) {
             *bin = Complex::new(bin.re * 2.0, bin.im * 2.0);
         }
@@ -393,8 +443,8 @@ fn fixture_checks() -> Vec<(&'static str, bool, String)> {
 
     vec![
         (
-            "Fp vs P delay",
-            ap_slow.direction.as_deref() == Some("Fp leads P by 40 ms")
+            "Fp vs O delay",
+            ap_slow.direction.as_deref() == Some("Fp leads O by 40 ms")
                 && (ap_slow.lag_ms - 40.0).abs() <= 6.0,
             ap_slow.human_copy(),
         ),
@@ -449,10 +499,10 @@ fn eight_ch_lr_delay(n: usize, sr: f64, hz: f64, delay_s: f64) -> Vec<Vec<f64>> 
     vec![
         other.clone(),
         other.clone(),
-        other.clone(),
-        other.clone(),
         left,
         right,
+        other.clone(),
+        other.clone(),
         other.clone(),
         other,
     ]
@@ -479,7 +529,7 @@ mod tests {
             "lag_ms={} want ~40",
             r.lag_ms
         );
-        assert_eq!(r.direction.as_deref(), Some("Fp leads P by 40 ms"));
+        assert_eq!(r.direction.as_deref(), Some("Fp leads O by 40 ms"));
         assert!(r.conf >= CONF_MIN, "conf={}", r.conf);
     }
 
@@ -494,7 +544,7 @@ mod tests {
             "lag_ms={} want ~-40",
             r.lag_ms
         );
-        assert_eq!(r.direction.as_deref(), Some("P leads Fp by 40 ms"));
+        assert_eq!(r.direction.as_deref(), Some("O leads Fp by 40 ms"));
     }
 
     #[test]
@@ -554,18 +604,20 @@ mod tests {
         // Also delay C4 so LR is defined on the same window.
         ch[IDX_C4] = sine(500, sr, 1.0, 0.040);
         let out = analyze_window(&ch, sr, Band::Slow);
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0].pair, Pair::AnteriorPosterior);
         assert_eq!(out[1].pair, Pair::LeftRight);
+        assert_eq!(out[2].pair, Pair::O1O2);
         assert!(out[0].direction.is_some());
         assert!(out[1].direction.is_some());
     }
 
     #[test]
-    fn montage_has_no_occipital() {
-        assert!(!MONTAGE.iter().any(|n| n.starts_with('O')));
+    fn montage_is_mark_iv_cyton_8ch() {
+        assert_eq!(MONTAGE, ["Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2"]);
         assert_eq!(MONTAGE[IDX_FP1], "Fp1");
-        assert_eq!(MONTAGE[IDX_P4], "P4");
+        assert_eq!(MONTAGE[IDX_C3], "C3");
+        assert_eq!(MONTAGE[IDX_O2], "O2");
     }
 
     #[test]

@@ -76,7 +76,11 @@ impl PlaybackBoard {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         Ok(Self::from_samples(
-            filename, samples, sample_rate, n_exg, markers,
+            filename,
+            samples,
+            sample_rate,
+            n_exg,
+            markers,
         ))
     }
 
@@ -243,7 +247,11 @@ impl PlaybackBoard {
         let n_exg = n_channels.min(samples[0].len()).max(1);
         markers.sort_by_key(|m| m.sample_index);
         Ok(Self::from_samples(
-            filename, samples, sample_rate, n_exg, markers,
+            filename,
+            samples,
+            sample_rate,
+            n_exg,
+            markers,
         ))
     }
 
@@ -500,13 +508,16 @@ fn looks_like_sd(path: &std::path::Path) -> bool {
         if t.is_empty() || t.starts_with('%') || t.starts_with('#') || t.starts_with("OpenBCI") {
             continue;
         }
-        let parts: Vec<&str> = t.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        let parts: Vec<&str> = t
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
         if parts.len() < 8 {
             return false;
         }
         return parts.iter().take(4).all(|p| {
-            p.chars()
-                .all(|c| c.is_ascii_hexdigit())
+            p.chars().all(|c| c.is_ascii_hexdigit())
                 && p.len() >= 2
                 && p.parse::<f64>().ok().filter(|v| v.fract() != 0.0).is_none()
         });

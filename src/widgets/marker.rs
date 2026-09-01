@@ -101,7 +101,10 @@ impl Widget for WMarker {
             ui.separator();
             ui.small("Recording / playback marks (sample index):");
             for m in file_marks.iter().rev().take(8) {
-                ui.small(format!("#{}  {:.3}s  {}", m.sample_index, m.board_timestamp, m.label));
+                ui.small(format!(
+                    "#{}  {:.3}s  {}",
+                    m.sample_index, m.board_timestamp, m.label
+                ));
             }
         }
     }

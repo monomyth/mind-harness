@@ -147,7 +147,7 @@ impl ControlPanel {
         ui.vertical_centered(|ui| {
             ui.heading(
                 egui::RichText::new(format!(
-                    "OpenBCI GUI  v{}  —  Session Setup",
+                    "Mind Harness  v{}  —  Session Setup",
                     env!("CARGO_PKG_VERSION")
                 ))
                 .color(crate::theme::TEXT),

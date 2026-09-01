@@ -5,6 +5,7 @@
 use crate::board::DataSource;
 use crate::fft::{fft_display_uv, unmatched_mains_hz};
 use crate::filter_settings::NotchMode;
+use crate::laterality::latch_rails;
 use crate::theme;
 use crate::widgets::Widget;
 use eframe::egui;
@@ -28,16 +29,18 @@ pub struct WFFT {
     smoothing_index: usize, // index into SMOOTH_FACTORS (0.0 = raw, higher = more temporal averaging)
     // Previous smoothed magnitudes per channel (for exponential smoothing over frames)
     prev_mags: Vec<Vec<f64>>,
+    railed: [bool; 8],
 }
 
 impl WFFT {
     pub fn new() -> Self {
         Self {
             title: "FFT Plot".to_string(),
-            max_freq: 60.0,     // Java `xLimOptions[2]`
+            max_freq: 100.0,    // past 60 Hz so a 60 Hz notch is an interior dip, not an axis-edge spike
             max_uv: 100.0,      // Java `yLimOptions[2]`
             smoothing_index: 2, // default 0.75 — matches original Java GUI
             prev_mags: vec![],
+            railed: [false; 8],
         }
     }
 
@@ -133,9 +136,21 @@ impl Widget for WFFT {
             ui.small(format!("factor {:.2}", current));
         });
 
-        let nfft = crate::fft::nfft_safe(source.sample_rate());
+        // Java nfft at 250 Hz is 256 (~1 Hz/bin), so a 1 Hz high-pass is invisible because the first bin is the corner.
+        let nfft = crate::fft::nfft_safe(source.sample_rate()).max(1024);
         let data = source.get_data(nfft);
         let exg = source.exg_channels();
+        let raw_rows = source.get_raw_data(nfft.max(32));
+        let mut raw_chs: Vec<Vec<f64>> = Vec::new();
+        for &col in exg.iter().take(8) {
+            raw_chs.push(
+                raw_rows
+                    .iter()
+                    .map(|row| row.get(col).copied().unwrap_or(0.0))
+                    .collect(),
+            );
+        }
+        latch_rails(&mut self.railed, &raw_chs);
         let notch = source
             .get_filter_settings()
             .and_then(|s| s.channels.first())
@@ -150,6 +165,9 @@ impl Widget for WFFT {
         let mut envelopes: Option<(Vec<f64>, Vec<f64>)> = None;
         let mut traces: Vec<(usize, Vec<f64>, Vec<f64>)> = Vec::new();
         for (i, &ch) in exg.iter().enumerate() {
+            if i < 8 && self.railed[i] {
+                continue;
+            }
             let ch_data: Vec<f64> = data
                 .iter()
                 .map(|row| row.get(ch).copied().unwrap_or(0.0))
@@ -209,7 +227,13 @@ impl Widget for WFFT {
             .y_axis_min_width(52.0)
             .x_axis_label("Frequency (Hz)")
             .y_axis_label("Amplitude (uV)")
-            .x_axis_formatter(|mark, _| crate::widgets::axis_tick_label(mark.value))
+            .x_axis_formatter(|mark, _| {
+                if (mark.value - 0.1).abs() < 0.02 {
+                    "0.1".into()
+                } else {
+                    crate::widgets::axis_tick_label(mark.value)
+                }
+            })
             .y_axis_formatter(|mark, _| {
                 if (mark.value - mark.value.round()).abs() < 0.05 {
                     let v = 10f64.powf(mark.value.round());
@@ -238,7 +262,13 @@ impl Widget for WFFT {
                     .collect();
                 let color = theme::channel_color(i);
                 plot_ui.line(
-                    Line::new(format!("Ch {}", i + 1), points)
+                    Line::new(
+                        crate::widgets::head_plot::LABELS
+                            .get(i)
+                            .copied()
+                            .unwrap_or("?"),
+                        points,
+                    )
                         .color(color)
                         .width(1.3_f32),
                 );

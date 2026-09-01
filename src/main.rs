@@ -6,16 +6,19 @@
 
 mod app;
 mod board;
+mod contact;
 mod control_panel;
 mod data_logger;
 mod data_writers;
 mod emg;
 mod event_log;
+mod experiment;
 mod export;
 mod fft;
 mod filter_settings;
 mod laterality;
 mod markers;
+mod montage;
 mod networking;
 mod slow_waves;
 mod stream_stats;
@@ -36,13 +39,19 @@ fn main() -> eframe::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    tracing::info!("OpenBCI GUI (Rust) starting...");
+    tracing::info!("Mind Harness starting...");
 
+    let icon = egui::IconData {
+        rgba: include_bytes!("../resources/mind-harness-icon.rgba").to_vec(),
+        width: 256,
+        height: 256,
+    };
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([980.0, 580.0])
-            .with_title(format!("OpenBCI GUI  v{}", env!("CARGO_PKG_VERSION")))
+            .with_title(format!("Mind Harness  v{}", env!("CARGO_PKG_VERSION")))
+            .with_icon(icon)
             // macOS: request a native-looking titlebar + vibrancy where possible
             .with_decorations(true)
             .with_transparent(false),
@@ -52,7 +61,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "OpenBCI GUI (Rust)",
+        "Mind Harness",
         native_options,
         Box::new(|cc| {
             // Phase 7: Embed professional fonts from the original OpenBCI GUI (Java)

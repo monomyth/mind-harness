@@ -40,7 +40,10 @@ impl Widget for WDigitalRead {
             return;
         }
         if let Some(row) = source.get_raw_data(1).last() {
-            self.last = chans.iter().map(|&c| row.get(c).copied().unwrap_or(0.0)).collect();
+            self.last = chans
+                .iter()
+                .map(|&c| row.get(c).copied().unwrap_or(0.0))
+                .collect();
         }
     }
 

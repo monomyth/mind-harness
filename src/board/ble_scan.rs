@@ -123,7 +123,8 @@ mod tests {
 
     #[test]
     fn ignores_unrelated_devices() {
-        let json = r#"{"SPBluetoothDataType":[{"device_name":"AirPods","device_address":"11:22"}]}"#;
+        let json =
+            r#"{"SPBluetoothDataType":[{"device_name":"AirPods","device_address":"11:22"}]}"#;
         assert!(devices_from_profiler_json(json).is_empty());
     }
 }

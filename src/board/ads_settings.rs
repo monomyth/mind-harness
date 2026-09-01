@@ -96,7 +96,11 @@ pub fn default_bank(n: usize) -> Vec<AdsChannel> {
 /// Zero EXG columns whose ADS power digit is Off (Time Series drop / Synthetic emulate).
 pub fn zero_unpowered_exg(row: &mut [f64], exg_channels: &[usize], bank: &[AdsChannel]) {
     for (i, &col) in exg_channels.iter().enumerate() {
-        if bank.get(i).map(|s| s.power == AdsPower::Off).unwrap_or(false) {
+        if bank
+            .get(i)
+            .map(|s| s.power == AdsPower::Off)
+            .unwrap_or(false)
+        {
             if let Some(v) = row.get_mut(col) {
                 *v = 0.0;
             }
@@ -137,10 +141,7 @@ mod tests {
             power: AdsPower::Off,
             ..AdsChannel::default()
         };
-        assert_eq!(
-            ads_impedance_restore_cmd(7, s).unwrap(),
-            "x8160110Xz800Z"
-        );
+        assert_eq!(ads_impedance_restore_cmd(7, s).unwrap(), "x8160110Xz800Z");
     }
 
     #[test]

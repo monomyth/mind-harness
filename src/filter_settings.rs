@@ -143,28 +143,59 @@ pub fn applied_bandpass_corners(low: f64, high: f64, sample_rate: f64) -> (f64, 
     (lo, hi)
 }
 
-/// Apply bandpass then notch (Java `DataProcessing.processChannel` order).
-pub fn apply_exg_filter(series: &mut [f64], sample_rate: usize, filter: &ChannelFilter) {
-    if series.is_empty() {
-        return;
+/// Java per-channel bandstop defaults (`FilterSettings`: 48–52 / 58–62, Butterworth 4).
+/// Causal, not BrainFlow `remove_environmental_noise` (that one is zero-phase and rings a
+/// square step into a spike at the notch). Notch first so 60 Hz is carved on the raw
+/// signal; 1–50 Hz bandpass after that must not invent a 60 Hz peak in its stopband.
+pub fn notch_bandstop_corners(noise: NoiseTypes) -> &'static [(f64, f64)] {
+    match noise {
+        NoiseTypes::Fifty => &[(48.0, 52.0)],
+        NoiseTypes::Sixty => &[(58.0, 62.0)],
+        NoiseTypes::FiftyAndSixty => &[(48.0, 52.0), (58.0, 62.0)],
     }
-    if filter.bandpass_enabled && series.len() > 10 {
-        let _ = brainflow::data_filter::perform_bandpass(
+}
+
+pub fn apply_notch(series: &mut [f64], sample_rate: usize, noise: NoiseTypes) {
+    for &(lo, hi) in notch_bandstop_corners(noise) {
+        let _ = brainflow::data_filter::perform_bandstop(
             series,
             sample_rate,
-            filter.bandpass_low,
-            filter.bandpass_high,
+            lo,
+            hi,
             4,
             brainflow::FilterTypes::Butterworth,
             0.0,
         );
     }
-    if filter.notch_enabled {
-        let _ = brainflow::data_filter::remove_environmental_noise(
+}
+
+/// Java processChannel: bandpass, then a causal mains cut (not zero-phase).
+pub fn apply_exg_filter(series: &mut [f64], sample_rate: usize, filter: &ChannelFilter) {
+    if series.is_empty() {
+        return;
+    }
+    if filter.bandpass_enabled && series.len() > 10 {
+        let (lo, hi) = applied_bandpass_corners(
+            filter.bandpass_low,
+            filter.bandpass_high,
+            sample_rate as f64,
+        );
+        if let Err(err) = brainflow::data_filter::perform_bandpass(
             series,
             sample_rate,
-            filter.notch_type,
-        );
+            lo,
+            hi,
+            4,
+            brainflow::FilterTypes::Butterworth,
+            0.0,
+        ) {
+            tracing::error!(
+                "BrainFlow bandpass failed ({err}); 1 Hz high-pass did not run"
+            );
+        }
+    }
+    if filter.notch_enabled {
+        apply_notch(series, sample_rate, filter.notch_type);
     }
 }
 
@@ -514,6 +545,74 @@ mod tests {
         );
     }
 
+    fn mag_near(freqs: &[f64], mags: &[f64], hz: f64) -> f64 {
+        crate::fft::bin_near(freqs, mags, hz)
+    }
+
+    #[test]
+    fn sixty_notch_is_a_valley_not_a_spike() {
+        let sr = 250usize;
+        let n = sr * 4;
+        let mut sig: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr as f64;
+                20.0 * (2.0 * std::f64::consts::PI * 10.0 * t).sin()
+                    + 80.0 * (2.0 * std::f64::consts::PI * 60.0 * t).sin()
+            })
+            .collect();
+        let filt = ChannelFilter {
+            notch_enabled: true,
+            notch_type: NoiseTypes::Sixty,
+            bandpass_enabled: true,
+            bandpass_low: 1.0,
+            bandpass_high: 100.0,
+        };
+        apply_exg_filter(&mut sig, sr, &filt);
+        let nfft = crate::fft::nfft_safe(sr as i32);
+        let tail = &sig[sig.len() - nfft..];
+        let (freqs, mags) = crate::fft::fft_display_uv(tail, sr as f64, 100.0);
+        let at_10 = mag_near(&freqs, &mags, 10.0);
+        let at_55 = mag_near(&freqs, &mags, 55.0);
+        let at_60 = mag_near(&freqs, &mags, 60.0);
+        let at_65 = mag_near(&freqs, &mags, 65.0);
+        assert!(
+            at_60 <= at_55 * 1.2 && at_60 <= at_65 * 1.2,
+            "60 Hz must not spike above neighbors, 55={at_55} 60={at_60} 65={at_65}"
+        );
+        assert!(
+            at_60 < at_10 * 0.25,
+            "60 Hz tone must be crushed vs 10 Hz, 10={at_10} 60={at_60}"
+        );
+    }
+
+    #[test]
+    fn square_step_does_not_invent_a_sixty_hz_spike() {
+        let sr = 250usize;
+        let n = sr * 4;
+        let mut sig: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr as f64;
+                let step = if i >= sr * 2 { 5000.0 } else { 0.0 };
+                step + 20.0 * (2.0 * std::f64::consts::PI * 10.0 * t).sin()
+            })
+            .collect();
+        apply_exg_filter(&mut sig, sr, &live_sixty_notch_1_50());
+        let nfft = crate::fft::nfft_safe(sr as i32);
+        let tail = &sig[sig.len() - nfft..];
+        let (freqs, mags) = crate::fft::fft_display_uv(tail, sr as f64, 100.0);
+        let at_10 = mag_near(&freqs, &mags, 10.0).max(1e-9);
+        let at_60 = mag_near(&freqs, &mags, 60.0);
+        let at_55 = mag_near(&freqs, &mags, 55.0);
+        assert!(
+            at_60 <= at_55 * 1.5,
+            "a DC step must not spike at 60 vs the 55 Hz floor, 55={at_55} 60={at_60}"
+        );
+        assert!(
+            at_60 < at_10 * 4.0,
+            "step ringing must not look like unmatched 60 Hz mains, 10={at_10} 60={at_60}"
+        );
+    }
+
     #[test]
     fn notch_sixty_digs_a_hole_at_sixty_in_the_fft() {
         let sr = 250usize;
@@ -555,4 +654,42 @@ mod tests {
             "an 8-sample splice of a 10 µV sine is not the all-channel burst, clean={clean_peak} join={join_peak}"
         );
     }
+
+    #[test]
+    fn one_to_fifty_bandpass_does_not_invent_a_fifty_hz_needle() {
+        let sr = 250usize;
+        let mut sig = tone(sr, 4, 20.0, 10.0);
+        apply_exg_filter(&mut sig, sr, &live_sixty_notch_1_50());
+        let nfft = crate::fft::nfft_safe(sr as i32);
+        let tail = &sig[sig.len() - nfft..];
+        let (freqs, mags) = crate::fft::fft_display_uv(tail, sr as f64, 100.0);
+        let at_10 = mag_near(&freqs, &mags, 10.0).max(1e-9);
+        let at_45 = mag_near(&freqs, &mags, 45.0);
+        let at_50 = mag_near(&freqs, &mags, 50.0);
+        assert!(
+            at_50 < at_10 * 0.5,
+            "no 50 Hz tone in, so 50 must stay below 10 Hz, 10={at_10} 50={at_50}"
+        );
+        assert!(
+            at_50 <= at_45 * 3.0,
+            "50 Hz must not be a corner-ring needle vs 45, 45={at_45} 50={at_50}"
+        );
+    }
+
+    #[test]
+    fn fifty_hz_tone_at_band_edge_is_mains_not_a_ring() {
+        let sr = 250usize;
+        let mut sig = tone(sr, 4, 80.0, 50.0);
+        apply_exg_filter(&mut sig, sr, &live_sixty_notch_1_50());
+        let nfft = crate::fft::nfft_safe(sr as i32);
+        let tail = &sig[sig.len() - nfft..];
+        let (freqs, mags) = crate::fft::fft_display_uv(tail, sr as f64, 100.0);
+        let at_45 = mag_near(&freqs, &mags, 45.0);
+        let at_50 = mag_near(&freqs, &mags, 50.0);
+        assert!(
+            at_50 > at_45,
+            "a real 50 Hz line should outrank 45 after Notch 60 / BP 1-50, 45={at_45} 50={at_50}"
+        );
+    }
+
 }

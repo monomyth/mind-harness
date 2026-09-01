@@ -46,7 +46,10 @@ impl Widget for WAnalogRead {
         }
         let rows = source.get_raw_data(n);
         for row in rows {
-            let v: Vec<f64> = chans.iter().map(|&c| row.get(c).copied().unwrap_or(0.0)).collect();
+            let v: Vec<f64> = chans
+                .iter()
+                .map(|&c| row.get(c).copied().unwrap_or(0.0))
+                .collect();
             self.history.push(v);
         }
         if self.history.len() > 750 {
@@ -87,7 +90,11 @@ impl Widget for WAnalogRead {
             ui.small("Waiting for analog samples…");
             return;
         }
-        let plot = lock_plot_interaction(Plot::new("analog_plot").allow_boxed_zoom(false).height(140.0));
+        let plot = lock_plot_interaction(
+            Plot::new("analog_plot")
+                .allow_boxed_zoom(false)
+                .height(140.0),
+        );
         plot.show(ui, |plot_ui| {
             let n_ch = self.history[0].len();
             for ch in 0..n_ch {

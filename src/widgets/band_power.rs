@@ -2,18 +2,18 @@
 
 use crate::board::DataSource;
 use crate::fft::{mean_band_powers, BAND_PLOT_LABELS};
+use crate::laterality::latch_rails;
 use crate::theme;
 use crate::widgets::Widget;
 use eframe::egui;
 use egui_plot::{Bar, BarChart, Plot};
 
-/// Java `bp_plot.setYLim(0.1, 100)` — keep 0.1 as the floor; raise the ceiling when data exceeds 100.
+/// Java `bp_plot.setYLim(0.1, 100)` — locked. Muscle/gamma may clip; they must not resize the chart.
 const LOG_YMIN: f64 = -1.0; // log10(0.1)
 const JAVA_YMAX: f64 = 100.0;
 
-fn log_y_max(powers: &[f64; 5]) -> f64 {
-    let peak = powers.iter().copied().fold(0.1_f64, f64::max);
-    (peak * 2.0).max(JAVA_YMAX).log10()
+fn log_y_max(_powers: &[f64; 5]) -> f64 {
+    JAVA_YMAX.log10()
 }
 
 pub struct WBandPower {
@@ -21,6 +21,7 @@ pub struct WBandPower {
     smoothed_powers: [f64; 5],
     selected_channel: Option<usize>, // None = average selected (all) channels
     smoothing_index: usize,
+    railed: [bool; 8],
 }
 
 impl WBandPower {
@@ -29,7 +30,8 @@ impl WBandPower {
             title: "Band Power".to_string(),
             smoothed_powers: [0.0; 5],
             selected_channel: None,
-            smoothing_index: 2,
+            smoothing_index: 5, // 0.98 — per-frame refresh; Neuro lock
+            railed: [false; 8],
         }
     }
 
@@ -65,8 +67,23 @@ impl Widget for WBandPower {
             return;
         }
 
+        let raw_rows = source.get_raw_data(window_size.max(32));
+        let mut raw_chs: Vec<Vec<f64>> = Vec::new();
+        for &board_ch in exg.iter().take(8) {
+            raw_chs.push(
+                raw_rows
+                    .iter()
+                    .map(|row| row.get(board_ch).copied().unwrap_or(0.0))
+                    .collect(),
+            );
+        }
+        latch_rails(&mut self.railed, &raw_chs);
+
         let mut cols: Vec<Vec<f64>> = Vec::new();
         if let Some(logical) = self.selected_channel {
+            if logical < 8 && self.railed[logical] {
+                return;
+            }
             if let Some(&board_ch) = exg.get(logical) {
                 cols.push(
                     data.iter()
@@ -75,13 +92,19 @@ impl Widget for WBandPower {
                 );
             }
         } else {
-            for &board_ch in exg {
+            for (i, &board_ch) in exg.iter().enumerate() {
+                if i < 8 && self.railed[i] {
+                    continue;
+                }
                 cols.push(
                     data.iter()
                         .map(|row| row.get(board_ch).copied().unwrap_or(0.0))
                         .collect(),
                 );
             }
+        }
+        if cols.is_empty() {
+            return;
         }
         let raw = mean_band_powers(&cols, source.sample_rate() as f64);
         let factor = crate::widgets::SMOOTH_FACTORS
@@ -223,7 +246,7 @@ impl Widget for WBandPower {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_y_max, JAVA_YMAX};
+    use super::{log_y_max, WBandPower, JAVA_YMAX};
 
     #[test]
     fn modest_powers_keep_java_ymax_of_100() {
@@ -231,9 +254,14 @@ mod tests {
     }
 
     #[test]
-    fn large_powers_raise_the_ceiling_instead_of_clipping() {
+    fn large_powers_clip_instead_of_raising_the_ceiling() {
         let ymax = 10f64.powf(log_y_max(&[400.0, 350.0, 500.0, 200.0, 100.0]));
-        assert!(ymax > JAVA_YMAX);
-        assert!(ymax >= 1000.0);
+        assert!((ymax - JAVA_YMAX).abs() < 1e-9);
+    }
+
+    #[test]
+    fn default_smoothing_is_0_98() {
+        assert_eq!(WBandPower::new().smoothing_index(), 5);
+        assert!((crate::widgets::SMOOTH_FACTORS[5] - 0.98).abs() < 1e-6);
     }
 }

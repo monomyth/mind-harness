@@ -207,9 +207,13 @@ pub trait DataSource: Send + Sync {
         None
     }
 
-    /// Left-column Time Series label. Override for montage names; default is `Ch N`.
+    /// Left-column Time Series label — 10-20 site name (same as Head Plot holes).
     fn channel_label(&self, logical: usize) -> String {
-        format!("Ch {}", logical + 1)
+        crate::widgets::head_plot::LABELS
+            .get(logical)
+            .copied()
+            .unwrap_or("?")
+            .to_string()
     }
 }
 

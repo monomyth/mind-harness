@@ -9,6 +9,7 @@ use crate::control_panel::{ControlPanel, DataSourceType};
 use crate::data_logger::DataLogger;
 use crate::event_log::EventLog;
 use crate::filter_settings::NotchMode;
+use crate::montage::MontageStore;
 use crate::networking::{NetworkingManager, Protocol};
 use crate::theme;
 use crate::widget_context::WidgetContext;
@@ -140,7 +141,7 @@ impl Default for PersistedSettings {
             ts_time_window_sec: 5.0,
             ts_y_scale_uv: 200.0,
             fft_smoothing_index: 2, // 0.75
-            bp_smoothing_index: 2,  // 0.75
+            bp_smoothing_index: 5,  // 0.98
             ts_per_channel_y_scales: vec![0.0; 16],
             current_layout: 5,
         }
@@ -160,7 +161,6 @@ pub struct OpenBciGuiApp {
     /// This is what allows the user to decide "when I pick layout X, show HeadPlot here, TimeSeries there".
     grid_layout_assignments: HashMap<usize, Vec<String>>,
 
-    show_layout_customizer: bool,
     pending_layout_rebuild: bool,
     pub control_panel: ControlPanel,
     pub data_logger: DataLogger,
@@ -226,6 +226,10 @@ pub struct OpenBciGuiApp {
 
     /// Exclusive PROPERTIES accordion. Session is independent and not stored here.
     properties_open: Option<String>,
+
+    experiment: crate::experiment::ExperimentRun,
+    contact: crate::contact::ContactLog,
+    montage: MontageStore,
 }
 
 impl OpenBciGuiApp {
@@ -270,7 +274,6 @@ impl OpenBciGuiApp {
                 );
                 m
             },
-            show_layout_customizer: false,
             pending_layout_rebuild: false,
             control_panel: ControlPanel::new(),
             data_logger: DataLogger::new(),
@@ -330,11 +333,14 @@ impl OpenBciGuiApp {
             persisted_ts_time_window_sec: 5.0,
             persisted_ts_y_scale_uv: 200.0,
             persisted_fft_smoothing_index: 2,
-            persisted_bp_smoothing_index: 2,
+            persisted_bp_smoothing_index: 5, // 0.98
             persisted_ts_per_channel_y_scales: vec![0.0; 16],
             persisted_ads_channels: vec![],
             last_recording_path: None,
             properties_open: None,
+            experiment: crate::experiment::ExperimentRun::new(),
+            contact: crate::contact::ContactLog::new(),
+            montage: MontageStore::load(),
         };
 
         // === Phase 8: Load persisted settings (silent on any error / missing file) ===
@@ -403,13 +409,132 @@ impl OpenBciGuiApp {
 
         app.populate_widgets_for_new_session();
         app.populate_tool_widgets();
-        app.event_log.log_system("Application started");
+        app.apply_head_montage();
+        if let Ok(path) = std::env::var("OPENBCI_PLAYBACK") {
+            let seek: f32 = std::env::var("OPENBCI_PLAYBACK_SEEK_SEC")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
+            app.open_playback_file(&path, seek);
+        }
+        app.apply_recapture_layout_grid();
         app
+    }
+
+    fn apply_head_montage(&mut self) {
+        self.apply_head_montage_inner(false);
+    }
+
+    fn apply_head_montage_inner(&mut self, force: bool) {
+        let names = self.montage.names();
+        let last = self.montage.last_name().to_string();
+        let labels = self.montage.active().channel_labels();
+        let holes = self.montage.active().channel_holes();
+        for w in self
+            .widget_manager
+            .widgets
+            .iter_mut()
+            .chain(self.tool_widgets.iter_mut())
+        {
+            if let Some(hp) = w.as_any_mut().downcast_mut::<WHeadPlot>() {
+                hp.set_catalog(names.clone(), &last);
+                if force || !hp.is_dirty() {
+                    hp.set_profile_clean(labels.clone(), holes.clone(), &last);
+                }
+            }
+            if let Some(ts) = w
+                .as_any_mut()
+                .downcast_mut::<crate::widgets::time_series::WTimeSeries>()
+            {
+                ts.set_channel_labels(labels.clone());
+            }
+        }
+    }
+
+    fn drain_head_montage(&mut self) {
+        use crate::widgets::head_plot::MontageUiAction;
+        let mut action = None;
+        let mut live_labels = None;
+        let mut live_holes = None;
+        for w in self
+            .widget_manager
+            .widgets
+            .iter_mut()
+            .chain(self.tool_widgets.iter_mut())
+        {
+            if let Some(hp) = w.as_any_mut().downcast_mut::<WHeadPlot>() {
+                if let Some(a) = hp.take_action() {
+                    action = Some(a);
+                }
+                if hp.is_dirty() {
+                    live_labels = Some(hp.channel_labels());
+                    live_holes = Some(hp.channel_holes());
+                }
+            }
+        }
+        let _labels = live_labels.unwrap_or_else(|| self.montage.active().channel_labels());
+        let holes = live_holes.unwrap_or_else(|| self.montage.active().channel_holes());
+        match action {
+            Some(MontageUiAction::Select(name)) => {
+                self.montage.select(&name);
+            }
+            Some(MontageUiAction::Save) => {
+                self.montage.save_active(holes);
+            }
+            Some(MontageUiAction::SaveAs(name)) => {
+                self.montage.save_as(&name, holes);
+            }
+            None => return,
+        }
+        self.apply_head_montage_inner(true);
     }
 
     fn set_layout(&mut self, layout: usize) {
         self.current_layout = layout;
         self.rebuild_grid_widgets_for_current_layout();
+    }
+
+    /// Recapture-only: OPENBCI_LAYOUT=1..=6 and OPENBCI_GRID="Time Series,Head Plot,..."
+    /// OPENBCI_ASSIGN_HOLE=C3 starts Head Plot with that hole chosen (crop cannot click).
+    /// applied after playback boot so a crop can pin layout + slot titles without the UI.
+    fn apply_recapture_layout_grid(&mut self) {
+        if let Ok(s) = std::env::var("OPENBCI_LAYOUT") {
+            if let Ok(n) = s.parse::<usize>() {
+                if (1..=6).contains(&n) {
+                    self.set_layout(n);
+                }
+            }
+        }
+        if let Ok(grid) = std::env::var("OPENBCI_GRID") {
+            let titles: Vec<String> = grid
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if !titles.is_empty() {
+                let layout = self.current_layout;
+                self.grid_layout_assignments.insert(layout, titles);
+                self.rebuild_grid_widgets_for_current_layout();
+            }
+        }
+        self.apply_recapture_assign_holes();
+    }
+
+    /// Recapture-only: OPENBCI_ASSIGN_HOLE=C3 paints the chosen hole after montage wipe.
+    fn apply_recapture_assign_holes(&mut self) {
+        if std::env::var("OPENBCI_ASSIGN_HOLE").is_err() {
+            return;
+        }
+        for w in self
+            .widget_manager
+            .widgets
+            .iter_mut()
+            .chain(self.tool_widgets.iter_mut())
+        {
+            if let Some(hp) = w.as_any_mut().downcast_mut::<WHeadPlot>() {
+                hp.apply_recapture_assign_hole();
+            }
+        }
     }
 
     /// Rebuilds the central grid widgets according to the saved assignment for the current layout.
@@ -451,7 +576,9 @@ impl OpenBciGuiApp {
                 "Analog Read" => Box::new(WAnalogRead::new()),
                 "Digital Read" => Box::new(WDigitalRead::new()),
                 "Pulse Sensor" => Box::new(WPulseSensor::new()),
-                "Hardware Settings" => Box::new(WHardwareSettings::new()),
+                "Board" => Box::new(WHardwareSettings::new()),
+                "Left / right" => Box::new(WHemispheres::new()),
+                "Which first" => Box::new(WSlowWaves::new()),
                 _ => Box::new(WTimeSeries::new()),
             };
             wm.add_widget(widget);
@@ -459,6 +586,7 @@ impl OpenBciGuiApp {
 
         wm.set_layout(self.current_layout);
         self.widget_manager = wm;
+        self.apply_head_montage();
     }
 
     /// Create a fresh WidgetManager populated with the 4 core visualization widgets.
@@ -468,6 +596,7 @@ impl OpenBciGuiApp {
     /// now in a dedicated SidePanel (see populate_tool_widgets) so they are never dropped.
     fn populate_widgets_for_new_session(&mut self) {
         self.emg.reset();
+        self.contact.reset();
         // Use the per-layout assignment so the user controls exactly which graphs appear when they pick a layout.
         self.rebuild_grid_widgets_for_current_layout();
 
@@ -498,6 +627,47 @@ impl OpenBciGuiApp {
     /// that live in the right SidePanel. These are always visible during a session.
     /// Focus (ML + audio) is now finally usable alongside the viz — the killer Phase 6 feature
     /// is no longer hidden. Marker and Networking controls are also always at hand.
+    fn open_playback_file(&mut self, path: &str, seek_sec: f32) {
+        match crate::board::playback::PlaybackBoard::from_file(std::path::Path::new(path)) {
+            Ok(mut pb) => {
+                let _ = pb.initialize();
+                let _ = pb.start_streaming();
+                self.streaming = true;
+                if seek_sec > 0.0 {
+                    let total = pb.playback_progress().map(|(_, t)| t).unwrap_or(1).max(1) as f32;
+                    let sr = pb.sample_rate().max(1) as f32;
+                    crate::board::playback::PlaybackBoard::seek_to_fraction(
+                        &mut pb,
+                        (seek_sec * sr / total).clamp(0.0, 1.0),
+                    );
+                }
+                self.board = Some(Box::new(pb) as Box<dyn DataSource>);
+                self.control_panel.playback_file = Some(path.to_string());
+                self.control_panel.show = false;
+                self.system_mode = SystemMode::PostInit;
+                self.current_layout = 1;
+                self.grid_layout_assignments
+                    .insert(1, vec!["Head Plot".into()]);
+                self.pending_layout_rebuild = true;
+                self.populate_widgets_for_new_session();
+                self.populate_tool_widgets();
+                self.apply_persisted_filters_to_current_board();
+                self.connection_status = format!("Playback: {path}");
+                self.event_log.log_connection(&format!(
+                    "Playback · {}",
+                    std::path::Path::new(&path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("file"),
+                ));
+            }
+            Err(e) => {
+                self.event_log
+                    .log_error(&format!("Playback boot failed: {e}"));
+            }
+        }
+    }
+
     fn populate_tool_widgets(&mut self) {
         self.tool_widgets.clear();
         self.properties_open = None;
@@ -512,6 +682,7 @@ impl OpenBciGuiApp {
         self.tool_widgets.push(Box::new(WAnalogRead::new()));
         self.tool_widgets.push(Box::new(WDigitalRead::new()));
         self.tool_widgets.push(Box::new(WPulseSensor::new()));
+        self.apply_head_montage();
         // NOTE: WPacketLoss is rendered inline in the SidePanel (sparkline + Reset + % ) — see the
         // "Phase 7 WPacketLoss visual" block near the tool loop. This keeps the visual right next
         // to the tools the user is looking at during an experiment; no separate widget object needed.
@@ -533,6 +704,10 @@ impl OpenBciGuiApp {
             }
         }
         self.save_current_persisted_settings();
+
+        if self.experiment.is_running() {
+            self.cancel_experiment();
+        }
 
         if self.data_logger.is_logging() {
             self.data_logger.stop();
@@ -566,7 +741,200 @@ impl OpenBciGuiApp {
 
         self.event_log
             .log_system("Session ended — returned to Control Panel (all widgets reset)");
+
         tracing::info!("Session ended — returned to Control Panel");
+    }
+
+    fn start_recording_like_session(&mut self) -> bool {
+        let chans = self
+            .board
+            .as_ref()
+            .map(|b| b.exg_channels().len())
+            .unwrap_or(8);
+        let sr = self.board.as_ref().map(|b| b.sample_rate()).unwrap_or(250);
+        match self.data_logger.start(self.recording_format, chans, sr) {
+            Ok(path) => {
+                self.last_recording_path = Some(path.clone());
+                self.connection_status = format!("Recording to {}", path.display());
+                self.event_log.log_recording(&format!(
+                    "Started {:?} → {}",
+                    self.recording_format,
+                    path.display()
+                ));
+                true
+            }
+            Err(e) => {
+                self.connection_status = format!("Recording failed: {}", e);
+                self.event_log
+                    .log_error(&format!("Recording start failed: {}", e));
+                false
+            }
+        }
+    }
+
+    fn stop_recording_like_session(&mut self) {
+        if !self.data_logger.is_logging() {
+            return;
+        }
+        if let Some(p) = self.data_logger.current_file() {
+            self.last_recording_path = Some(p.clone());
+        }
+        self.data_logger.stop();
+        self.connection_status.clear();
+        self.event_log.log_recording("Recording stopped");
+    }
+
+    fn tick_contact_sidecar(&mut self) {
+        let (chs, sample, t_s, sr_hz, loss_pct, markers, path) = {
+            let Some(board) = self.board.as_deref() else {
+                return;
+            };
+            let sr = board.sample_rate() as f64;
+            if sr <= 1.0 {
+                return;
+            }
+            let n = (2.0 * sr).round() as usize;
+            let raw_rows = board.get_raw_data(n.max(32));
+            let exg = board.exg_channels();
+            let mut chs = Vec::new();
+            for &col in exg.iter().take(8) {
+                chs.push(
+                    raw_rows
+                        .iter()
+                        .map(|row| row.get(col).copied().unwrap_or(0.0))
+                        .collect::<Vec<f64>>(),
+                );
+            }
+            if chs.is_empty() {
+                return;
+            }
+            let is_playback = board.playback_progress().is_some();
+            let sample = board.playhead_sample().unwrap_or_else(|| {
+                if self.data_logger.is_logging() {
+                    self.data_logger.samples_logged() as usize
+                } else {
+                    self.samples_received as usize
+                }
+            });
+            let t_s = sample as f64 / sr.max(1.0);
+            let sr_hz = if is_playback {
+                sr
+            } else if self.current_sample_rate > 1.0 {
+                self.current_sample_rate
+            } else {
+                sr
+            };
+            let loss_pct = if is_playback {
+                0.0
+            } else {
+                self.packet_loss_percent
+            };
+            let mut markers = board.session_markers().to_vec();
+            if self.data_logger.is_logging() {
+                for m in self.data_logger.markers() {
+                    if !markers
+                        .iter()
+                        .any(|e| e.sample_index == m.sample_index && e.label == m.label)
+                    {
+                        markers.push(m.clone());
+                    }
+                }
+            }
+            let path = if self.data_logger.is_logging() {
+                self.data_logger.current_file().cloned()
+            } else if is_playback {
+                self.control_panel
+                    .playback_file
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+            } else {
+                None
+            };
+            (chs, sample, t_s, sr_hz, loss_pct, markers, path)
+        };
+        self.contact.observe(
+            &chs,
+            sample,
+            t_s,
+            sr_hz,
+            loss_pct,
+            &markers,
+            path.as_deref(),
+        );
+    }
+
+    fn write_experiment_marker(&mut self, label: &str) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let mut ctx = WidgetContext::new(
+            &mut self.networking,
+            &mut self.data_logger,
+            &mut self.last_marker,
+            &mut self.event_log,
+            &mut self.emg,
+        );
+        ctx.send_marker(ts, label);
+    }
+
+    fn apply_experiment_event(&mut self, ev: crate::experiment::ExperimentEvent) {
+        match ev {
+            crate::experiment::ExperimentEvent::EnteredStep { index, label } => {
+                crate::experiment::speak_detached(crate::experiment::STEPS[index].spoken);
+                self.write_experiment_marker(&label);
+                if index + 1 == crate::experiment::STEPS.len() {
+                    self.stop_recording_like_session();
+                }
+            }
+            crate::experiment::ExperimentEvent::Finished => {
+                self.stop_recording_like_session();
+            }
+            crate::experiment::ExperimentEvent::Cancelled => {
+                self.write_experiment_marker("Experiment cancelled");
+                self.stop_recording_like_session();
+            }
+        }
+    }
+
+    fn start_experiment(&mut self) {
+        if self.board.is_none() {
+            self.connection_status = "Start a session first".to_string();
+            return;
+        }
+        if !self.streaming {
+            if let Some(ref mut b) = self.board {
+                if let Err(e) = b.start_streaming() {
+                    tracing::error!("Start failed: {:?}", e);
+                    self.event_log
+                        .log_error(&format!("Failed to start streaming: {}", e));
+                    return;
+                }
+                self.streaming = true;
+                self.event_log.log_system("Streaming started");
+            }
+        }
+        if !self.data_logger.is_logging() && !self.start_recording_like_session() {
+            return;
+        }
+        let ev = self.experiment.start(std::time::Instant::now());
+        self.apply_experiment_event(ev);
+    }
+
+    fn cancel_experiment(&mut self) {
+        if let Some(ev) = self.experiment.cancel() {
+            self.apply_experiment_event(ev);
+        }
+    }
+
+    fn tick_experiment(&mut self) {
+        let now = std::time::Instant::now();
+        while self.experiment.is_running() {
+            match self.experiment.tick(now) {
+                Some(ev) => self.apply_experiment_event(ev),
+                None => break,
+            }
+        }
     }
 
     /// Phase 7 Reconnect (plan.md Phase 7 polish): snapshot the exact settings the user
@@ -843,12 +1211,170 @@ impl OpenBciGuiApp {
         }
     }
 
+    fn draw_layout_slots(&mut self, ui: &mut egui::Ui) {
+        let count = WidgetManager::container_count_for(self.current_layout);
+        let options = [
+            "Time Series",
+            "FFT Plot",
+            "Band Power",
+            "Accelerometer",
+            "Head Plot",
+            "Left / right",
+            "Which first",
+            "Impedance",
+            "Spectrogram",
+            "EMG",
+            "EMG Joystick",
+            "Analog Read",
+            "Digital Read",
+            "Pulse Sensor",
+            "Board",
+        ];
+        let mut pending = false;
+        let layout_id = self.current_layout;
+        {
+            let assignment = self
+                .grid_layout_assignments
+                .entry(layout_id)
+                .or_insert_with(|| vec!["Time Series".into(); count]);
+            while assignment.len() < count {
+                assignment.push("Time Series".into());
+            }
+            assignment.truncate(count);
+            for i in 0..assignment.len() {
+                let chosen = ui
+                    .horizontal(|ui| {
+                        let mut current = assignment[i].clone();
+                        ui.small(format!("{}", i + 1));
+                        egui::ComboBox::from_id_salt(format!("layout_slot_{layout_id}_{i}"))
+                            .selected_text(current.clone())
+                            .show_ui(ui, |ui| {
+                                for &opt in &options {
+                                    ui.selectable_value(&mut current, opt.to_string(), opt);
+                                }
+                            });
+                        current
+                    })
+                    .inner;
+                if chosen != assignment[i] {
+                    assignment[i] = chosen;
+                    pending = true;
+                }
+            }
+        }
+        if pending {
+            self.pending_layout_rebuild = true;
+        }
+    }
+
+    fn draw_record_export(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if !self.data_logger.is_logging() {
+                egui::ComboBox::from_id_salt("rec_fmt")
+                    .selected_text(format!("{:?}", self.recording_format))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.recording_format,
+                            crate::data_logger::LogFormat::BDF,
+                            "BDF",
+                        );
+                        ui.selectable_value(
+                            &mut self.recording_format,
+                            crate::data_logger::LogFormat::ODF,
+                            "ODF",
+                        );
+                    });
+            }
+            let record_label = if self.data_logger.is_logging() {
+                "Stop Rec"
+            } else {
+                "Record"
+            };
+            let live_hw = self.board.as_ref().is_some_and(|b| {
+                let n = b.name();
+                n != "Playback" && !n.contains("Synthetic")
+            });
+            let record_color = if self.data_logger.is_logging() {
+                theme::STOP
+            } else if live_hw {
+                theme::START
+            } else {
+                theme::PANEL
+            };
+            let mut record_btn = egui::Button::new(record_label).fill(record_color);
+            if !live_hw && !self.data_logger.is_logging() {
+                record_btn = record_btn.stroke(theme::hairline());
+            }
+            if ui.add(record_btn).clicked() {
+                if self.data_logger.is_logging() {
+                    self.stop_recording_like_session();
+                } else {
+                    let _ = self.start_recording_like_session();
+                }
+            }
+            if !self.data_logger.is_logging() && ui.button("Export").clicked() {
+                let path = self.last_recording_path.clone().or_else(|| {
+                    self.control_panel
+                        .playback_file
+                        .as_ref()
+                        .map(std::path::PathBuf::from)
+                });
+                match path {
+                    Some(p) => match crate::board::playback::PlaybackBoard::from_file(&p) {
+                        Ok(pb) => {
+                            match crate::export::export_next_to(
+                                &p,
+                                pb.export_samples(),
+                                pb.sample_rate(),
+                                pb.exg_channels().len(),
+                                pb.session_markers(),
+                            ) {
+                                Ok((csv, jsonl)) => {
+                                    self.connection_status = format!("Exported {}", csv.display());
+                                    self.event_log.log_recording(&format!(
+                                        "Feature export → {} / {}",
+                                        csv.display(),
+                                        jsonl.display()
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.event_log.log_error(&format!("Export failed: {e}"));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.event_log
+                                .log_error(&format!("Export: cannot open recording: {e}"));
+                        }
+                    },
+                    None => {
+                        if let Some(picked) = rfd::FileDialog::new()
+                            .set_title("Export recording")
+                            .add_filter("Recordings", &["bdf", "odf", "txt", "csv"])
+                            .pick_file()
+                        {
+                            self.last_recording_path = Some(picked.clone());
+                            self.control_panel.playback_file = Some(picked.display().to_string());
+                            self.connection_status = format!("Export: chose {}", picked.display());
+                        } else {
+                            self.connection_status =
+                                "Export: record a session or choose a file".into();
+                            self.event_log.log_error(
+                                "Export: record a session or pick a Playback file first",
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     fn draw_session_rack(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Session")
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.small("Layout");
+                    ui.label("Layout");
                     egui::ComboBox::from_id_salt("layout_select")
                         .selected_text(match self.current_layout {
                             1 => "1 Full",
@@ -879,14 +1405,12 @@ impl OpenBciGuiApp {
                                 }
                             }
                         });
-                    if ui.small_button("Customize").clicked() {
-                        self.show_layout_customizer = true;
-                    }
                 });
+                self.draw_layout_slots(ui);
 
                 let mut persist_filters = false;
                 ui.horizontal(|ui| {
-                    ui.small("Notch");
+                    ui.label("Notch");
                     let mut mode = self.last_persisted_notch_mode;
                     let mut notch_changed = false;
                     egui::ComboBox::from_id_salt("notch_mode")
@@ -939,14 +1463,14 @@ impl OpenBciGuiApp {
                         self.last_persisted_filter_bandpass_high = hi;
                         persist_filters = true;
                     }
-                    ui.small("Butterworth 4");
                 });
+                ui.label("Smooth cutoff");
                 let sr = self
                     .board
                     .as_ref()
                     .map(|b| b.sample_rate() as f64)
                     .unwrap_or(250.0);
-                ui.small(crate::filter_settings::nyquist_readout(sr));
+                ui.label(crate::filter_settings::nyquist_readout(sr));
                 if persist_filters {
                     self.apply_persisted_filters_to_current_board();
                     self.save_current_persisted_settings();
@@ -958,158 +1482,14 @@ impl OpenBciGuiApp {
                     .is_some_and(|b| b.name().contains("Synthetic"))
                 {
                     ui.horizontal(|ui| {
-                        if ui.small_button("8 ch").clicked() {
+                        if ui.button("8 ch").clicked() {
                             self.switch_synthetic_channels(8);
                         }
-                        if ui.small_button("16 ch").clicked() {
+                        if ui.button("16 ch").clicked() {
                             self.switch_synthetic_channels(16);
                         }
                     });
                 }
-
-                ui.horizontal(|ui| {
-                    if !self.data_logger.is_logging() {
-                        egui::ComboBox::from_id_salt("rec_fmt")
-                            .selected_text(format!("{:?}", self.recording_format))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.recording_format,
-                                    crate::data_logger::LogFormat::BDF,
-                                    "BDF",
-                                );
-                                ui.selectable_value(
-                                    &mut self.recording_format,
-                                    crate::data_logger::LogFormat::ODF,
-                                    "ODF",
-                                );
-                            });
-                    }
-                    let record_label = if self.data_logger.is_logging() {
-                        "Stop Rec"
-                    } else {
-                        "Record"
-                    };
-                    let record_color = if self.data_logger.is_logging() {
-                        theme::STOP
-                    } else {
-                        theme::START
-                    };
-                    if ui
-                        .add(egui::Button::new(record_label).fill(record_color).small())
-                        .clicked()
-                    {
-                        if self.data_logger.is_logging() {
-                            if let Some(p) = self.data_logger.current_file() {
-                                self.last_recording_path = Some(p.clone());
-                            }
-                            self.data_logger.stop();
-                            self.connection_status.clear();
-                            self.event_log.log_recording("Recording stopped");
-                        } else {
-                            let chans = self
-                                .board
-                                .as_ref()
-                                .map(|b| b.exg_channels().len())
-                                .unwrap_or(8);
-                            let sr = self.board.as_ref().map(|b| b.sample_rate()).unwrap_or(250);
-                            match self.data_logger.start(self.recording_format, chans, sr) {
-                                Ok(path) => {
-                                    self.last_recording_path = Some(path.clone());
-                                    self.connection_status =
-                                        format!("Recording to {}", path.display());
-                                    self.event_log.log_recording(&format!(
-                                        "Started {:?} → {}",
-                                        self.recording_format,
-                                        path.display()
-                                    ));
-                                }
-                                Err(e) => {
-                                    self.connection_status = format!("Recording failed: {}", e);
-                                    self.event_log
-                                        .log_error(&format!("Recording start failed: {}", e));
-                                }
-                            }
-                        }
-                    }
-                    if !self.data_logger.is_logging() && ui.small_button("Export").clicked() {
-                        let path = self.last_recording_path.clone().or_else(|| {
-                            self.control_panel
-                                .playback_file
-                                .as_ref()
-                                .map(std::path::PathBuf::from)
-                        });
-                        match path {
-                            Some(p) => match crate::board::playback::PlaybackBoard::from_file(&p) {
-                                Ok(pb) => {
-                                    match crate::export::export_next_to(
-                                        &p,
-                                        pb.export_samples(),
-                                        pb.sample_rate(),
-                                        pb.exg_channels().len(),
-                                        pb.session_markers(),
-                                    ) {
-                                        Ok((csv, jsonl)) => {
-                                            self.event_log.log_recording(&format!(
-                                                "Feature export → {} / {}",
-                                                csv.display(),
-                                                jsonl.display()
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            self.event_log
-                                                .log_error(&format!("Export failed: {e}"));
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    self.event_log
-                                        .log_error(&format!("Export: cannot open recording: {e}"));
-                                }
-                            },
-                            None => {
-                                self.event_log.log_error(
-                                    "Export: record a session or pick a Playback file first",
-                                );
-                            }
-                        }
-                    }
-                });
-
-                if ui.small_button("Console").clicked() {
-                    self.console_show_window = !self.console_show_window;
-                }
-
-                ui.horizontal(|ui| {
-                    let mut udp_on = self
-                        .networking
-                        .configs
-                        .iter()
-                        .find(|c| c.protocol == Protocol::UDP)
-                        .map(|c| c.enabled)
-                        .unwrap_or(false);
-                    if ui.checkbox(&mut udp_on, "UDP").changed() {
-                        if let Some(cfg) = self.networking.config_mut(Protocol::UDP) {
-                            cfg.enabled = udp_on;
-                        }
-                        self.networking.apply_config();
-                    }
-                    let mut osc_on = self
-                        .networking
-                        .configs
-                        .iter()
-                        .find(|c| c.protocol == Protocol::OSC)
-                        .map(|c| c.enabled)
-                        .unwrap_or(false);
-                    if ui.checkbox(&mut osc_on, "OSC").changed() {
-                        if let Some(cfg) = self.networking.config_mut(Protocol::OSC) {
-                            cfg.enabled = osc_on;
-                        }
-                        self.networking.apply_config();
-                    }
-                    if ui.small_button("Stop net").clicked() {
-                        self.networking.stop_all();
-                    }
-                });
             });
     }
 }
@@ -1117,6 +1497,25 @@ impl OpenBciGuiApp {
 impl eframe::App for OpenBciGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame_count += 1;
+        if let Ok(crop) = std::env::var("OPENBCI_CROP") {
+            if self.frame_count == 90 || self.frame_count == 140 || self.frame_count == 220 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            }
+            ctx.input(|i| {
+                for ev in &i.events {
+                    if let egui::Event::Screenshot { image, .. } = ev {
+                        let [w, h] = image.size;
+                        let mut buf = format!("P6\n{w} {h}\n255\n").into_bytes();
+                        buf.reserve(w * h * 3);
+                        for px in &image.pixels {
+                            let a = px.to_array();
+                            buf.extend_from_slice(&[a[0], a[1], a[2]]);
+                        }
+                        let _ = std::fs::write(&crop, buf);
+                    }
+                }
+            });
+        }
         theme::apply_visuals(ctx);
 
         // === Handle background connection to real hardware ===
@@ -1343,7 +1742,13 @@ impl eframe::App for OpenBciGuiApp {
                                     // Now the board is the real PlaybackBoard — widgets will receive replayed EEG frames.
                                     self.board = Some(Box::new(pb) as Box<dyn DataSource>);
                                     self.connection_status = format!("Playback: {}", file_path);
-                                    self.event_log.log_connection(&format!("Playback started from {}", file_path));
+                                    self.event_log.log_connection(&format!(
+                                        "Playback · {}",
+                                        std::path::Path::new(&file_path)
+                                            .file_name()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("file"),
+                                    ));
                                     // Phase 7 Reconnect: remember the exact playback file so "Reconnect" replays the same recording
                                     self.save_last_connection();
                                     self.populate_widgets_for_new_session();
@@ -1465,7 +1870,13 @@ impl eframe::App for OpenBciGuiApp {
                                                     if let Err(e) = pb.start_streaming() { tracing::error!("Reconnect pb: {}", e);} else { self.streaming = true; }
                                                     self.board = Some(Box::new(pb) as Box<dyn DataSource>);
                                                     self.connection_status = format!("Playback: {} (Reconnect)", f);
-                                                    self.event_log.log_connection(&format!("Playback via Reconnect: {}", f));
+                                                    self.event_log.log_connection(&format!(
+                                                        "Playback · {}",
+                                                        std::path::Path::new(f)
+                                                            .file_name()
+                                                            .and_then(|s| s.to_str())
+                                                            .unwrap_or("file"),
+                                                    ));
                                                     self.save_last_connection();
                                                     self.populate_widgets_for_new_session();
                                                     self.populate_tool_widgets();
@@ -1623,14 +2034,13 @@ impl eframe::App for OpenBciGuiApp {
                                     b.ads_channels().map(|s| s.to_vec()).unwrap_or_default();
                                 persist_ads = true;
                                 self.event_log.log_system(&format!(
-                                    "Hardware Settings ch{} → {:?}",
+                                    "Board ch{} → {:?}",
                                     ch + 1,
                                     settings.power
                                 ));
                             }
                             Err(e) => {
-                                self.event_log
-                                    .log_error(&format!("Hardware Settings failed: {e}"));
+                                self.event_log.log_error(&format!("Board failed: {e}"));
                             }
                         }
                     }
@@ -1662,9 +2072,16 @@ impl eframe::App for OpenBciGuiApp {
             self.save_current_persisted_settings();
         }
 
+        self.tick_contact_sidecar();
+
+        if self.experiment.is_running() {
+            self.tick_experiment();
+            ctx.request_repaint();
+        }
+
         // Thin transport (Ableton / Resolve), not a 64px Java navy header.
         egui::TopBottomPanel::top("top_nav")
-            .exact_height(28.0)
+            .exact_height(32.0)
             .frame(
                 egui::Frame::NONE
                     .fill(theme::TRANSPORT)
@@ -1680,11 +2097,9 @@ impl eframe::App for OpenBciGuiApp {
                     };
                     if ui
                         .add(
-                            egui::Button::new(
-                                egui::RichText::new(stream_label).color(theme::TEXT).small(),
-                            )
-                            .fill(stream_fill)
-                            .min_size(egui::vec2(52.0, 18.0)),
+                            egui::Button::new(egui::RichText::new(stream_label).color(theme::TEXT))
+                                .fill(stream_fill)
+                                .min_size(egui::vec2(56.0, 22.0)),
                         )
                         .clicked()
                     {
@@ -1706,16 +2121,88 @@ impl eframe::App for OpenBciGuiApp {
 
                     if ui
                         .add(
-                            egui::Button::new(
-                                egui::RichText::new("End").color(theme::TEXT).small(),
-                            )
-                            .fill(theme::PANEL)
-                            .stroke(theme::hairline())
-                            .min_size(egui::vec2(40.0, 18.0)),
+                            egui::Button::new(egui::RichText::new("End").color(theme::TEXT))
+                                .fill(theme::PANEL)
+                                .stroke(theme::hairline())
+                                .min_size(egui::vec2(44.0, 22.0)),
                         )
                         .clicked()
                     {
                         self.end_session();
+                    }
+
+                    self.draw_record_export(ui);
+
+                    let exp_running = self.experiment.is_running();
+                    let exp_label = if exp_running {
+                        "Stop experiment"
+                    } else {
+                        "Run experiment"
+                    };
+                    let live_hw = self.board.as_ref().is_some_and(|b| {
+                        let n = b.name();
+                        n != "Playback" && !n.contains("Synthetic")
+                    });
+                    let exp_fill = if exp_running {
+                        theme::STOP
+                    } else if live_hw {
+                        theme::START
+                    } else {
+                        theme::PANEL
+                    };
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new(exp_label).color(theme::TEXT))
+                                .fill(exp_fill)
+                                .stroke(theme::hairline())
+                                .min_size(egui::vec2(120.0, 22.0)),
+                        )
+                        .clicked()
+                    {
+                        if exp_running {
+                            self.cancel_experiment();
+                        } else {
+                            self.start_experiment();
+                        }
+                    }
+
+                    if self
+                        .board
+                        .as_ref()
+                        .and_then(|b| b.playback_progress())
+                        .is_some()
+                    {
+                        if ui.button("-10s").clicked() {
+                            if let Some(ref mut b) = self.board {
+                                if let Some((pos, total)) = b.playback_progress() {
+                                    let sr = b.sample_rate().max(1) as f32;
+                                    let tot = total.max(1) as f32;
+                                    b.seek_to_fraction(
+                                        ((pos as f32 - 10.0 * sr) / tot).clamp(0.0, 1.0),
+                                    );
+                                }
+                            }
+                        }
+                        if ui.button("+10s").clicked() {
+                            if let Some(ref mut b) = self.board {
+                                if let Some((pos, total)) = b.playback_progress() {
+                                    let sr = b.sample_rate().max(1) as f32;
+                                    let tot = total.max(1) as f32;
+                                    b.seek_to_fraction(
+                                        ((pos as f32 + 10.0 * sr) / tot).clamp(0.0, 1.0),
+                                    );
+                                }
+                            }
+                        }
+                        if ui.button("Play again").clicked() {
+                            if let Some(ref mut b) = self.board {
+                                b.seek_to_fraction(0.0);
+                                if !b.is_streaming() {
+                                    b.toggle_playback_pause();
+                                }
+                                self.streaming = true;
+                            }
+                        }
                     }
 
                     ui.separator();
@@ -1723,9 +2210,7 @@ impl eframe::App for OpenBciGuiApp {
                     if let Some(ref b) = self.board {
                         let run = if self.streaming { "live" } else { "stop" };
                         ui.label(
-                            egui::RichText::new(format!("{}  {run}", b.name()))
-                                .small()
-                                .color(theme::TEXT),
+                            egui::RichText::new(format!("{}  {run}", b.name())).color(theme::TEXT),
                         );
                         ui.label(
                             egui::RichText::new(format!(
@@ -1733,7 +2218,6 @@ impl eframe::App for OpenBciGuiApp {
                                 crate::stream_stats::format_hz(self.current_sample_rate).trim(),
                                 crate::stream_stats::format_loss(self.packet_loss_percent).trim()
                             ))
-                            .small()
                             .monospace()
                             .color(crate::stream_stats::loss_color(self.packet_loss_percent)),
                         );
@@ -1789,8 +2273,11 @@ impl eframe::App for OpenBciGuiApp {
                                     self.draw_session_rack(ui);
                                 });
                                 let mut open = self.properties_open.take();
-                                if let Some(board) = self.board.as_deref() {
-                                    {
+                                draw_exclusive_section(ui, &mut open, "Experiments", |ui| {
+                                    ui.label(
+                                        egui::RichText::new("Guided recording").color(theme::TEXT),
+                                    );
+                                    if let Some(board) = self.board.as_deref() {
                                         let mut widget_ctx = WidgetContext::new(
                                             &mut self.networking,
                                             &mut self.data_logger,
@@ -1798,21 +2285,108 @@ impl eframe::App for OpenBciGuiApp {
                                             &mut self.event_log,
                                             &mut self.emg,
                                         );
-
-                                        for tool in &mut self.tool_widgets {
-                                            let title = tool.title().to_string();
-                                            draw_exclusive_section(ui, &mut open, &title, |ui| {
-                                                tool.show(ui, board, &mut widget_ctx);
-                                            });
-                                        }
+                                        ui.small(
+                                            egui::RichText::new("Marker").color(theme::HAIRLINE),
+                                        );
+                                        show_named_tool(
+                                            &mut self.tool_widgets,
+                                            "Marker",
+                                            ui,
+                                            board,
+                                            &mut widget_ctx,
+                                        );
                                     }
-
-                                    // Phase 7 WPacketLoss visual (sparkline + reset) — lives in SidePanel.
-                                    // Uses the app's running heuristic (wall-time vs received count).
-                                    // Playback always shows ~0% (perfect replay). Reset clears history + logs.
-                                    let loss = self.packet_loss_percent;
-                                    let loss_color = crate::stream_stats::loss_color(loss);
-                                    draw_exclusive_section(ui, &mut open, "Packet Loss", |ui| {
+                                });
+                                draw_exclusive_section(ui, &mut open, "Networking", |ui| {
+                                    if let Some(board) = self.board.as_deref() {
+                                        let mut widget_ctx = WidgetContext::new(
+                                            &mut self.networking,
+                                            &mut self.data_logger,
+                                            &mut self.last_marker,
+                                            &mut self.event_log,
+                                            &mut self.emg,
+                                        );
+                                        show_named_tool(
+                                            &mut self.tool_widgets,
+                                            "Networking",
+                                            ui,
+                                            board,
+                                            &mut widget_ctx,
+                                        );
+                                    }
+                                });
+                                draw_exclusive_section(ui, &mut open, "Hardware", |ui| {
+                                    if let Some(board) = self.board.as_deref() {
+                                        {
+                                            let mut widget_ctx = WidgetContext::new(
+                                                &mut self.networking,
+                                                &mut self.data_logger,
+                                                &mut self.last_marker,
+                                                &mut self.event_log,
+                                                &mut self.emg,
+                                            );
+                                            ui.small(
+                                                egui::RichText::new("Board").color(theme::HAIRLINE),
+                                            );
+                                            show_named_tool(
+                                                &mut self.tool_widgets,
+                                                "Board",
+                                                ui,
+                                                board,
+                                                &mut widget_ctx,
+                                            );
+                                            ui.small(
+                                                egui::RichText::new("Impedance")
+                                                    .color(theme::HAIRLINE),
+                                            );
+                                            show_named_tool(
+                                                &mut self.tool_widgets,
+                                                "Impedance",
+                                                ui,
+                                                board,
+                                                &mut widget_ctx,
+                                            );
+                                            ui.small(
+                                                egui::RichText::new("Analog Read")
+                                                    .color(theme::HAIRLINE),
+                                            );
+                                            show_named_tool(
+                                                &mut self.tool_widgets,
+                                                "Analog Read",
+                                                ui,
+                                                board,
+                                                &mut widget_ctx,
+                                            );
+                                            ui.small(
+                                                egui::RichText::new("Digital Read")
+                                                    .color(theme::HAIRLINE),
+                                            );
+                                            show_named_tool(
+                                                &mut self.tool_widgets,
+                                                "Digital Read",
+                                                ui,
+                                                board,
+                                                &mut widget_ctx,
+                                            );
+                                            ui.small(
+                                                egui::RichText::new("Pulse Sensor")
+                                                    .color(theme::HAIRLINE),
+                                            );
+                                            show_named_tool(
+                                                &mut self.tool_widgets,
+                                                "Pulse Sensor",
+                                                ui,
+                                                board,
+                                                &mut widget_ctx,
+                                            );
+                                        }
+                                        // Packet Loss inspect lives in Hardware, not as a spine row.
+                                        ui.small(
+                                            egui::RichText::new("Packet Loss")
+                                                .color(theme::HAIRLINE),
+                                        );
+                                        let loss = self.packet_loss_percent;
+                                        let loss_color = crate::stream_stats::loss_color(loss);
                                         ui.horizontal(|ui| {
                                             ui.colored_label(loss_color, format!("{:.1}%", loss));
                                             if ui.button("Reset").clicked() {
@@ -1826,7 +2400,6 @@ impl eframe::App for OpenBciGuiApp {
                                                     .log_system("Packet loss stats reset by user");
                                             }
                                         });
-                                        // Compact sparkline (last ~60 samples) — egui 0.28 compatible
                                         let hist = &self.packet_loss_history;
                                         if !hist.is_empty() {
                                             let desired = egui::vec2(ui.available_width(), 42.0);
@@ -1857,8 +2430,8 @@ impl eframe::App for OpenBciGuiApp {
                                         } else {
                                             ui.small("(no loss history yet)");
                                         }
-                                    });
-                                }
+                                    }
+                                });
                                 self.properties_open = open;
                             });
                     });
@@ -1872,6 +2445,12 @@ impl eframe::App for OpenBciGuiApp {
                 if let Some(board) = self.board.as_deref() {
                     self.widget_manager.update(board);
 
+                    let overlay = self.experiment.overlay(std::time::Instant::now());
+                    for w in &mut self.widget_manager.widgets {
+                        if let Some(ts) = w.as_any_mut().downcast_mut::<WTimeSeries>() {
+                            ts.set_experiment_overlay(overlay.clone());
+                        }
+                    }
                     // Create a fresh WidgetContext for this frame. This gives every widget
                     // (especially Marker and the new configurable WNetworking) the ability
                     // to send markers, reconfigure networking, etc. in a clean, borrow-checker
@@ -1886,17 +2465,26 @@ impl eframe::App for OpenBciGuiApp {
                         &mut self.emg,
                     );
                     self.widget_manager.draw(ui, board, &mut widget_ctx);
+                    self.drain_head_montage();
                 }
             });
 
         egui::TopBottomPanel::bottom("status_bar")
-            .exact_height(22.0)
+            .exact_height(32.0)
             .frame(
                 egui::Frame::NONE
                     .fill(theme::TRANSPORT)
-                    .inner_margin(egui::Margin::symmetric(8, 1)),
+                    .inner_margin(egui::Margin {
+                        left: 12,
+                        right: 12,
+                        top: 4,
+                        bottom: 8,
+                    }),
             )
             .show(ctx, |ui| {
+                // 32px bar − 4 top − 8 bottom = 20px inner; keep Pause/speed on this line.
+                ui.spacing_mut().interact_size.y = 16.0;
+                ui.spacing_mut().button_padding = egui::vec2(6.0, 1.0);
                 ui.horizontal(|ui| {
                     // Phase 7 Playback polish: compact interactive controls for the magical roundtrip.
                     // Lets the user pause, change speed, and scrub the exact recording they just made
@@ -1905,66 +2493,56 @@ impl eframe::App for OpenBciGuiApp {
                     // neurofeedback rehearsal trivial without hardware.
                     if let Some(b) = self.board.as_deref_mut() {
                         if let Some((pos, total)) = b.playback_progress() {
-                            ui.group(|ui| {
-                                ui.horizontal(|ui| {
-                                    // Pause / Play
-                                    let is_paused = !b.is_streaming();
-                                    let pause_label =
-                                        if is_paused { "▶ Play" } else { "⏸ Pause" };
-                                    if ui.button(pause_label).clicked() {
-                                        b.toggle_playback_pause();
-                                        self.event_log.log_system(if is_paused {
-                                            "Playback resumed"
-                                        } else {
-                                            "Playback paused"
-                                        });
-                                    }
-
-                                    // Speed presets
-                                    for &s in &[0.5, 1.0, 2.0] {
-                                        let lbl = format!("{:.1}x", s);
-                                        if ui
-                                            .selectable_label(
-                                                b.playback_speed()
-                                                    .is_some_and(|cur| (cur - s).abs() < 0.01),
-                                                lbl,
-                                            )
-                                            .clicked()
-                                        {
-                                            b.set_playback_speed(s);
-                                            self.event_log.log_system(&format!(
-                                                "Playback speed set to {}x",
-                                                s
-                                            ));
-                                        }
-                                    }
-
-                                    // Progress text + manual seek slider (0..1)
-                                    let frac = if total > 0 {
-                                        pos as f32 / total as f32
-                                    } else {
-                                        0.0
-                                    };
-                                    let secs = pos as f64 / b.sample_rate().max(1) as f64;
-                                    let total_secs = total as f64 / b.sample_rate().max(1) as f64;
-                                    ui.label(format!("{:.1}/{:.1}s", secs, total_secs));
-
-                                    let mut new_frac = frac;
-                                    if ui
-                                        .add(
-                                            egui::Slider::new(&mut new_frac, 0.0..=1.0)
-                                                .show_value(false),
-                                        )
-                                        .changed()
-                                    {
-                                        b.seek_to_fraction(new_frac);
-                                        self.event_log.log_system(&format!(
-                                            "Playback seeked to {:.0}%",
-                                            new_frac * 100.0
-                                        ));
-                                    }
+                            // Pause / Play
+                            let is_paused = !b.is_streaming();
+                            let pause_label = if is_paused { "▶ Play" } else { "⏸ Pause" };
+                            if ui.button(pause_label).clicked() {
+                                b.toggle_playback_pause();
+                                self.event_log.log_system(if is_paused {
+                                    "Playback resumed"
+                                } else {
+                                    "Playback paused"
                                 });
-                            });
+                            }
+
+                            // Speed presets
+                            for &s in &[0.5, 1.0, 2.0] {
+                                let lbl = format!("{:.1}x", s);
+                                if ui
+                                    .selectable_label(
+                                        b.playback_speed()
+                                            .is_some_and(|cur| (cur - s).abs() < 0.01),
+                                        lbl,
+                                    )
+                                    .clicked()
+                                {
+                                    b.set_playback_speed(s);
+                                    self.event_log
+                                        .log_system(&format!("Playback speed set to {}x", s));
+                                }
+                            }
+
+                            // Progress text + manual seek slider (0..1)
+                            let frac = if total > 0 {
+                                pos as f32 / total as f32
+                            } else {
+                                0.0
+                            };
+                            let secs = pos as f64 / b.sample_rate().max(1) as f64;
+                            let total_secs = total as f64 / b.sample_rate().max(1) as f64;
+                            ui.label(format!("{:.1}/{:.1}s", secs, total_secs));
+
+                            let mut new_frac = frac;
+                            if ui
+                                .add(egui::Slider::new(&mut new_frac, 0.0..=1.0).show_value(false))
+                                .changed()
+                            {
+                                b.seek_to_fraction(new_frac);
+                                self.event_log.log_system(&format!(
+                                    "Playback seeked to {:.0}%",
+                                    new_frac * 100.0
+                                ));
+                            }
                             ui.separator();
                         }
                     }
@@ -1977,27 +2555,18 @@ impl eframe::App for OpenBciGuiApp {
                         ui.colored_label(theme::ACCENT, format!("Last: {}", self.last_marker));
                     }
 
-                    // Mini live log preview (last 2-3 events, color coded) — Phase 7 polish: newest first so the live tail is immediately visible
-                    let recent = self.event_log.last_n(3);
-                    if !recent.is_empty() {
-                        ui.separator();
-                        for entry in &recent {
-                            let col = entry.level.color();
-                            ui.colored_label(
-                                col,
-                                format!(
-                                    "[{}] {}",
-                                    &entry.category[..entry.category.len().min(4)],
-                                    &entry.message[..entry.message.len().min(45)]
-                                ),
-                            );
-                        }
+                    if ui.button("Console").clicked() {
+                        self.console_show_window = !self.console_show_window;
                     }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.small(format!("Frame:{:>6}", self.frame_count));
-                        ui.small(format!("Log: {} events", self.event_log.len()));
-                    });
+                    ui.separator();
+                    if let Some(entry) = self.event_log.last_n(1).first() {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&entry.message).color(entry.level.color()),
+                            )
+                            .truncate(),
+                        );
+                    }
                 });
             });
 
@@ -2022,8 +2591,7 @@ impl eframe::App for OpenBciGuiApp {
                                 self.console_categories.iter().cloned().collect();
                             let visible = self.event_log.filtered(&all_cats, &self.console_search);
                             let mut content = String::new();
-                            content
-                                .push_str("# OpenBCI GUI (Rust) — Session Event Log (visible)\n");
+                            content.push_str("# OpenBCI GUI — Session Event Log (visible)\n");
                             content.push_str(&format!("Copied: {}\n\n", chrono::Local::now()));
                             for e in &visible {
                                 content.push_str(&format!(
@@ -2053,7 +2621,7 @@ impl eframe::App for OpenBciGuiApp {
                                 let visible =
                                     self.event_log.filtered(&all_cats, &self.console_search);
                                 let mut content = String::new();
-                                content.push_str("# OpenBCI GUI (Rust) — Session Event Log\n");
+                                content.push_str("# OpenBCI GUI — Session Event Log\n");
                                 content
                                     .push_str(&format!("Exported: {}\n\n", chrono::Local::now()));
                                 for e in visible {
@@ -2146,69 +2714,10 @@ impl eframe::App for OpenBciGuiApp {
             self.console_show_window = open;
         }
 
-        if self.show_layout_customizer {
-            let mut open = self.show_layout_customizer;
-            egui::Window::new("Customize Current Layout")
-                .open(&mut open)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    let count = WidgetManager::container_count_for(self.current_layout);
-                    let assignment = self
-                        .grid_layout_assignments
-                        .entry(self.current_layout)
-                        .or_insert_with(|| vec!["Time Series".into(); count]);
-                    while assignment.len() < count {
-                        assignment.push("Time Series".into());
-                    }
-                    assignment.truncate(count);
-
-                    let options = [
-                        "Time Series",
-                        "FFT Plot",
-                        "Band Power",
-                        "Accelerometer",
-                        "Head Plot",
-                        "Impedance",
-                        "Spectrogram",
-                        "EMG",
-                        "EMG Joystick",
-                        "Analog Read",
-                        "Digital Read",
-                        "Pulse Sensor",
-                        "Hardware Settings",
-                    ];
-
-                    for (i, slot) in assignment.iter_mut().enumerate() {
-                        let mut current = slot.clone();
-                        egui::ComboBox::from_id_salt(format!("layout_slot_{}", i))
-                            .selected_text(&current)
-                            .show_ui(ui, |ui| {
-                                for &opt in &options {
-                                    if ui
-                                        .selectable_value(&mut current, opt.to_string(), opt)
-                                        .changed()
-                                    {
-                                        *slot = current.clone();
-                                        self.pending_layout_rebuild = true;
-                                        self.event_log.log_system(&format!(
-                                            "Layout {} position {} → {}",
-                                            self.current_layout,
-                                            i + 1,
-                                            current
-                                        ));
-                                    }
-                                }
-                            });
-                    }
-                    ui.separator();
-                    ui.small("Java-style containers. Changes apply immediately, per layout.");
-                });
-            self.show_layout_customizer = open;
-        }
-
         if self.pending_layout_rebuild {
             self.rebuild_grid_widgets_for_current_layout();
             self.pending_layout_rebuild = false;
+            self.apply_recapture_assign_holes();
         }
 
         ctx.request_repaint();
@@ -2221,6 +2730,21 @@ fn properties_card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) 
         .inner_margin(8.0)
         .show(ui, add_contents);
     ui.add_space(8.0);
+}
+
+/// PROPERTIES accordion spine (Session is independent and drawn first).
+pub(crate) const PROPERTIES_SPINE_IDS: &[&str] = &["Experiments", "Networking", "Hardware"];
+
+fn show_named_tool(
+    tools: &mut [Box<dyn Widget>],
+    name: &str,
+    ui: &mut egui::Ui,
+    board: &dyn DataSource,
+    ctx: &mut WidgetContext,
+) {
+    if let Some(tool) = tools.iter_mut().find(|t| t.title() == name) {
+        tool.show(ui, board, ctx);
+    }
 }
 
 /// PROPERTIES accordion: Session is independent. At most one other section is open.
@@ -2255,25 +2779,42 @@ fn draw_exclusive_section(
 
 #[cfg(test)]
 mod properties_rack_tests {
-    use super::{exclusive_section_clicked, exclusive_section_open};
+    use super::{exclusive_section_clicked, exclusive_section_open, PROPERTIES_SPINE_IDS};
+    use crate::widgets::Widget;
 
     #[test]
-    fn accordion_starts_with_none_open() {
-        let current: Option<String> = None;
-        for id in [
+    fn spine_names_are_experiments_networking_hardware() {
+        assert_eq!(
+            PROPERTIES_SPINE_IDS,
+            &["Experiments", "Networking", "Hardware"]
+        );
+        for banned in [
+            "Marker",
             "Focus",
             "Impedance",
-            "Hardware Settings",
-            "Marker",
-            "Networking",
-            "Head Plot",
-            "Slow Waves",
-            "Hemispheres",
+            "Board",
             "Analog Read",
             "Digital Read",
             "Pulse Sensor",
             "Packet Loss",
+            "Head Plot",
+            "Left / right",
+            "Which first",
+            "Slow Waves",
+            "Hemispheres",
+            "Session",
         ] {
+            assert!(
+                !PROPERTIES_SPINE_IDS.contains(&banned),
+                "{banned} must not be a spine id"
+            );
+        }
+    }
+
+    #[test]
+    fn accordion_starts_with_none_open() {
+        let current: Option<String> = None;
+        for id in PROPERTIES_SPINE_IDS {
             assert!(
                 !exclusive_section_open(&current, id),
                 "{id} must not default-open"
@@ -2284,29 +2825,96 @@ mod properties_rack_tests {
     #[test]
     fn opening_one_section_closes_the_other() {
         let mut current = None;
-        exclusive_section_clicked(&mut current, "Impedance");
-        assert!(exclusive_section_open(&current, "Impedance"));
-        exclusive_section_clicked(&mut current, "Marker");
-        assert!(!exclusive_section_open(&current, "Impedance"));
-        assert!(exclusive_section_open(&current, "Marker"));
-        assert!(!exclusive_section_open(&current, "Hardware Settings"));
-        assert!(!exclusive_section_open(&current, "Focus"));
+        exclusive_section_clicked(&mut current, "Experiments");
+        assert!(exclusive_section_open(&current, "Experiments"));
+        exclusive_section_clicked(&mut current, "Networking");
+        assert!(!exclusive_section_open(&current, "Experiments"));
+        assert!(exclusive_section_open(&current, "Networking"));
+        assert!(!exclusive_section_open(&current, "Hardware"));
     }
 
     #[test]
     fn clicking_open_section_closes_it() {
-        let mut current = Some("Focus".into());
-        exclusive_section_clicked(&mut current, "Focus");
+        let mut current = Some("Hardware".into());
+        exclusive_section_clicked(&mut current, "Hardware");
         assert!(current.is_none());
     }
 
     #[test]
+    fn session_filter_copy_is_smooth_cutoff_not_inventor() {
+        let src = include_str!("app.rs");
+        assert!(src.contains("Smooth cutoff"), "missing Smooth cutoff");
+        let banned = format!("ui.label(\"{}\"", "Butterworth");
+        assert!(
+            !src.contains(&banned),
+            "inventor name must not be a Session label"
+        );
+    }
+
+    #[test]
+    fn headset_label_on_head_plot_picker_not_on_traces() {
+        let head = include_str!("widgets/head_plot.rs");
+        let app = include_str!("app.rs");
+        assert!(head.contains("Ultracortex Mark IV"));
+        assert!(head.contains("head_headset"), "caption row: headset combo");
+        assert!(
+            !head.contains("ui.label(HEADSET_NAME)"),
+            "combo, not a static label"
+        );
+        assert!(!head.contains("version IV"));
+        let session = app
+            .split("fn draw_session_rack")
+            .nth(1)
+            .unwrap_or("")
+            .split("impl eframe::App")
+            .next()
+            .unwrap_or("");
+        assert!(
+            !session.contains("Ultracortex"),
+            "headset picker must not live on Session"
+        );
+        assert!(!PROPERTIES_SPINE_IDS.contains(&"Head Plot"));
+        assert!(!PROPERTIES_SPINE_IDS.contains(&"Headset"));
+    }
+
+    #[test]
+    fn session_view_pickers_are_head_plot_left_right_which_first() {
+        let src = include_str!("app.rs");
+        let slots = src
+            .split("fn draw_layout_slots")
+            .nth(1)
+            .unwrap_or("")
+            .split("fn draw_record_export")
+            .next()
+            .unwrap_or("");
+        assert!(slots.contains("\"Head Plot\""), "{slots}");
+        assert!(slots.contains("\"Left / right\""), "{slots}");
+        assert!(slots.contains("\"Which first\""), "{slots}");
+        assert!(!slots.contains("\"Hemispheres\""), "{slots}");
+        assert!(!slots.contains("\"Slow Waves\""), "{slots}");
+        let rebuild = src
+            .split("fn rebuild_grid_widgets_for_current_layout")
+            .nth(1)
+            .unwrap_or("")
+            .split("fn populate_widgets_for_new_session")
+            .next()
+            .unwrap_or("");
+        assert!(rebuild.contains("\"Left / right\""));
+        assert!(rebuild.contains("\"Which first\""));
+        assert!(!rebuild.contains("\"Hemispheres\""));
+        assert!(!rebuild.contains("\"Slow Waves\""));
+        assert_eq!(crate::widgets::WHemispheres::new().title(), "Left / right");
+        assert_eq!(crate::widgets::WSlowWaves::new().title(), "Which first");
+        assert_eq!(crate::widgets::WHeadPlot::new().title(), "Head Plot");
+    }
+
+    #[test]
     fn session_is_not_an_accordion_member() {
-        let mut current = Some("Marker".into());
-        assert!(exclusive_section_open(&current, "Marker"));
+        let mut current = Some("Experiments".into());
+        assert!(exclusive_section_open(&current, "Experiments"));
         assert!(!exclusive_section_open(&current, "Session"));
-        exclusive_section_clicked(&mut current, "Hardware Settings");
+        exclusive_section_clicked(&mut current, "Hardware");
         assert!(!exclusive_section_open(&current, "Session"));
-        assert!(exclusive_section_open(&current, "Hardware Settings"));
+        assert!(exclusive_section_open(&current, "Hardware"));
     }
 }

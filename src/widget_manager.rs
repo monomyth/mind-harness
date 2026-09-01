@@ -25,6 +25,10 @@ pub struct WidgetManager {
     containers: Vec<Container>,
 }
 
+fn hide_glass_title(title: &str) -> bool {
+    matches!(title, "Head Plot" | "Left / right" | "Which first")
+}
+
 impl WidgetManager {
     pub fn new() -> Self {
         Self {
@@ -230,23 +234,26 @@ impl WidgetManager {
                     .fill(crate::theme::CANVAS)
                     .stroke(crate::theme::hairline())
                     .show(ui, |ui| {
-                        let header_height = 18.0;
-                        let header_rect = ui.available_rect_before_wrap();
-                        ui.painter().rect_filled(
-                            egui::Rect::from_min_size(
-                                header_rect.min,
-                                egui::vec2(header_rect.width(), header_height),
-                            ),
-                            0.0,
-                            crate::theme::TRANSPORT,
-                        );
+                        let title = widget.title().to_string();
+                        if !hide_glass_title(&title) {
+                            let header_height = 18.0;
+                            let header_rect = ui.available_rect_before_wrap();
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(
+                                    header_rect.min,
+                                    egui::vec2(header_rect.width(), header_height),
+                                ),
+                                0.0,
+                                crate::theme::TRANSPORT,
+                            );
 
-                        ui.add_space(2.0);
-                        ui.horizontal(|ui| {
-                            ui.add_space(6.0);
-                            ui.small(egui::RichText::new(widget.title()).color(crate::theme::TEXT));
-                        });
-                        ui.add_space(2.0);
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(6.0);
+                                ui.small(egui::RichText::new(title).color(crate::theme::TEXT));
+                            });
+                            ui.add_space(2.0);
+                        }
 
                         widget.show(ui, source, ctx);
                     });
@@ -265,5 +272,16 @@ mod tests {
         assert_eq!(WidgetManager::container_count_for(1), 1);
         assert_eq!(WidgetManager::container_count_for(2), 4);
         assert_eq!(WidgetManager::container_count_for(3), 2);
+    }
+
+    #[test]
+    fn signed_plates_skip_small_title_on_glass() {
+        let src = include_str!("widget_manager.rs");
+        assert!(src.contains("fn hide_glass_title"));
+        assert!(src.contains("if !hide_glass_title(&title)"));
+        assert!(src.contains("Head Plot"));
+        assert!(src.contains("Left / right"));
+        assert!(src.contains("Which first"));
+        assert!(src.contains("ui.small"));
     }
 }

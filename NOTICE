@@ -1,0 +1,13 @@
+Mind Harness is original work, MIT License, Copyright (c) 2026 Eugene Ray.
+
+It is a native rewrite inspired by the OpenBCI GUI (MIT License,
+Copyright (c) 2018 OpenBCI). That license is compatible; the required
+copyright notice is preserved here:
+
+  MIT License
+  Copyright (c) 2018 OpenBCI
+
+Ultracortex Mark IV mesh data is derived from OpenBCI’s public Mark IV
+design files (open-source hardware / associated STLs).
+
+This project is not affiliated with or endorsed by OpenBCI.
