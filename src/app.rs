@@ -106,10 +106,20 @@ struct PersistedSettings {
     ts_per_channel_y_scales: Vec<f32>,
     #[serde(default = "default_layout_id")]
     current_layout: usize,
+    #[serde(default)]
+    font_sizes: theme::FontSizes,
+    #[serde(default = "default_true")]
+    head_show_waves: bool,
+    #[serde(default = "default_true")]
+    head_show_hemispheres: bool,
 }
 
 fn default_layout_id() -> usize {
     5
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_bp_low() -> f64 {
@@ -152,6 +162,9 @@ impl Default for PersistedSettings {
             bp_smoothing_index: 5,  // 0.98
             ts_per_channel_y_scales: vec![0.0; 16],
             current_layout: 5,
+            font_sizes: theme::FontSizes::default(),
+            head_show_waves: true,
+            head_show_hemispheres: true,
         }
     }
 }
@@ -234,6 +247,10 @@ pub struct OpenBciGuiApp {
 
     /// Exclusive PROPERTIES accordion. None = Session open; Some(id) = that section open.
     properties_open: Option<String>,
+
+    font_sizes: theme::FontSizes,
+    head_show_waves: bool,
+    head_show_hemispheres: bool,
 
     experiment: crate::experiment::ExperimentRun,
     contact: crate::contact::ContactLog,
@@ -346,6 +363,9 @@ impl OpenBciGuiApp {
             persisted_ads_channels: vec![],
             last_recording_path: None,
             properties_open: None,
+            font_sizes: theme::FontSizes::default(),
+            head_show_waves: true,
+            head_show_hemispheres: true,
             experiment: crate::experiment::ExperimentRun::new(),
             contact: crate::contact::ContactLog::new(),
             montage: MontageStore::load(),
@@ -361,6 +381,10 @@ impl OpenBciGuiApp {
         app.control_panel.ganglion_device_id = persisted.ganglion_device_id.clone();
         app.control_panel.sd_file = persisted.sd_file.clone();
         app.persisted_ads_channels = persisted.ads_channels.clone();
+        app.font_sizes = persisted.font_sizes.clone();
+        theme::set_font_sizes(app.font_sizes.clone());
+        app.head_show_waves = persisted.head_show_waves;
+        app.head_show_hemispheres = persisted.head_show_hemispheres;
         if let Some(ref name) = persisted.last_serial_port {
             if let Some(idx) = app
                 .control_panel
@@ -459,10 +483,7 @@ impl OpenBciGuiApp {
         }
     }
 
-    fn drain_head_montage(&mut self) {
-        let mut action = None;
-        let mut live_labels = None;
-        let mut live_holes = None;
+    fn apply_head_plot_chrome(&mut self) {
         for w in self
             .widget_manager
             .widgets
@@ -470,17 +491,50 @@ impl OpenBciGuiApp {
             .chain(self.tool_widgets.iter_mut())
         {
             if let Some(hp) = w.as_any_mut().downcast_mut::<WHeadPlot>() {
-                if let Some(a) = hp.take_action() {
-                    action = Some(a);
-                }
-                if hp.is_dirty() {
-                    live_labels = Some(hp.channel_labels());
-                    live_holes = Some(hp.channel_holes());
-                }
+                hp.show_waves = self.head_show_waves;
+                hp.show_hemispheres = self.head_show_hemispheres;
             }
         }
-        let _labels = live_labels.unwrap_or_else(|| self.montage.active().channel_labels());
-        let holes = live_holes.unwrap_or_else(|| self.montage.active().channel_holes());
+    }
+
+    fn sync_head_plot_chrome(&mut self) {
+        let Some(hp) = self
+            .widget_manager
+            .widgets
+            .iter()
+            .chain(self.tool_widgets.iter())
+            .find_map(|w| w.as_any().downcast_ref::<WHeadPlot>())
+        else {
+            return;
+        };
+        if hp.show_waves != self.head_show_waves
+            || hp.show_hemispheres != self.head_show_hemispheres
+        {
+            self.head_show_waves = hp.show_waves;
+            self.head_show_hemispheres = hp.show_hemispheres;
+            self.save_current_persisted_settings();
+        }
+    }
+
+    fn drain_head_montage(&mut self) {
+        let mut action = None;
+        let mut plots: Vec<([String; 8], bool)> = Vec::new();
+        for w in self
+            .widget_manager
+            .widgets
+            .iter_mut()
+            .chain(self.tool_widgets.iter_mut())
+        {
+            if let Some(hp) = w.as_any_mut().downcast_mut::<WHeadPlot>() {
+                if action.is_none() {
+                    action = hp.take_action();
+                } else {
+                    let _ = hp.take_action();
+                }
+                plots.push((hp.channel_holes(), hp.is_dirty()));
+            }
+        }
+        let holes = pick_holes_for_montage_save(&plots, self.montage.active().channel_holes());
         match action {
             Some(MontageUiAction::Select(name)) => {
                 self.montage.select(&name);
@@ -610,6 +664,7 @@ impl OpenBciGuiApp {
         wm.set_layout(self.current_layout);
         self.widget_manager = wm;
         self.apply_head_montage();
+        self.apply_head_plot_chrome();
     }
 
     /// Create a fresh WidgetManager populated with the 4 core visualization widgets.
@@ -710,6 +765,7 @@ impl OpenBciGuiApp {
         self.tool_widgets.push(Box::new(WDigitalRead::new()));
         self.tool_widgets.push(Box::new(WPulseSensor::new()));
         self.apply_head_montage();
+        self.apply_head_plot_chrome();
         // NOTE: WPacketLoss is rendered inline in the SidePanel (sparkline + Reset + % ) — see the
         // "Phase 7 WPacketLoss visual" block near the tool loop. This keeps the visual right next
         // to the tools the user is looking at during an experiment; no separate widget object needed.
@@ -1148,6 +1204,9 @@ impl OpenBciGuiApp {
             bp_smoothing_index: bp_si,
             ts_per_channel_y_scales: ts_per_ch,
             current_layout: self.current_layout,
+            font_sizes: self.font_sizes.clone(),
+            head_show_waves: self.head_show_waves,
+            head_show_hemispheres: self.head_show_hemispheres,
         }
     }
 
@@ -1548,6 +1607,8 @@ impl eframe::App for OpenBciGuiApp {
             });
         }
         theme::apply_visuals(ctx);
+        self.font_sizes.apply_egui(ctx);
+        theme::set_font_sizes(self.font_sizes.clone());
 
         // === Handle background connection to real hardware ===
         if let ConnectionState::InProgress {
@@ -2631,6 +2692,44 @@ impl eframe::App for OpenBciGuiApp {
                                         }
                                     }
                                 });
+                                draw_exclusive_section(ui, &mut open, "Fonts", |ui| {
+                                    ui.label(
+                                        egui::RichText::new("Type sizes").color(theme::TEXT),
+                                    );
+                                    let mut dirty = false;
+                                    let mut drag = |ui: &mut egui::Ui, label: &str, val: &mut f32| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(label);
+                                            if ui
+                                                .add(
+                                                    egui::DragValue::new(val)
+                                                        .range(8.0..=48.0)
+                                                        .speed(0.25),
+                                                )
+                                                .changed()
+                                            {
+                                                dirty = true;
+                                            }
+                                        });
+                                    };
+                                    drag(ui, "small", &mut self.font_sizes.small);
+                                    drag(ui, "body", &mut self.font_sizes.body);
+                                    drag(ui, "button", &mut self.font_sizes.button);
+                                    drag(ui, "heading", &mut self.font_sizes.heading);
+                                    drag(ui, "mono", &mut self.font_sizes.mono);
+                                    drag(ui, "marks", &mut self.font_sizes.marks);
+                                    drag(ui, "hole_label", &mut self.font_sizes.hole_label);
+                                    drag(ui, "caption", &mut self.font_sizes.caption);
+                                    if ui.button("Reset defaults").clicked() {
+                                        self.font_sizes = theme::FontSizes::default();
+                                        dirty = true;
+                                    }
+                                    if dirty {
+                                        theme::set_font_sizes(self.font_sizes.clone());
+                                        self.font_sizes.apply_egui(ui.ctx());
+                                        self.save_current_persisted_settings();
+                                    }
+                                });
                                 self.properties_open = open;
                             });
                     });
@@ -2665,6 +2764,7 @@ impl eframe::App for OpenBciGuiApp {
                     );
                     self.widget_manager.draw(ui, board, &mut widget_ctx);
                     self.drain_head_montage();
+                    self.sync_head_plot_chrome();
                 }
             });
 
@@ -2931,8 +3031,25 @@ fn properties_card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) 
     ui.add_space(8.0);
 }
 
+/// Montage Save/SaveAs always writes a live Head Plot map, even when `dirty`
+/// was cleared. Prefer a dirty plot (the operator just rewired it); otherwise
+/// the first plot (grid before the spare tool-panel copy).
+pub(crate) fn pick_holes_for_montage_save(
+    plots: &[([String; 8], bool)],
+    fallback: [String; 8],
+) -> [String; 8] {
+    if let Some((holes, _)) = plots.iter().find(|(_, dirty)| *dirty) {
+        return holes.clone();
+    }
+    plots
+        .first()
+        .map(|(holes, _)| holes.clone())
+        .unwrap_or(fallback)
+}
+
 /// PROPERTIES accordion spine (Session = None; these ids = Some(id)).
-pub(crate) const PROPERTIES_SPINE_IDS: &[&str] = &["Experiments", "Networking", "Hardware"];
+pub(crate) const PROPERTIES_SPINE_IDS: &[&str] =
+    &["Experiments", "Networking", "Hardware", "Fonts"];
 
 fn show_named_tool(
     tools: &mut [Box<dyn Widget>],
@@ -2978,14 +3095,66 @@ fn draw_exclusive_section(
 
 #[cfg(test)]
 mod properties_rack_tests {
-    use super::{exclusive_section_clicked, exclusive_section_open, PROPERTIES_SPINE_IDS};
+    use super::{
+        exclusive_section_clicked, exclusive_section_open, pick_holes_for_montage_save,
+        PROPERTIES_SPINE_IDS,
+    };
+    use crate::widgets::head_plot::LABELS;
     use crate::widgets::Widget;
+
+    fn holes(site: &str) -> [String; 8] {
+        let mut m = LABELS.map(|s| s.to_string());
+        m[2] = site.to_string();
+        m
+    }
+
+    #[test]
+    fn save_uses_live_map_even_when_not_dirty() {
+        let live = holes("T7");
+        let store = LABELS.map(|s| s.to_string());
+        let got = pick_holes_for_montage_save(&[(live.clone(), false)], store);
+        assert_eq!(got[2], "T7");
+        assert_ne!(got[2], "C3");
+    }
+
+    #[test]
+    fn save_prefers_dirty_plot_over_spare_clean_copy() {
+        let dirty = holes("T7");
+        let spare = LABELS.map(|s| s.to_string());
+        let got = pick_holes_for_montage_save(
+            &[(dirty.clone(), true), (spare, false)],
+            LABELS.map(|s| s.to_string()),
+        );
+        assert_eq!(got[2], "T7");
+    }
+
+    #[test]
+    fn save_grid_map_wins_when_neither_is_dirty() {
+        let grid = holes("T7");
+        let spare = LABELS.map(|s| s.to_string());
+        let got = pick_holes_for_montage_save(
+            &[(grid.clone(), false), (spare, false)],
+            LABELS.map(|s| s.to_string()),
+        );
+        assert_eq!(got[2], "T7", "must not skip the live grid map when clean");
+    }
+
+    #[test]
+    fn drain_head_montage_source_always_snapshots_channel_holes() {
+        let src = include_str!("app.rs");
+        assert!(src.contains("pick_holes_for_montage_save"));
+        assert!(src.contains("hp.channel_holes()"));
+        assert!(
+            !src.contains("if hp.is_dirty() {\n                    live_labels"),
+            "Save must not skip the live map when dirty is false"
+        );
+    }
 
     #[test]
     fn spine_names_are_experiments_networking_hardware() {
         assert_eq!(
             PROPERTIES_SPINE_IDS,
-            &["Experiments", "Networking", "Hardware"]
+            &["Experiments", "Networking", "Hardware", "Fonts"]
         );
         for banned in [
             "Marker",
@@ -3055,12 +3224,18 @@ mod properties_rack_tests {
         let head = include_str!("widgets/head_plot.rs");
         let app = include_str!("app.rs");
         assert!(head.contains("Ultracortex Mark IV"));
-        assert!(head.contains("head_headset"), "caption row: headset combo");
         assert!(
-            !head.contains("ui.label(HEADSET_NAME)"),
-            "combo, not a static label"
+            app.contains("hw_headset"),
+            "headset combo lives in Hardware inspect"
         );
-        assert!(!head.contains("version IV"));
+        assert!(
+            app.contains("\"Save as\""),
+            "Save as lives in Hardware montage row"
+        );
+        assert!(
+            !head.contains("head_headset"),
+            "Head Plot chrome is Waves/Hemispheres only"
+        );
         let session = app
             .split("fn draw_session_rack")
             .nth(1)

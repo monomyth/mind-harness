@@ -6,11 +6,15 @@
 
 use crate::board::DataSource;
 use crate::fft::band_powers_psd;
-use crate::laterality::{latch_rails, occupied_band_fill, Rhythm, WINDOW_SEC};
+use crate::laterality::{
+    latch_rails, laterality_index, occupied_band_fill, Rhythm, WINDOW_SEC, IDX_FP1, IDX_FP2,
+    IDX_O1, IDX_O2, LI_THRESHOLD, POWER_FLOOR,
+};
 use crate::theme;
 use crate::widgets::mark_iv::{
     self, channel_at, default_map, hit_hole, is_hole, paint_frame, paint_frame_hiding_pair,
-    paint_head, project_holes, Camera, DEFAULT_SITES, HEADSET_NAME,
+    paint_head, paint_head_tinted, project_holes, Camera, HemiTint, WaveTint, DEFAULT_SITES,
+    HEADSET_NAME,
 };
 use crate::widgets::Widget;
 use eframe::egui;
@@ -75,6 +79,10 @@ pub struct WHeadPlot {
     save_as_open: bool,
     save_as_buf: String,
     orbit: Camera,
+    /// Head Plot chrome tag — laterality caption + half tint.
+    pub show_hemispheres: bool,
+    /// Head Plot chrome tag — slow/fast word + cool/warm tone.
+    pub show_waves: bool,
 }
 
 /// Recapture-only: OPENBCI_ASSIGN_HOLE=C3 (crop scripts cannot click).
@@ -105,6 +113,8 @@ impl WHeadPlot {
             save_as_open: false,
             save_as_buf: String::new(),
             orbit: Camera::default(),
+            show_hemispheres: true,
+            show_waves: true,
         }
     }
 
@@ -133,19 +143,125 @@ impl WHeadPlot {
             .collect();
         HeadOverlayFrame {
             kind: HeadOverlayKind::Hemispheres,
-            caption: if self
-                .railed
-                .iter()
-                .zip(self.map.iter())
-                .any(|(dead, name)| *dead && !name.is_empty())
-            {
-                "Contact lost".into()
-            } else {
-                String::new()
-            },
+            caption: self.plate_captions(),
             sites,
             railed: self.railed,
         }
+    }
+
+    /// Separate laterality + slow/fast words — never one glued sentence.
+    /// Do not stamp "active" on 8–13 Hz rest.
+    fn plate_captions(&self) -> String {
+        if self
+            .railed
+            .iter()
+            .zip(self.map.iter())
+            .any(|(dead, name)| *dead && !name.is_empty())
+        {
+            return "Contact lost".into();
+        }
+        let mut lines = Vec::new();
+        if self.show_hemispheres {
+            if let Some(c) = self.hemispheres_caption() {
+                lines.push(c);
+            }
+        }
+        if self.show_waves {
+            if let Some(c) = self.waves_caption() {
+                lines.push(c.to_string());
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// Louder rest from O1/O2 alpha only (not "active").
+    fn hemispheres_caption(&self) -> Option<String> {
+        let band = Rhythm::Alpha.psd_index();
+        let o1 = if self.railed[IDX_O1] || self.map[IDX_O1].is_empty() {
+            0.0
+        } else {
+            self.channel_psd[IDX_O1][band]
+        };
+        let o2 = if self.railed[IDX_O2] || self.map[IDX_O2].is_empty() {
+            0.0
+        } else {
+            self.channel_psd[IDX_O2][band]
+        };
+        match laterality_index(o1, o2) {
+            None => None,
+            Some(li) if li.abs() < LI_THRESHOLD => Some("Rest is balanced".into()),
+            Some(li) if li > 0.0 => Some("Left rest is louder".into()),
+            Some(_) => Some("Right rest is louder".into()),
+        }
+    }
+
+    fn hemi_tint(&self) -> HemiTint {
+        if !self.show_hemispheres {
+            return HemiTint::None;
+        }
+        let band = Rhythm::Alpha.psd_index();
+        let o1 = if self.railed[IDX_O1] || self.map[IDX_O1].is_empty() {
+            0.0
+        } else {
+            self.channel_psd[IDX_O1][band]
+        };
+        let o2 = if self.railed[IDX_O2] || self.map[IDX_O2].is_empty() {
+            0.0
+        } else {
+            self.channel_psd[IDX_O2][band]
+        };
+        match laterality_index(o1, o2) {
+            Some(li) if li > LI_THRESHOLD => HemiTint::Left,
+            Some(li) if li < -LI_THRESHOLD => HemiTint::Right,
+            _ => HemiTint::None,
+        }
+    }
+
+    /// slow=1–8 Hz (δ+θ), fast=13–30 Hz (β); skip 8–13 and 30–40.
+    /// Mute Fp1/Fp2 and railed. mixed if |S−F|/(S+F)<0.15.
+    fn waves_caption(&self) -> Option<&'static str> {
+        let (slow, fast) = self.slow_fast_power();
+        let s = slow + fast;
+        if s <= POWER_FLOOR {
+            return None;
+        }
+        let r = (slow - fast) / s;
+        if r.abs() < LI_THRESHOLD {
+            Some("mixed")
+        } else if r > 0.0 {
+            Some("slow")
+        } else {
+            Some("fast")
+        }
+    }
+
+    fn wave_tint(&self) -> WaveTint {
+        if !self.show_waves {
+            return WaveTint::None;
+        }
+        match self.waves_caption() {
+            Some("slow") => WaveTint::Cool,
+            Some("fast") => WaveTint::Warm,
+            _ => WaveTint::None,
+        }
+    }
+
+    fn slow_fast_power(&self) -> (f64, f64) {
+        let mut slow = 0.0_f64;
+        let mut fast = 0.0_f64;
+        for i in 0..8 {
+            if self.map[i].is_empty() || self.railed[i] {
+                continue;
+            }
+            if i == IDX_FP1 || i == IDX_FP2 {
+                continue;
+            }
+            // δ + θ (1–8 Hz); skip α 8–13
+            slow += self.channel_psd[i][0] + self.channel_psd[i][1];
+            // β 13–30; skip γ 30–40+
+            fast += self.channel_psd[i][3];
+        }
+        (slow, fast)
     }
 
     pub fn channel_map(&self) -> [String; 8] {
@@ -339,8 +455,7 @@ pub fn paint_pair_head(
         } else {
             let t = fill_at[ch];
             let fill = if t > 0.02 {
-                let a = (40.0 + t * 200.0) as u8;
-                egui::Color32::from_rgba_unmultiplied(0xb0, 0x8d, 0x57, a)
+                theme::activity_fill_color(ch, t)
             } else {
                 theme::HAIRLINE
             };
@@ -410,11 +525,25 @@ impl Widget for WHeadPlot {
         _source: &dyn DataSource,
         _ctx: &mut crate::widget_context::WidgetContext,
     ) {
-        // Own overlay caption only (empty or Contact lost). Never a pair/band line
-        // injected via set_frame — that is how P3/P4 alpha reappeared on this pane.
+        // Waves + Hemispheres tags on Head Plot only (no extra panes).
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let fonts = theme::font_sizes();
+            ui.toggle_value(
+                &mut self.show_waves,
+                egui::RichText::new("Waves").size(fonts.caption),
+            );
+            ui.toggle_value(
+                &mut self.show_hemispheres,
+                egui::RichText::new("Hemispheres").size(fonts.caption),
+            );
+        });
+        // Own overlay captions only (laterality + slow/fast as separate lines).
+        // Never stamp "active" on 8–13 Hz rest.
         let plate_caption = self.overlay_frame().caption;
         if !plate_caption.is_empty() {
-            ui.label(&plate_caption);
+            let fonts = theme::font_sizes();
+            ui.label(egui::RichText::new(&plate_caption).size(fonts.caption));
         }
         // Hole assignment UI (appears when user clicks a hole on the 3D head)
         if let Some(hole) = self.assign_hole.clone() {
@@ -463,17 +592,24 @@ impl Widget for WHeadPlot {
             }
         }
 
+        let fonts = theme::font_sizes();
         painter.rect_filled(rect, 0.0, theme::CANVAS);
         if mark_iv::mesh().faces.is_empty() {
             painter.text(
                 egui::pos2(rect.center().x, rect.center().y),
                 egui::Align2::CENTER_CENTER,
                 "Mark IV mesh failed to load — 2D outline fallback",
-                egui::FontId::proportional(13.0),
+                egui::FontId::proportional(fonts.body),
                 theme::STOP,
             );
         } else {
-            paint_head(&painter, rect, self.orbit);
+            paint_head_tinted(
+                &painter,
+                rect,
+                self.orbit,
+                self.hemi_tint(),
+                self.wave_tint(),
+            );
             paint_frame(&painter, rect, self.orbit);
         }
 
@@ -512,8 +648,8 @@ impl Widget for WHeadPlot {
                 // Unoccupied: mesh opening is empty. No badge.
                 continue;
             }
-            // Insert rim is ~0.12 mesh units; 6px is a spec in a 90px socket.
-            // Disc sits inside the opening. Centers stay the 35 named inserts.
+            // Insert rim is ~0.12 mesh units; disc sits in the hole center
+            // (centers are rim-snapped INSERT sockets).
             let persp = 3.4 / (3.4 - pr.depth).max(0.35);
             let disc_r = (0.12 * scale * persp * 0.48).max(SITE_R);
             if chosen {
@@ -533,14 +669,13 @@ impl Widget for WHeadPlot {
                         pr.pos + egui::vec2(0.0, disc_r + 2.0),
                         egui::Align2::CENTER_TOP,
                         "Contact lost",
-                        egui::FontId::proportional(10.0),
+                        egui::FontId::proportional(fonts.small),
                         theme::STOP,
                     );
                 } else {
                     let t = fill_at[ch];
                     let fill = if t > 0.02 {
-                        let a = (120.0 + t * 135.0) as u8;
-                        egui::Color32::from_rgba_unmultiplied(0xb0, 0x8d, 0x57, a)
+                        theme::activity_fill_color(ch, t)
                     } else {
                         theme::HAIRLINE
                     };
@@ -550,7 +685,7 @@ impl Widget for WHeadPlot {
                         pr.pos,
                         egui::Align2::CENTER_CENTER,
                         name,
-                        egui::FontId::proportional(11.0),
+                        egui::FontId::proportional(fonts.hole_label),
                         theme::TEXT,
                     );
                 }
@@ -559,7 +694,7 @@ impl Widget for WHeadPlot {
                     pr.pos,
                     egui::Align2::CENTER_CENTER,
                     name,
-                    egui::FontId::proportional(11.0),
+                    egui::FontId::proportional(fonts.hole_label),
                     theme::TEXT,
                 );
             }
@@ -578,6 +713,7 @@ impl Widget for WHeadPlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::laterality::{IDX_FP1, IDX_FP2, IDX_O1, IDX_O2};
     use crate::widgets::mark_iv;
 
     #[test]
@@ -763,6 +899,12 @@ mod tests {
         }
         assert!(!frame.caption.contains('α'), "{}", frame.caption);
         assert!(!frame.caption.contains("P3/P4"), "{}", frame.caption);
+        assert!(
+            frame.caption.contains("rest is louder") || frame.caption.contains("Rest is balanced"),
+            "{}",
+            frame.caption
+        );
+        assert!(!frame.caption.to_lowercase().contains("active"), "{}", frame.caption);
         w.railed[2] = true;
         let frame = w.overlay_frame();
         assert_eq!(frame.sites.iter().find(|s| s.idx == 2).unwrap().fill, 0.0);
@@ -779,8 +921,10 @@ mod tests {
         assert!(src.contains("paint_head"));
         assert!(src.contains("paint_frame"));
         assert!(src.contains("Unassign"));
-        assert!(src.contains("Save as"));
-        assert!(src.contains("head_headset"));
+        assert!(src.contains("\"Waves\""));
+        assert!(src.contains("\"Hemispheres\""));
+        assert!(src.contains("activity_fill_color"));
+        assert!(src.contains("paint_head_tinted"));
         assert!(src.contains(concat!("orbit.", "drag")));
         assert!(src.contains(concat!("click_and_", "drag")));
         assert!(!src.contains(concat!("EMPTY_", "R")));
@@ -797,5 +941,104 @@ mod tests {
         assert!(!src.contains(concat!("ELLIPSE_", "RX")));
         assert!(!src.contains(concat!("SITE_", "XY")));
         assert!(!src.contains(concat!("version ", "IV")));
+        assert!(
+            !src.contains("\"active left\"") && !src.contains("\"active right\""),
+            "must not stamp active on 8-13 Hz rest"
+        );
+    }
+
+    #[test]
+    fn activity_fill_color_is_not_gold_alpha_only() {
+        let lo = theme::activity_fill_color(2, 0.1);
+        let mid = theme::activity_fill_color(2, 0.5);
+        let hi = theme::activity_fill_color(2, 1.0);
+        assert_ne!(lo, mid);
+        assert_ne!(mid, hi);
+        assert_ne!(lo, theme::ACCENT);
+        let src = include_str!("head_plot.rs");
+        assert!(src.contains("activity_fill_color"));
+        assert!(!src.contains(concat!("0xb0, 0x8d, 0x57", ", a")));
+    }
+
+    #[test]
+    fn waves_and_hemispheres_captions_are_separate_words() {
+        let mut w = WHeadPlot::new();
+        let a = Rhythm::Alpha.psd_index();
+        let d = Rhythm::Delta.psd_index();
+        let b = Rhythm::Beta.psd_index();
+        w.channel_psd[IDX_O1][a] = 2.0;
+        w.channel_psd[IDX_O2][a] = 0.4;
+        for i in 2..8 {
+            w.channel_psd[i][d] = 1.5;
+            w.channel_psd[i][b] = 0.2;
+        }
+        let c = w.overlay_frame().caption;
+        assert!(c.contains("Left rest is louder"), "{c}");
+        assert!(c.contains("slow"), "{c}");
+        assert!(!c.to_lowercase().contains("active"), "{c}");
+        assert!(
+            !c.contains("Left rest is louder slow") && c.contains('\n'),
+            "must not glue laterality and slow/fast: {c}"
+        );
+        w.show_hemispheres = false;
+        let c = w.overlay_frame().caption;
+        assert_eq!(c, "slow");
+        w.show_waves = false;
+        assert!(w.overlay_frame().caption.is_empty());
+    }
+
+    #[test]
+    fn waves_mutes_frontals_skips_alpha_and_uses_deadband() {
+        let mut w = WHeadPlot::new();
+        w.show_hemispheres = false;
+        w.show_waves = true;
+        // Alpha on O1/O2 is rest — not a waves word, and not "active".
+        w.channel_psd[IDX_O1][Rhythm::Alpha.psd_index()] = 8.0;
+        w.channel_psd[IDX_O2][Rhythm::Alpha.psd_index()] = 1.0;
+        assert!(
+            w.overlay_frame().caption.is_empty(),
+            "8–13 Hz rest is not a waves caption: {}",
+            w.overlay_frame().caption
+        );
+        // Fp1/Fp2 slow power is muted.
+        w.channel_psd[IDX_FP1][Rhythm::Delta.psd_index()] = 20.0;
+        w.channel_psd[IDX_FP2][Rhythm::Theta.psd_index()] = 20.0;
+        w.channel_psd[IDX_O1][Rhythm::Beta.psd_index()] = 3.0;
+        assert_eq!(w.overlay_frame().caption, "fast");
+        // |S−F|/(S+F) < 0.15 → mixed. Mute Fp; use C3..O2.
+        for i in 0..8 {
+            w.channel_psd[i] = [0.0; 5];
+        }
+        for i in 2..8 {
+            w.channel_psd[i][Rhythm::Delta.psd_index()] = 1.0;
+            w.channel_psd[i][Rhythm::Beta.psd_index()] = 1.0;
+        }
+        assert_eq!(w.overlay_frame().caption, "mixed");
+        w.railed[2] = true;
+        w.railed[3] = true;
+        w.railed[4] = true;
+        w.railed[5] = true;
+        w.railed[6] = true;
+        w.railed[7] = true;
+        assert_eq!(w.overlay_frame().caption, "Contact lost");
+    }
+
+    #[test]
+    fn half_tint_is_laterality_only() {
+        let mut w = WHeadPlot::new();
+        w.channel_psd[IDX_O1][Rhythm::Alpha.psd_index()] = 4.0;
+        w.channel_psd[IDX_O2][Rhythm::Alpha.psd_index()] = 0.5;
+        for i in 2..8 {
+            w.channel_psd[i][Rhythm::Delta.psd_index()] = 2.0;
+        }
+        assert_eq!(w.hemi_tint(), HemiTint::Left);
+        assert_eq!(w.wave_tint(), WaveTint::Cool);
+        w.show_hemispheres = false;
+        assert_eq!(w.hemi_tint(), HemiTint::None);
+        assert_eq!(w.wave_tint(), WaveTint::Cool);
+        w.show_hemispheres = true;
+        w.show_waves = false;
+        assert_eq!(w.hemi_tint(), HemiTint::Left);
+        assert_eq!(w.wave_tint(), WaveTint::None);
     }
 }

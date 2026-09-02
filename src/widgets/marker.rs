@@ -89,8 +89,9 @@ impl Widget for WMarker {
 
         if !self.recent_markers.is_empty() {
             ui.label("Recent markers:");
+            let marks = crate::theme::font_sizes().marks;
             for (ts, text) in self.recent_markers.iter().rev() {
-                ui.small(format!("{:.1}s: {}", ts, text));
+                ui.label(egui::RichText::new(format!("{:.1}s: {}", ts, text)).size(marks));
             }
         } else {
             ui.small("No markers sent yet. Use this widget to mark events during recording.");
@@ -101,10 +102,14 @@ impl Widget for WMarker {
             ui.separator();
             ui.small("Recording / playback marks (sample index):");
             for m in file_marks.iter().rev().take(8) {
-                ui.small(format!(
-                    "#{}  {:.3}s  {}",
-                    m.sample_index, m.board_timestamp, m.label
-                ));
+                let marks = crate::theme::font_sizes().marks;
+                ui.label(
+                    egui::RichText::new(format!(
+                        "#{}  {:.3}s  {}",
+                        m.sample_index, m.board_timestamp, m.label
+                    ))
+                    .size(marks),
+                );
             }
         }
     }
@@ -115,5 +120,15 @@ impl Widget for WMarker {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn marker_log_uses_marks_font_size() {
+        let src = include_str!("marker.rs");
+        assert!(src.contains("font_sizes().marks"));
+        assert!(src.contains(".size(marks)"));
     }
 }

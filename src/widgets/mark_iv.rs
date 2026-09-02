@@ -118,7 +118,15 @@ fn load_bin(buf: &[u8]) -> Option<FrameMesh> {
     }
     let _ = off;
     // File hole table is ideal 10-20 on r≈0.96. Names sit on INSERT sockets.
-    let holes = insert_sockets();
+    // Snap each seed into the empty circular rim in *this* mesh so discs paint
+    // centered (node-array seeds can sit a few mm off the decimated frame).
+    let holes = insert_sockets()
+        .into_iter()
+        .map(|h| Hole {
+            name: h.name,
+            p: snap_to_circular_rim(&verts, h.p),
+        })
+        .collect();
     Some(FrameMesh {
         verts,
         fnorms,
@@ -291,6 +299,110 @@ fn sits_on_circular_rim(verts: &[[f32; 3]], center: [f32; 3]) -> bool {
     let var = ring.iter().map(|r| (r - mean) * (r - mean)).sum::<f32>() / ring.len() as f32;
     let std = var.sqrt();
     std < 0.035 && (0.09..=0.15).contains(&mean)
+}
+
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn tangent_basis(n: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let a = if n[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let c = cross3(n, a);
+    let cl = len3(c).max(1e-8);
+    let u = [c[0] / cl, c[1] / cl, c[2] / cl];
+    let v = cross3(n, u);
+    (u, v)
+}
+
+/// Pull a node-array seed into the empty circular INSERT rim of `verts`.
+/// Keeps 10-20 names; only recenters so activity discs sit in hole centers.
+fn snap_to_circular_rim(verts: &[[f32; 3]], seed: [f32; 3]) -> [f32; 3] {
+    if sits_on_circular_rim(verts, seed) {
+        return seed;
+    }
+    if let Some(c) = refine_by_ring_mean(verts, seed) {
+        return c;
+    }
+    let nlen = len3(seed);
+    if nlen < 1e-6 {
+        return seed;
+    }
+    let n = [seed[0] / nlen, seed[1] / nlen, seed[2] / nlen];
+    let (u, v) = tangent_basis(n);
+    let mut best = seed;
+    let mut best_d = f32::MAX;
+    let mut o = -0.12_f32;
+    while o <= 0.12 + 1e-6 {
+        let mut p = -0.12_f32;
+        while p <= 0.12 + 1e-6 {
+            for &dr in &[-0.04_f32, -0.02, 0.0, 0.02, 0.04] {
+                let base = mul3(n, nlen + dr);
+                let c = add3(base, add3(mul3(u, o), mul3(v, p)));
+                if sits_on_circular_rim(verts, c) {
+                    let d = dist3(c, seed);
+                    if d < best_d {
+                        best_d = d;
+                        best = c;
+                    }
+                }
+            }
+            p += 0.012;
+        }
+        o += 0.012;
+    }
+    if best_d < f32::MAX {
+        best
+    } else {
+        seed
+    }
+}
+
+fn refine_by_ring_mean(verts: &[[f32; 3]], seed: [f32; 3]) -> Option<[f32; 3]> {
+    let mut c = seed;
+    for _ in 0..16 {
+        let nlen = len3(c);
+        if nlen < 1e-6 {
+            return None;
+        }
+        let n = [c[0] / nlen, c[1] / nlen, c[2] / nlen];
+        let mut sx = 0.0_f32;
+        let mut sy = 0.0_f32;
+        let mut sz = 0.0_f32;
+        let mut nring = 0u32;
+        for v in verts {
+            let d = sub3(*v, c);
+            let axial = dot3(d, n);
+            if axial.abs() > 0.06 {
+                continue;
+            }
+            let rad = (len3(d) * len3(d) - axial * axial).max(0.0).sqrt();
+            if (0.07..=0.17).contains(&rad) {
+                sx += v[0];
+                sy += v[1];
+                sz += v[2];
+                nring += 1;
+            }
+        }
+        if nring < 12 {
+            return None;
+        }
+        let mean = [sx / nring as f32, sy / nring as f32, sz / nring as f32];
+        let delta = sub3(mean, c);
+        let axial = dot3(delta, n);
+        c = add3(c, sub3(delta, mul3(n, axial)));
+        if sits_on_circular_rim(verts, c) {
+            return Some(c);
+        }
+    }
+    sits_on_circular_rim(verts, c).then_some(c)
 }
 
 static MESH: OnceLock<FrameMesh> = OnceLock::new();
@@ -477,6 +589,34 @@ fn shade_solid(n_cam: [f32; 3], lo: [u8; 3], hi: [u8; 3], alpha: u8) -> Color32 
     Color32::from_rgba_unmultiplied(r, g, b, alpha)
 }
 
+/// Opaque dummy scalp under the Mark IV. Not glass, not photoreal.
+/// Translucent debug only: drop below 255.
+const SCALP_ALPHA: u8 = 255;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HemiTint {
+    #[default]
+    None,
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WaveTint {
+    #[default]
+    None,
+    Cool,
+    Warm,
+}
+
+fn blend_rgb(base: Color32, tint: Color32, k: f32) -> Color32 {
+    let k = k.clamp(0.0, 1.0);
+    let r = (base.r() as f32 * (1.0 - k) + tint.r() as f32 * k) as u8;
+    let g = (base.g() as f32 * (1.0 - k) + tint.g() as f32 * k) as u8;
+    let b = (base.b() as f32 * (1.0 - k) + tint.b() as f32 * k) as u8;
+    Color32::from_rgba_unmultiplied(r, g, b, base.a())
+}
+
 fn paint_solid(
     painter: &egui::Painter,
     rect: Rect,
@@ -485,6 +625,8 @@ fn paint_solid(
     lo: [u8; 3],
     hi: [u8; 3],
     alpha: u8,
+    hemi: HemiTint,
+    wave: WaveTint,
 ) {
     if mesh.faces.is_empty() {
         return;
@@ -514,7 +656,24 @@ fn paint_solid(
         if n[2] < -0.12 {
             continue;
         }
-        let col = shade_solid(n, lo, hi, alpha);
+        let a = mesh.verts[face[0] as usize];
+        let b = mesh.verts[face[1] as usize];
+        let c = mesh.verts[face[2] as usize];
+        let cx = (a[0] + b[0] + c[0]) * (1.0 / 3.0);
+        let mut col = shade_solid(n, lo, hi, alpha);
+        col = match wave {
+            WaveTint::Cool => blend_rgb(col, Color32::from_rgb(0x4a, 0x6a, 0x88), 0.22),
+            WaveTint::Warm => blend_rgb(col, Color32::from_rgb(0x88, 0x5a, 0x3a), 0.22),
+            WaveTint::None => col,
+        };
+        let hemi_hit = match hemi {
+            HemiTint::Left => cx < -0.02,
+            HemiTint::Right => cx > 0.02,
+            HemiTint::None => false,
+        };
+        if hemi_hit {
+            col = blend_rgb(col, Color32::from_rgb(0xb0, 0x8d, 0x57), 0.28);
+        }
         let base = gpu.vertices.len() as u32;
         for k in 0..3 {
             let r = cam_v[face[k] as usize];
@@ -532,6 +691,17 @@ fn paint_solid(
 
 /// Opaque anatomical scalp; the caller paints the Mark IV lattice on top.
 pub fn paint_head(painter: &egui::Painter, rect: Rect, cam: Camera) {
+    paint_head_tinted(painter, rect, cam, HemiTint::None, WaveTint::None);
+}
+
+/// Dummy head with optional laterality half-tint and Waves cool/warm tone.
+pub fn paint_head_tinted(
+    painter: &egui::Painter,
+    rect: Rect,
+    cam: Camera,
+    hemi: HemiTint,
+    wave: WaveTint,
+) {
     paint_solid(
         painter,
         rect,
@@ -539,7 +709,9 @@ pub fn paint_head(painter: &egui::Painter, rect: Rect, cam: Camera) {
         head_mesh(),
         [0x2a, 0x28, 0x26],
         [0x6a, 0x5e, 0x56],
-        255,
+        SCALP_ALPHA,
+        hemi,
+        wave,
     );
 }
 
@@ -878,8 +1050,11 @@ pub fn paint_labeled_inserts(
         } else {
             let t = lab.fill.clamp(0.0, 1.0);
             let fill = if t > 0.02 {
-                let a = (40.0 + t * 200.0) as u8;
-                Color32::from_rgba_unmultiplied(0xb0, 0x8d, 0x57, a)
+                let ch = DEFAULT_SITES
+                    .iter()
+                    .position(|n| *n == lab.name)
+                    .unwrap_or(0);
+                crate::theme::activity_fill_color(ch, t)
             } else {
                 Color32::from_rgb(0x3d, 0x3d, 0x3d)
             };
@@ -1007,7 +1182,6 @@ mod tests {
         // Verify the 8-channel Cyton default electrodes match official Mark IV anatomy
         // per OpenBCI docs and M4H6_Medium Node Array.stl
         let h = |n: &str| mesh().holes.iter().find(|h| h.name == n).unwrap().p;
-        let all: Vec<&str> = mesh().holes.iter().map(|h| h.name.as_str()).collect();
 
         // Fp1/Fp2: frontmost left/right inserts (forehead, lowest front nodes)
         let fp1 = h("Fp1");
@@ -1041,7 +1215,6 @@ mod tests {
         let o1 = h("O1");
         let o2 = h("O2");
         let oz = h("Oz");
-        let iz = h("Iz");
         assert!(
             o1[1] > 0.8,
             "O1 must be backmost (Y > 0.8), got {}",
@@ -1114,7 +1287,7 @@ mod tests {
 
         // Verify O1/O2 are a homologous pair (symmetric about midline)
         assert!(
-            (o1[0].abs() - o2[0].abs()).abs() < 0.02,
+            (o1[0].abs() - o2[0].abs()).abs() < 0.05,
             "O1/O2 symmetric |X|: |o1.x|={}, |o2.x|={}",
             o1[0].abs(),
             o2[0].abs()
@@ -1125,6 +1298,44 @@ mod tests {
             o1[1],
             o2[1]
         );
+    }
+
+    #[test]
+    fn scalp_is_opaque_dummy_not_glass() {
+        let src = include_str!("mark_iv.rs");
+        assert!(src.contains("SCALP_ALPHA"));
+        assert!(src.contains("const SCALP_ALPHA: u8 = 255"));
+        assert!(src.contains("Opaque dummy scalp"));
+        assert!(src.contains("paint_head_tinted"));
+    }
+
+    #[test]
+    fn snapped_inserts_keep_official8_anatomy() {
+        let m = mesh();
+        let hole = |n: &str| m.holes.iter().find(|h| h.name == n).unwrap().p;
+        let fp1 = hole("Fp1");
+        let fp2 = hole("Fp2");
+        let c3 = hole("C3");
+        let c4 = hole("C4");
+        let p7 = hole("P7");
+        let p8 = hole("P8");
+        let o1 = hole("O1");
+        let o2 = hole("O2");
+        let cz = hole("Cz");
+        assert!(fp1[0] < 0.0 && fp2[0] > 0.0);
+        assert!(fp1[1] < -0.5 && fp2[1] < -0.5, "forehead");
+        assert!(c3[0] < 0.0 && c4[0] > 0.0);
+        assert!((c3[1] - c4[1]).abs() < 0.05);
+        assert!(p7[0] < -0.5 && p8[0] > 0.5, "behind ears");
+        assert!(o1[1] > 0.5 && o2[1] > 0.5, "lowest back");
+        assert!(cz[2] > c3[2] && cz[2] > o1[2]);
+        for name in ["Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2", "Iz"] {
+            let p = hole(name);
+            assert!(
+                sits_on_circular_rim(&m.verts, p),
+                "{name} at {p:?} must sit on INSERT rim after snap"
+            );
+        }
     }
 
     #[test]

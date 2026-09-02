@@ -40,6 +40,108 @@ pub fn channel_color(index: usize) -> Color32 {
     CHANNEL_COLORS[index % CHANNEL_COLORS.len()]
 }
 
+/// Occupied-insert activity fill: dark → channel hue → hot, opaque.
+pub fn activity_fill_color(channel: usize, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let dark = Color32::from_rgb(0x2a, 0x2a, 0x2a);
+    let mid = channel_color(channel);
+    let hot = Color32::from_rgb(0xf2, 0xd4, 0x8a);
+    if t <= 0.5 {
+        lerp_rgb(dark, mid, t * 2.0)
+    } else {
+        lerp_rgb(mid, hot, (t - 0.5) * 2.0)
+    }
+}
+
+fn lerp_rgb(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    Color32::from_rgb(
+        (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t) as u8,
+        (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t) as u8,
+        (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t) as u8,
+    )
+}
+
+/// UI type sizes (Settings → Fonts). Bigger defaults so Experiments marks read.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct FontSizes {
+    pub small: f32,
+    pub body: f32,
+    pub button: f32,
+    pub heading: f32,
+    pub mono: f32,
+    pub marks: f32,
+    pub hole_label: f32,
+    pub caption: f32,
+}
+
+impl Default for FontSizes {
+    fn default() -> Self {
+        Self {
+            small: 13.0,
+            body: 16.0,
+            button: 16.0,
+            heading: 20.0,
+            mono: 14.0,
+            marks: 15.0,
+            hole_label: 13.0,
+            caption: 16.0,
+        }
+    }
+}
+
+impl FontSizes {
+    pub fn apply_egui(&self, ctx: &egui::Context) {
+        use egui::{FontFamily, FontId, TextStyle};
+        let mut style = (*ctx.style()).clone();
+        style.text_styles.insert(
+            TextStyle::Small,
+            FontId::new(self.small, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Body,
+            FontId::new(self.body, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Button,
+            FontId::new(self.button, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Heading,
+            FontId::new(self.heading, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Monospace,
+            FontId::new(self.mono, FontFamily::Monospace),
+        );
+        ctx.set_style(style);
+    }
+}
+
+static FONT_SIZES: std::sync::Mutex<FontSizes> = std::sync::Mutex::new(FontSizes {
+    small: 13.0,
+    body: 16.0,
+    button: 16.0,
+    heading: 20.0,
+    mono: 14.0,
+    marks: 15.0,
+    hole_label: 13.0,
+    caption: 16.0,
+});
+
+pub fn font_sizes() -> FontSizes {
+    FONT_SIZES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+pub fn set_font_sizes(sizes: FontSizes) {
+    if let Ok(mut g) = FONT_SIZES.lock() {
+        *g = sizes;
+    }
+}
+
 pub fn hairline() -> Stroke {
     Stroke::new(1.0_f32, HAIRLINE)
 }
@@ -86,6 +188,33 @@ mod tests {
         assert_eq!(channel_color(0), CHANNEL_COLORS[0]);
         assert_eq!(channel_color(8), CHANNEL_COLORS[0]);
         assert_eq!(channel_color(15), CHANNEL_COLORS[7]);
+    }
+
+    #[test]
+    fn activity_fill_changes_color_with_activity_not_gold_alpha_only() {
+        let quiet = activity_fill_color(0, 0.1);
+        let mid = activity_fill_color(0, 0.5);
+        let hot = activity_fill_color(0, 1.0);
+        assert_ne!(quiet, mid);
+        assert_ne!(mid, hot);
+        assert_eq!(mid, CHANNEL_COLORS[0]);
+        assert_ne!(activity_fill_color(0, 0.5), activity_fill_color(2, 0.5));
+        assert_ne!(hot, Color32::from_rgba_unmultiplied(0xb0, 0x8d, 0x57, 200));
+        assert_eq!(hot.a(), 255);
+        assert_eq!(mid.a(), 255);
+    }
+
+    #[test]
+    fn font_size_defaults_are_big_enough_for_marks_log() {
+        let f = FontSizes::default();
+        assert_eq!(f.small, 13.0);
+        assert_eq!(f.body, 16.0);
+        assert_eq!(f.button, 16.0);
+        assert_eq!(f.heading, 20.0);
+        assert_eq!(f.mono, 14.0);
+        assert_eq!(f.marks, 15.0);
+        assert_eq!(f.hole_label, 13.0);
+        assert_eq!(f.caption, 16.0);
     }
 
     #[test]

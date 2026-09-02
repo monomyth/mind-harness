@@ -18,7 +18,7 @@ pub const IDX_O1: usize = 6;
 pub const IDX_O2: usize = 7;
 
 pub const LI_THRESHOLD: f64 = 0.15;
-const POWER_FLOOR: f64 = 1e-8;
+pub const POWER_FLOOR: f64 = 1e-8;
 pub const WINDOW_SEC: f64 = 2.0;
 pub const MUSCLE_LO_HZ: f64 = 30.0;
 pub const MUSCLE_HI_CAP_HZ: f64 = 80.0;
@@ -242,16 +242,14 @@ pub fn channel_band_psd(channels: &[Vec<f64>], sr: f64, rhythm: Rhythm) -> [f64;
     out
 }
 
-/// Disc fill 0..1 from that channel's power in the overlay band.
-/// Alive channels floor at 0.7 so a quiet insert still paints a peach disc
-/// (same floor the pair used to get); the loudest is 1.0. Below [`POWER_FLOOR`]
-/// stays 0 (hairline / empty of activity).
+/// Disc fill 0..1 from that channel's power in the overlay band vs the loudest
+/// live channel. Below [`POWER_FLOOR`] stays 0 (no activity).
 pub fn occupied_band_fill(psd: &[f64; 8]) -> [f32; 8] {
     let maxp = psd.iter().copied().fold(1e-12_f64, f64::max);
     let mut out = [0.0_f32; 8];
     for i in 0..8 {
         if psd[i] > POWER_FLOOR {
-            out[i] = (0.7 + 0.3 * (psd[i] / maxp)).clamp(0.0, 1.0) as f32;
+            out[i] = (psd[i] / maxp).clamp(0.0, 1.0) as f32;
         }
     }
     out
