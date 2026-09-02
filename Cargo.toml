@@ -87,8 +87,8 @@ path = "src/main.rs"
 [package.metadata.bundle]
 name = "Mind Harness"
 identifier = "com.openbci.gui"
-# Phase 8 foundations alignment: icon under resources/ (same dir as embedded fonts). Place sketch.icns (from Java OpenBCI_GUI/sketch.icns) as resources/icon.icns.
-# `cargo bundle --release` will succeed once a real .icns exists (expected for packaging foundations; no .icns shipped in this phase).
+# Product icon (Grok Imagine Mark IV head) — not the Java sketch.icns / eframe e-icon.
+# Window icon: resources/mind-harness-icon.rgba via ViewportBuilder::with_icon in main.rs.
 icon = ["resources/icon.icns"]
 version = "2.0.0"
 resources = ["resources/"]

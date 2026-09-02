@@ -517,6 +517,7 @@ impl OpenBciGuiApp {
     }
 
     fn drain_head_montage(&mut self) {
+        // Always snapshot the live Head Plot map (even when dirty was cleared).
         let mut action = None;
         let mut plots: Vec<([String; 8], bool)> = Vec::new();
         for w in self
