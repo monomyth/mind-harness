@@ -124,7 +124,7 @@ fn load_bin(buf: &[u8]) -> Option<FrameMesh> {
         .into_iter()
         .map(|h| Hole {
             name: h.name,
-            p: snap_to_circular_rim(&verts, h.p),
+            p: center_in_insert_opening(&verts, h.p),
         })
         .collect();
     Some(FrameMesh {
@@ -270,6 +270,8 @@ fn dist_tri_seg2(ca: Pos2, cb: Pos2, cc: Pos2, a: Pos2, b: Pos2) -> f32 {
 
 /// Empty interior + circular ring of mesh verts in the local tangent plane.
 /// True for INSERT sockets; false for a lattice rib or the ideal r=0.96 sphere.
+/// Peripheral nodes (Fp/O/P7/P8) are sparse after frame.bin decimation — require
+/// fewer rim samples than crown sites or snap jumps to a denser wrong opening.
 fn sits_on_circular_rim(verts: &[[f32; 3]], center: [f32; 3]) -> bool {
     let nlen = len3(center);
     if nlen < 1e-6 {
@@ -281,24 +283,24 @@ fn sits_on_circular_rim(verts: &[[f32; 3]], center: [f32; 3]) -> bool {
     for v in verts {
         let d = sub3(*v, center);
         let axial = dot3(d, n).abs();
-        if axial > 0.05 {
+        if axial > 0.06 {
             continue;
         }
         let rad = (len3(d) * len3(d) - axial * axial).max(0.0).sqrt();
         if rad < 0.025 {
             near += 1;
         }
-        if (0.08..=0.16).contains(&rad) {
+        if (0.07..=0.17).contains(&rad) {
             ring.push(rad);
         }
     }
-    if near > 2 || ring.len() < 20 {
+    if near > 2 || ring.len() < 8 {
         return false;
     }
     let mean = ring.iter().sum::<f32>() / ring.len() as f32;
     let var = ring.iter().map(|r| (r - mean) * (r - mean)).sum::<f32>() / ring.len() as f32;
     let std = var.sqrt();
-    std < 0.035 && (0.09..=0.15).contains(&mean)
+    std < 0.04 && (0.09..=0.15).contains(&mean)
 }
 
 fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -322,85 +324,246 @@ fn tangent_basis(n: [f32; 3]) -> ([f32; 3], [f32; 3]) {
     (u, v)
 }
 
-/// Pull a node-array seed into the empty circular INSERT rim of `verts`.
-/// Keeps 10-20 names; only recenters so activity discs sit in hole centers.
-fn snap_to_circular_rim(verts: &[[f32; 3]], seed: [f32; 3]) -> [f32; 3] {
-    if sits_on_circular_rim(verts, seed) {
-        return seed;
-    }
-    if let Some(c) = refine_by_ring_mean(verts, seed) {
-        return c;
-    }
+
+/// Move a node-array seed from the inner/bottom lip of an INSERT onto the
+/// visible opening center.
+///
+/// TODO(2026-09-02): Eugene passed this paint (much better, orbit stable) but
+/// discs are still not centered in the hex/circle. Come back and center
+/// in-opening only. Do not re-fit in screen space (that made discs jump
+/// while orbiting). The node solid centroid sits on the collar; a disc
+/// there reads as the bottom edge of the hex/circle. Stay in this opening
+/// (no nearby-vert search: that jumps onto struts).
+fn center_in_insert_opening(verts: &[[f32; 3]], seed: [f32; 3]) -> [f32; 3] {
     let nlen = len3(seed);
     if nlen < 1e-6 {
         return seed;
     }
     let n = [seed[0] / nlen, seed[1] / nlen, seed[2] / nlen];
     let (u, v) = tangent_basis(n);
+    let mut rim: Vec<[f32; 3]> = Vec::new();
+    for vert in verts {
+        let d = sub3(*vert, seed);
+        let axial = dot3(d, n);
+        if axial.abs() > 0.12 {
+            continue;
+        }
+        let rad = (len3(d) * len3(d) - axial * axial).max(0.0).sqrt();
+        if (0.06..=0.18).contains(&rad) {
+            rim.push(*vert);
+        }
+    }
+    if rim.len() < 8 {
+        return seed;
+    }
+    let mut ax = 0.0_f32;
+    for p in &rim {
+        ax += dot3(sub3(*p, seed), n);
+    }
+    ax /= rim.len() as f32;
+    let origin = add3(seed, mul3(n, ax));
+    const BINS: usize = 16;
+    let mut acc = [[0.0_f32; 2]; BINS];
+    let mut cnt = [0_u32; BINS];
+    for p in &rim {
+        let d = sub3(*p, origin);
+        let x = dot3(d, u);
+        let y = dot3(d, v);
+        let a = y.atan2(x);
+        let mut i = ((a + std::f32::consts::PI) / std::f32::consts::TAU * BINS as f32).floor() as i32;
+        if i < 0 {
+            i = 0;
+        }
+        if i >= BINS as i32 {
+            i = BINS as i32 - 1;
+        }
+        let i = i as usize;
+        acc[i][0] += x;
+        acc[i][1] += y;
+        cnt[i] += 1;
+    }
+    let mut sx = 0.0_f32;
+    let mut sy = 0.0_f32;
+    let mut nused = 0.0_f32;
+    for i in 0..BINS {
+        if cnt[i] == 0 {
+            continue;
+        }
+        sx += acc[i][0] / cnt[i] as f32;
+        sy += acc[i][1] / cnt[i] as f32;
+        nused += 1.0;
+    }
+    if nused < 6.0 {
+        return origin;
+    }
+    let centered = add3(origin, add3(mul3(u, sx / nused), mul3(v, sy / nused)));
+    if dist3(centered, seed) > 0.10 {
+        origin
+    } else {
+        centered
+    }
+}
+
+/// Pull a node-array seed into the empty circular INSERT rim of `verts`.
+/// Keeps 10-20 names; only recenters so activity discs sit in hole centers.
+/// Always refine — a seed that merely *passes* the rim test can still sit
+/// offset toward one side of a decimated ring (reads as "on a strut" on screen).
+fn consider_rim_candidate(
+    verts: &[[f32; 3]],
+    seed: [f32; 3],
+    c: [f32; 3],
+    best: &mut [f32; 3],
+    best_d: &mut f32,
+) {
+    const MAX_SEARCH_JUMP: f32 = 0.10;
+    let d = dist3(c, seed);
+    if d > MAX_SEARCH_JUMP {
+        return;
+    }
+    if sits_on_circular_rim(verts, c) && d < *best_d {
+        *best_d = d;
+        *best = c;
+    }
+}
+
+fn snap_to_circular_rim(verts: &[[f32; 3]], seed: [f32; 3]) -> [f32; 3] {
+    // Local refine of the official node-array seed first. Cap *search* jumps so
+    // decorative lattice openings cannot steal a far snap (O1 once drifted to
+    // |X|≈0.10 while O2 stayed ~0.24 — broke homologous occipital pair).
+    const MAX_REFINE_JUMP: f32 = 0.08;
+    if let Some(c) = refine_by_ring_mean(verts, seed) {
+        if dist3(c, seed) <= MAX_REFINE_JUMP {
+            return c;
+        }
+    }
     let mut best = seed;
     let mut best_d = f32::MAX;
-    let mut o = -0.12_f32;
-    while o <= 0.12 + 1e-6 {
-        let mut p = -0.12_f32;
-        while p <= 0.12 + 1e-6 {
-            for &dr in &[-0.04_f32, -0.02, 0.0, 0.02, 0.04] {
-                let base = mul3(n, nlen + dr);
-                let c = add3(base, add3(mul3(u, o), mul3(v, p)));
-                if sits_on_circular_rim(verts, c) {
-                    let d = dist3(c, seed);
-                    if d < best_d {
-                        best_d = d;
-                        best = c;
+    // Nearby mesh verts as alternate refine seeds (Iz / low occipital often need this).
+    let mut near: Vec<[f32; 3]> = verts
+        .iter()
+        .copied()
+        .filter(|v| dist3(*v, seed) < 0.16)
+        .collect();
+    near.sort_by(|a, b| dist3(*a, seed).total_cmp(&dist3(*b, seed)));
+    for v in near.iter().take(48) {
+        // Start refine from midpoints toward the seed so we stay in *this* opening.
+        let mid = mul3(add3(seed, *v), 0.5);
+        for start in [*v, mid, seed] {
+            if let Some(c) = refine_by_ring_mean(verts, start) {
+                consider_rim_candidate(verts, seed, c, &mut best, &mut best_d);
+            }
+        }
+        if best_d < 0.025 {
+            return best;
+        }
+    }
+    let nlen = len3(seed);
+    if nlen > 1e-6 {
+        let n = [seed[0] / nlen, seed[1] / nlen, seed[2] / nlen];
+        let (u, v) = tangent_basis(n);
+        let mut o = -0.10_f32;
+        while o <= 0.10 + 1e-6 {
+            let mut p = -0.10_f32;
+            while p <= 0.10 + 1e-6 {
+                for &dr in &[-0.04_f32, -0.02, 0.0, 0.02, 0.04] {
+                    let base = mul3(n, nlen + dr);
+                    let c = add3(base, add3(mul3(u, o), mul3(v, p)));
+                    consider_rim_candidate(verts, seed, c, &mut best, &mut best_d);
+                    if let Some(r) = refine_by_ring_mean(verts, c) {
+                        consider_rim_candidate(verts, seed, r, &mut best, &mut best_d);
                     }
                 }
+                if best_d < f32::MAX {
+                    return best;
+                }
+                p += 0.012;
             }
-            p += 0.012;
+            o += 0.012;
         }
-        o += 0.012;
     }
     if best_d < f32::MAX {
         best
     } else {
+        // Prefer the official node-array seed over a long jump onto a decorative opening.
         seed
     }
 }
 
 fn refine_by_ring_mean(verts: &[[f32; 3]], seed: [f32; 3]) -> Option<[f32; 3]> {
     let mut c = seed;
-    for _ in 0..16 {
+    for _ in 0..24 {
         let nlen = len3(c);
         if nlen < 1e-6 {
             return None;
         }
         let n = [c[0] / nlen, c[1] / nlen, c[2] / nlen];
-        let mut sx = 0.0_f32;
-        let mut sy = 0.0_f32;
-        let mut sz = 0.0_f32;
-        let mut nring = 0u32;
-        for v in verts {
-            let d = sub3(*v, c);
+        let (u, v) = tangent_basis(n);
+        // 2D circle fit in the tangent plane — mean of rim verts alone is biased
+        // when the decimated ring is denser on one side (disc reads on a strut).
+        let mut pts: Vec<(f32, f32)> = Vec::new();
+        for vert in verts {
+            let d = sub3(*vert, c);
             let axial = dot3(d, n);
-            if axial.abs() > 0.06 {
+            if axial.abs() > 0.08 {
                 continue;
             }
             let rad = (len3(d) * len3(d) - axial * axial).max(0.0).sqrt();
             if (0.07..=0.17).contains(&rad) {
-                sx += v[0];
-                sy += v[1];
-                sz += v[2];
-                nring += 1;
+                pts.push((dot3(d, u), dot3(d, v)));
             }
         }
-        if nring < 12 {
+        // Peripheral inserts may have only ~8–12 verts after decimation.
+        if pts.len() < 8 {
             return None;
         }
-        let mean = [sx / nring as f32, sy / nring as f32, sz / nring as f32];
-        let delta = sub3(mean, c);
-        let axial = dot3(delta, n);
-        c = add3(c, sub3(delta, mul3(n, axial)));
-        if sits_on_circular_rim(verts, c) {
-            return Some(c);
+        // Algebraic circle fit: x²+y² + D x + E y + F = 0 → center (-D/2, -E/2).
+        let mut sx = 0.0_f32;
+        let mut sy = 0.0_f32;
+        let mut sx2 = 0.0_f32;
+        let mut sy2 = 0.0_f32;
+        let mut sxy = 0.0_f32;
+        let mut sx3 = 0.0_f32;
+        let mut sy3 = 0.0_f32;
+        let mut sx2y = 0.0_f32;
+        let mut sxy2 = 0.0_f32;
+        for &(x, y) in &pts {
+            let x2 = x * x;
+            let y2 = y * y;
+            sx += x;
+            sy += y;
+            sx2 += x2;
+            sy2 += y2;
+            sxy += x * y;
+            sx3 += x2 * x;
+            sy3 += y2 * y;
+            sx2y += x2 * y;
+            sxy2 += x * y2;
         }
+        let npts = pts.len() as f32;
+        let c_mat = npts * sx2 - sx * sx;
+        let d_mat = npts * sxy - sx * sy;
+        let e_mat = npts * sy2 - sy * sy;
+        let g = 0.5 * (npts * (sx3 + sxy2) - sx * (sx2 + sy2));
+        let h = 0.5 * (npts * (sx2y + sy3) - sy * (sx2 + sy2));
+        let det = c_mat * e_mat - d_mat * d_mat;
+        let (cx, cy) = if det.abs() > 1e-8 {
+            (
+                (g * e_mat - h * d_mat) / det,
+                (c_mat * h - d_mat * g) / det,
+            )
+        } else {
+            (sx / npts, sy / npts)
+        };
+        let next = add3(c, add3(mul3(u, cx), mul3(v, cy)));
+        // Keep the center in the empty plane of the rim (no radial push).
+        let delta = sub3(next, c);
+        let axial = dot3(delta, n);
+        let stepped = add3(c, sub3(delta, mul3(n, axial)));
+        if dist3(stepped, c) < 1e-5 {
+            c = stepped;
+            break;
+        }
+        c = stepped;
     }
     sits_on_circular_rim(verts, c).then_some(c)
 }
@@ -645,7 +808,7 @@ fn paint_solid(
         let z = (a[2] + b[2] + c[2]) * (1.0 / 3.0);
         order.push((z, i));
     }
-    order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    order.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let mut gpu = Mesh::default();
     gpu.vertices.reserve(mesh.faces.len() * 3);
@@ -968,7 +1131,50 @@ pub struct ProjectedHole {
     pub index: usize,
     pub pos: Pos2,
     pub depth: f32,
+    /// Screen radius of the insert aperture (min half-extent of projected rim).
+    pub opening_r: f32,
 }
+
+/// Mean rim radius in the local tangent plane (empty circular INSERT).
+fn insert_rim_radius(hole_p: [f32; 3]) -> Option<f32> {
+    let nlen = len3(hole_p);
+    if nlen < 1e-6 {
+        return None;
+    }
+    let n = [hole_p[0] / nlen, hole_p[1] / nlen, hole_p[2] / nlen];
+    let mut sum = 0.0_f32;
+    let mut nring = 0u32;
+    for v in &mesh().verts {
+        let d = sub3(*v, hole_p);
+        let axial = dot3(d, n).abs();
+        if axial > 0.06 {
+            continue;
+        }
+        let rad = (len3(d) * len3(d) - axial * axial).max(0.0).sqrt();
+        if (0.07..=0.17).contains(&rad) {
+            sum += rad;
+            nring += 1;
+        }
+    }
+    (nring >= 8).then_some(sum / nring as f32)
+}
+
+/// Screen placement for a circular INSERT opening under the current camera.
+///
+/// Once `hole_p` is the true 3D rim center, its projection *is* the opening
+/// center under our mild perspective (dist≈3.4). Averaging projected mesh rim
+/// verts pulls paint toward the dense/near side of a decimated ring — discs
+/// read as sitting on struts (fail crop). Equal-angle samples still measure the
+/// foreshortened aperture size for disc radius.
+fn project_insert_opening(hole_p: [f32; 3], cam: Camera, center: Pos2, scale: f32) -> (Projected, f32) {
+    let depth_pr = project(hole_p, cam, center, scale);
+    let rim_r = insert_rim_radius(hole_p).unwrap_or(SITE_OPENING_FALLBACK);
+    let w = 3.4 / (3.4 - depth_pr.depth).max(0.35);
+    let opening_r = (rim_r * scale * w).max(1.0);
+    (depth_pr, opening_r)
+}
+
+const SITE_OPENING_FALLBACK: f32 = 0.12;
 
 pub fn project_holes(rect: Rect, cam: Camera) -> Vec<ProjectedHole> {
     let center = rect.center();
@@ -978,11 +1184,12 @@ pub fn project_holes(rect: Rect, cam: Camera) -> Vec<ProjectedHole> {
         .iter()
         .enumerate()
         .map(|(index, h)| {
-            let pr = project(h.p, cam, center, scale);
+            let (pr, opening_r) = project_insert_opening(h.p, cam, center, scale);
             ProjectedHole {
                 index,
                 pos: pr.pos,
                 depth: pr.depth,
+                opening_r,
             }
         })
         .collect()
@@ -1411,6 +1618,55 @@ mod tests {
     }
 
     #[test]
+    fn diagnose_official8_screen_vs_3d() {
+        for name in DEFAULT_SITES {
+            let h = mesh().holes.iter().find(|h| h.name == name).unwrap();
+            let seed = INSERT_HOLES.iter().find(|(n, _)| *n == name).unwrap().1;
+            eprintln!(
+                "{name}: snap_d={:.4} seed_rim={} snapped_rim={} p={:?}",
+                dist3(h.p, seed),
+                sits_on_circular_rim(&mesh().verts, seed),
+                sits_on_circular_rim(&mesh().verts, h.p),
+                h.p
+            );
+            assert!(
+                sits_on_circular_rim(&mesh().verts, h.p),
+                "{name} snapped off rim"
+            );
+            assert!(
+                dist3(h.p, seed) < 0.08,
+                "{name} snap jumped too far from official seed: {}",
+                dist3(h.p, seed)
+            );
+        }
+    }
+
+    #[test]
+    fn discs_stay_on_projected_3d_centers_when_orbiting() {
+        let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(400.0, 400.0));
+        let center = rect.center();
+        let scale = canvas_scale(rect);
+        for k in 0..9 {
+            let cam = Camera {
+                yaw: -0.8 + k as f32 * 0.2,
+                pitch: -0.48,
+            };
+            let projected = project_holes(rect, cam);
+            for name in DEFAULT_SITES {
+                let h = mesh().holes.iter().find(|h| h.name == name).unwrap();
+                let idx = hole_index(name).unwrap();
+                let pr = projected.iter().find(|p| p.index == idx).unwrap();
+                let naive = project(h.p, cam, center, scale);
+                let err = ((pr.pos.x - naive.pos.x).powi(2) + (pr.pos.y - naive.pos.y).powi(2)).sqrt();
+                assert!(
+                    err < 0.05,
+                    "{name} yaw={:.2} disc jumped off 3D center err={err}",
+                    cam.yaw
+                );
+            }
+        }
+    }
+
     fn three_quarter_view_reads_headset_and_holes() {
         let cam = Camera::THREE_QUARTER;
         let c = Pos2::new(200.0, 200.0);

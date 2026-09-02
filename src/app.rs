@@ -3209,6 +3209,35 @@ mod properties_rack_tests {
     }
 
     #[test]
+    fn drain_head_montage_snapshots_holes_even_if_not_dirty() {
+        let src = include_str!("app.rs");
+        assert!(
+            src.contains("Always snapshot the live Head Plot map"),
+            "Save must persist channel_holes even when dirty was cleared"
+        );
+        let drain = src
+            .split("fn drain_head_montage")
+            .nth(1)
+            .unwrap_or("")
+            .split("fn set_layout")
+            .next()
+            .unwrap_or("");
+        assert!(
+            !drain.contains("if hp.is_dirty()"),
+            "dirty gate must not skip Save snapshot"
+        );
+        assert!(drain.contains("hp.channel_holes()"));
+    }
+
+    #[test]
+    fn fonts_section_is_on_properties_spine() {
+        assert!(PROPERTIES_SPINE_IDS.contains(&"Fonts"));
+        let src = include_str!("app.rs");
+        assert!(src.contains("hole_label"));
+        assert!(src.contains("font_sizes.marks"));
+    }
+
+    #[test]
     fn session_filter_copy_is_smooth_cutoff_not_inventor() {
         let src = include_str!("app.rs");
         assert!(src.contains("Smooth cutoff"), "missing Smooth cutoff");

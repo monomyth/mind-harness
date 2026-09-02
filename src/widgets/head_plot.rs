@@ -476,6 +476,46 @@ pub(crate) fn head_canvas_radius(width: f32, height: f32) -> f32 {
     (width.min(height) * 0.40).max(40.0)
 }
 
+/// Quiet activity ramp key: quiet/dark → site color → hot.
+/// Explains Head Plot disc fills without becoming a dashboard.
+fn paint_activity_ramp_key(ui: &mut egui::Ui) {
+    let fonts = theme::font_sizes();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(
+            egui::RichText::new("quiet")
+                .size(fonts.small)
+                .color(theme::HAIRLINE),
+        );
+        let (resp, painter) = ui.allocate_painter(
+            egui::vec2(72.0, fonts.small + 4.0),
+            egui::Sense::hover(),
+        );
+        let r = resp.rect;
+        let n = 24;
+        for i in 0..n {
+            let t = i as f32 / (n - 1) as f32;
+            // Neutral ramp through a mid site hue so the key is not one gold bar.
+            let c = theme::activity_fill_color(2, t);
+            let x0 = r.left() + r.width() * i as f32 / n as f32;
+            let x1 = r.left() + r.width() * (i + 1) as f32 / n as f32;
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(x0, r.top() + 1.0),
+                    egui::pos2(x1, r.bottom() - 1.0),
+                ),
+                0.0,
+                c,
+            );
+        }
+        ui.label(
+            egui::RichText::new("hot")
+                .size(fonts.small)
+                .color(theme::TEXT),
+        );
+    });
+}
+
 impl Widget for WHeadPlot {
     fn title(&self) -> &str {
         &self.title
@@ -538,6 +578,8 @@ impl Widget for WHeadPlot {
                 egui::RichText::new("Hemispheres").size(fonts.caption),
             );
         });
+        // Quiet activity color key — dark → site hue → hot. Not a dashboard.
+        paint_activity_ramp_key(ui);
         // Own overlay captions only (laterality + slow/fast as separate lines).
         // Never stamp "active" on 8–13 Hz rest.
         let plate_caption = self.overlay_frame().caption;
@@ -629,7 +671,6 @@ impl Widget for WHeadPlot {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let scale = mark_iv::canvas_scale(rect);
         for idx in draw_order {
             let pr = projected[idx];
             if !rect.expand(8.0).contains(pr.pos) {
@@ -648,10 +689,9 @@ impl Widget for WHeadPlot {
                 // Unoccupied: mesh opening is empty. No badge.
                 continue;
             }
-            // Insert rim is ~0.12 mesh units; disc sits in the hole center
-            // (centers are rim-snapped INSERT sockets).
-            let persp = 3.4 / (3.4 - pr.depth).max(0.35);
-            let disc_r = (0.12 * scale * persp * 0.48).max(SITE_R);
+            // Insert rim aperture on screen; disc must stay inside the hole
+            // (not spill onto the collar/struts under foreshortening).
+            let disc_r = (pr.opening_r * 0.55).clamp(SITE_R * 0.85, SITE_R * 2.2);
             if chosen {
                 // Chosen contact: highlight this hole only — filled disc, not a
                 // ring, not every live site. Clears with assign_hole.
@@ -924,6 +964,9 @@ mod tests {
         assert!(src.contains("\"Waves\""));
         assert!(src.contains("\"Hemispheres\""));
         assert!(src.contains("activity_fill_color"));
+        assert!(src.contains("paint_activity_ramp_key"));
+        assert!(src.contains("\"quiet\""));
+        assert!(src.contains("\"hot\""));
         assert!(src.contains("paint_head_tinted"));
         assert!(src.contains(concat!("orbit.", "drag")));
         assert!(src.contains(concat!("click_and_", "drag")));
@@ -941,6 +984,22 @@ mod tests {
         assert!(!src.contains(concat!("ELLIPSE_", "RX")));
         assert!(!src.contains(concat!("SITE_", "XY")));
         assert!(!src.contains(concat!("version ", "IV")));
+        assert!(
+            !src.contains("\"active left\"") && !src.contains("\"active right\""),
+            "must not stamp active on 8-13 Hz rest"
+        );
+    }
+
+    #[test]
+    fn activity_ramp_key_explains_colors_quietly() {
+        let src = include_str!("head_plot.rs");
+        assert!(src.contains("fn paint_activity_ramp_key"));
+        assert!(src.contains("paint_activity_ramp_key(ui)"));
+        assert!(src.contains("\"quiet\""));
+        assert!(src.contains("\"hot\""));
+        assert!(src.contains("activity_fill_color"));
+        // Not a dashboard of stats / site chips (split so this assert is not a match).
+        assert!(!src.contains(concat!("Activity ", "dashboard")));
         assert!(
             !src.contains("\"active left\"") && !src.contains("\"active right\""),
             "must not stamp active on 8-13 Hz rest"
