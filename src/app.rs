@@ -19,6 +19,8 @@ use crate::widgets::{
     WHardwareSettings, WHeadPlot, WHemispheres, WImpedance, WMarker, WNetworking, WPulseSensor,
     WSlowWaves, WSpectrogram, WTimeSeries, Widget, WFFT,
 };
+use crate::widgets::head_plot::MontageUiAction;
+use crate::widgets::mark_iv::HEADSET_NAME;
 use directories::ProjectDirs;
 use eframe::egui;
 use std::collections::HashMap;
@@ -452,7 +454,6 @@ impl OpenBciGuiApp {
     }
 
     fn drain_head_montage(&mut self) {
-        use crate::widgets::head_plot::MontageUiAction;
         let mut action = None;
         let mut live_labels = None;
         let mut live_holes = None;
@@ -2316,6 +2317,196 @@ impl eframe::App for OpenBciGuiApp {
                                     }
                                 });
                                 draw_exclusive_section(ui, &mut open, "Hardware", |ui| {
+                                    // Headset and Montage controls (moved from Head Plot)
+                                    ui.small(
+                                        egui::RichText::new("Headset").color(theme::HAIRLINE),
+                                    );
+                                    let mut headset = HEADSET_NAME.to_string();
+                                    egui::ComboBox::from_id_salt("hw_headset")
+                                        .selected_text(HEADSET_NAME)
+                                        .width(168.0)
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut headset,
+                                                HEADSET_NAME.to_string(),
+                                                HEADSET_NAME,
+                                            );
+                                        });
+                                    let _ = headset;
+
+                                    // Montage profile selector and save controls
+                                    ui.small(
+                                        egui::RichText::new("Montage").color(theme::HAIRLINE),
+                                    );
+                                    // Get current montage state from WHeadPlot
+                                    let (profile_name, profile_names, dirty, save_as_open) = {
+                                        let hp = self
+                                            .widget_manager
+                                            .widgets
+                                            .iter()
+                                            .chain(self.tool_widgets.iter())
+                                            .find_map(|w| w.as_any().downcast_ref::<WHeadPlot>());
+                                        if let Some(hp) = hp {
+                                            (
+                                                hp.profile_name().to_string(),
+                                                hp.profile_names().to_vec(),
+                                                hp.is_dirty(),
+                                                hp.is_save_as_open(),
+                                            )
+                                        } else {
+                                            (
+                                                self.montage.last_name().to_string(),
+                                                self.montage.names(),
+                                                false,
+                                                false,
+                                            )
+                                        }
+                                    };
+                                    let shown = if dirty {
+                                        format!("{}*", profile_name)
+                                    } else {
+                                        profile_name.clone()
+                                    };
+                                    let mut pick = profile_name.clone();
+                                    ui.horizontal(|ui| {
+                                        egui::ComboBox::from_id_salt("hw_montage_profile")
+                                            .selected_text(&shown)
+                                            .width(110.0)
+                                            .show_ui(ui, |ui| {
+                                                for n in &profile_names {
+                                                    ui.selectable_value(&mut pick, n.clone(), n);
+                                                }
+                                            });
+                                        let save = egui::Button::new("Save").small().frame(false);
+                                        if ui
+                                            .add(save)
+                                            .on_hover_text(
+                                                "Write channel → 10-20 hole into the active profile",
+                                            )
+                                            .clicked()
+                                        {
+                                            for w in self
+                                                .widget_manager
+                                                .widgets
+                                                .iter_mut()
+                                                .chain(self.tool_widgets.iter_mut())
+                                            {
+                                                if let Some(hp) =
+                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                                {
+                                                    hp.set_action(MontageUiAction::Save);
+                                                }
+                                            }
+                                        }
+                                        if ui
+                                            .add(egui::Button::new("Save as").small().frame(false))
+                                            .clicked()
+                                        {
+                                            for w in self
+                                                .widget_manager
+                                                .widgets
+                                                .iter_mut()
+                                                .chain(self.tool_widgets.iter_mut())
+                                            {
+                                                if let Some(hp) =
+                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                                {
+                                                    hp.set_save_as_open(true);
+                                                }
+                                            }
+                                        }
+                                    });
+                                    if pick != profile_name {
+                                        for w in self
+                                            .widget_manager
+                                            .widgets
+                                            .iter_mut()
+                                            .chain(self.tool_widgets.iter_mut())
+                                        {
+                                            if let Some(hp) =
+                                                w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                            {
+                                                hp.set_action(MontageUiAction::Select(pick.clone()));
+                                            }
+                                        }
+                                    }
+                                    // Save as dialog
+                                    if save_as_open {
+                                        ui.horizontal(|ui| {
+                                            ui.label("Name");
+                                            let mut buf = String::new();
+                                            for w in self
+                                                .widget_manager
+                                                .widgets
+                                                .iter_mut()
+                                                .chain(self.tool_widgets.iter_mut())
+                                            {
+                                                if let Some(hp) =
+                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                                {
+                                                    buf = hp.save_as_buf().to_string();
+                                                    break;
+                                                }
+                                            }
+                                            let resp = ui.add(
+                                                egui::TextEdit::singleline(&mut buf)
+                                                    .desired_width(140.0),
+                                            );
+                                            // Update buffer in WHeadPlot
+                                            for w in self
+                                                .widget_manager
+                                                .widgets
+                                                .iter_mut()
+                                                .chain(self.tool_widgets.iter_mut())
+                                            {
+                                                if let Some(hp) =
+                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                                {
+                                                    *hp.save_as_buf_mut() = buf.clone();
+                                                }
+                                            }
+                                            if ui.button("Create").clicked()
+                                                || (resp.lost_focus()
+                                                    && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                                            {
+                                                let name = buf.trim().to_string();
+                                                if !name.is_empty() {
+                                                    for w in self
+                                                        .widget_manager
+                                                        .widgets
+                                                        .iter_mut()
+                                                        .chain(self.tool_widgets.iter_mut())
+                                                    {
+                                                        if let Some(hp) =
+                                                            w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                                        {
+                                                            hp.set_action(MontageUiAction::SaveAs(
+                                                                name.clone(),
+                                                            ));
+                                                            hp.set_save_as_open(false);
+                                                            hp.save_as_buf_mut().clear();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if ui.button("Cancel").clicked() {
+                                                for w in self
+                                                    .widget_manager
+                                                    .widgets
+                                                    .iter_mut()
+                                                    .chain(self.tool_widgets.iter_mut())
+                                                {
+                                                    if let Some(hp) =
+                                                        w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                                    {
+                                                        hp.set_save_as_open(false);
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+                                    ui.add_space(8.0);
+
                                     if let Some(board) = self.board.as_deref() {
                                         {
                                             let mut widget_ctx = WidgetContext::new(

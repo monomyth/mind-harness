@@ -213,6 +213,34 @@ impl WHeadPlot {
         self.pending.take()
     }
 
+    pub fn set_action(&mut self, action: MontageUiAction) {
+        self.pending = Some(action);
+    }
+
+    pub fn profile_name(&self) -> &str {
+        &self.profile_name
+    }
+
+    pub fn profile_names(&self) -> &[String] {
+        &self.profile_names
+    }
+
+    pub fn is_save_as_open(&self) -> bool {
+        self.save_as_open
+    }
+
+    pub fn set_save_as_open(&mut self, open: bool) {
+        self.save_as_open = open;
+    }
+
+    pub fn save_as_buf(&self) -> &str {
+        &self.save_as_buf
+    }
+
+    pub fn save_as_buf_mut(&mut self) -> &mut String {
+        &mut self.save_as_buf
+    }
+
     /// Recapture-only. Re-apply after montage wipe so a crop can pin the chosen hole.
     pub fn apply_recapture_assign_hole(&mut self) {
         if let Some(name) = recapture_assign_hole_from_env() {
@@ -382,75 +410,13 @@ impl Widget for WHeadPlot {
         _source: &dyn DataSource,
         _ctx: &mut crate::widget_context::WidgetContext,
     ) {
-        ui.horizontal(|ui| {
-            // Own overlay caption only (empty or Contact lost). Never a pair/band line
-            // injected via set_frame — that is how P3/P4 alpha reappeared on this pane.
-            let plate_caption = self.overlay_frame().caption;
-            if !plate_caption.is_empty() {
-                ui.label(&plate_caption);
-                ui.add_space(8.0);
-            }
-            let mut headset = HEADSET_NAME.to_string();
-            egui::ComboBox::from_id_salt("head_headset")
-                .selected_text(HEADSET_NAME)
-                .width(168.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut headset, HEADSET_NAME.to_string(), HEADSET_NAME);
-                });
-            let _ = headset;
-            let shown = if self.dirty {
-                format!("{}*", self.profile_name)
-            } else {
-                self.profile_name.clone()
-            };
-            let mut pick = self.profile_name.clone();
-            let names = self.profile_names.clone();
-            egui::ComboBox::from_id_salt("head_montage_profile")
-                .selected_text(shown)
-                .width(110.0)
-                .show_ui(ui, |ui| {
-                    for n in &names {
-                        ui.selectable_value(&mut pick, n.clone(), n);
-                    }
-                });
-            if pick != self.profile_name {
-                self.pending = Some(MontageUiAction::Select(pick));
-            }
-            let save = egui::Button::new("Save").small().frame(false);
-            if ui
-                .add(save)
-                .on_hover_text("Write channel → 10-20 hole into the active profile")
-                .clicked()
-            {
-                self.pending = Some(MontageUiAction::Save);
-            }
-            if ui
-                .add(egui::Button::new("Save as").small().frame(false))
-                .clicked()
-            {
-                self.save_as_open = true;
-            }
-        });
-        if self.save_as_open {
-            ui.horizontal(|ui| {
-                ui.label("Name");
-                let resp =
-                    ui.add(egui::TextEdit::singleline(&mut self.save_as_buf).desired_width(140.0));
-                if ui.button("Create").clicked()
-                    || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                {
-                    let name = self.save_as_buf.trim().to_string();
-                    if !name.is_empty() {
-                        self.pending = Some(MontageUiAction::SaveAs(name));
-                        self.save_as_open = false;
-                        self.save_as_buf.clear();
-                    }
-                }
-                if ui.button("Cancel").clicked() {
-                    self.save_as_open = false;
-                }
-            });
+        // Own overlay caption only (empty or Contact lost). Never a pair/band line
+        // injected via set_frame — that is how P3/P4 alpha reappeared on this pane.
+        let plate_caption = self.overlay_frame().caption;
+        if !plate_caption.is_empty() {
+            ui.label(&plate_caption);
         }
+        // Hole assignment UI (appears when user clicks a hole on the 3D head)
         if let Some(hole) = self.assign_hole.clone() {
             ui.horizontal(|ui| {
                 ui.label(format!("Wire {hole}"));
