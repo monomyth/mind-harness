@@ -497,6 +497,7 @@ impl OpenBciGuiApp {
 
     /// Recapture-only: OPENBCI_LAYOUT=1..=6 and OPENBCI_GRID="Time Series,Head Plot,..."
     /// OPENBCI_ASSIGN_HOLE=C3 starts Head Plot with that hole chosen (crop cannot click).
+    /// OPENBCI_PROPERTIES=Hardware opens that accordion section (requires OPENBCI_CROP).
     /// applied after playback boot so a crop can pin layout + slot titles without the UI.
     fn apply_recapture_layout_grid(&mut self) {
         if let Ok(s) = std::env::var("OPENBCI_LAYOUT") {
@@ -519,6 +520,21 @@ impl OpenBciGuiApp {
             }
         }
         self.apply_recapture_assign_holes();
+        self.apply_recapture_properties();
+    }
+
+    /// Recapture-only: OPENBCI_PROPERTIES=Hardware opens that Properties accordion section.
+    /// Only takes effect when OPENBCI_CROP is set (crop scripts cannot click the spine).
+    fn apply_recapture_properties(&mut self) {
+        if std::env::var("OPENBCI_CROP").is_err() {
+            return;
+        }
+        if let Ok(section) = std::env::var("OPENBCI_PROPERTIES") {
+            let section = section.trim();
+            if PROPERTIES_SPINE_IDS.contains(&section) {
+                self.properties_open = Some(section.to_string());
+            }
+        }
     }
 
     /// Recapture-only: OPENBCI_ASSIGN_HOLE=C3 paints the chosen hole after montage wipe.
@@ -3107,5 +3123,28 @@ mod properties_rack_tests {
         exclusive_section_clicked(&mut current, "Hardware");
         assert!(!exclusive_section_open(&current, "Session"));
         assert!(exclusive_section_open(&current, "Hardware"));
+    }
+
+    #[test]
+    fn recapture_properties_env_is_documented() {
+        let src = include_str!("app.rs");
+        assert!(
+            src.contains("OPENBCI_PROPERTIES"),
+            "OPENBCI_PROPERTIES env var must be documented"
+        );
+        assert!(
+            src.contains("apply_recapture_properties"),
+            "recapture properties method must exist"
+        );
+        assert!(
+            src.contains("OPENBCI_CROP"),
+            "OPENBCI_PROPERTIES requires OPENBCI_CROP guard"
+        );
+        for section in PROPERTIES_SPINE_IDS {
+            assert!(
+                src.contains(section),
+                "section {section} must be in PROPERTIES_SPINE_IDS"
+            );
+        }
     }
 }
