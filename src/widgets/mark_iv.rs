@@ -131,48 +131,53 @@ fn load_bin(buf: &[u8]) -> Option<FrameMesh> {
 /// (+X right, −Y anterior, +Z up).
 ///
 /// Derived from official OpenBCI `M4H6_Medium Node Array.stl` (35 disconnected
-/// node solids at the actual Mark IV insert locations), transformed with the
-/// same bbox-center / X-flip / max-radius=1 as M4_Medium_Front+Back → frame.bin.
-/// Each center sits in an empty circular rim (r≈0.12) of the printed node —
+/// node solids at the actual Mark IV insert locations), transformed with
+/// bbox-center / max-radius=1 into the same coordinate frame as frame.bin.
+/// Each center sits in the empty circular rim (r≈0.12) of a printed node —
 /// not a decorative lattice opening, not a ray-snap onto nearby verts, and not
-/// the ideal r=0.96 10-20 sphere. Names are 10-20/10-10 by anatomy
-/// (Fp1 left-front forehead, O posterior, Cz up) — not a greedy 10-20 snap.
+/// the ideal r=0.96 10-20 sphere. Names are 10-20/10-10 by anatomy.
+///
+/// Default 8-channel Cyton positions:
+///   Fp1/Fp2 — frontmost left/right inserts (forehead, Y≈−0.86)
+///   C3/C4   — lateral to Cz on the coronal plane (Y≈0.006)
+///   P7/P8   — behind and above ears (Y≈0.50, large |X|)
+///   O1/O2   — backmost left/right inserts (near inion, Y≈0.86)
 const INSERT_HOLES: [(&str, [f32; 3]); 35] = [
-    ("Fp1", [-0.407180, -0.509746, 0.037802]),
-    ("Fp2", [0.414591, -0.517388, 0.040614]),
-    ("F7", [-0.616524, -0.245182, -0.087566]),
-    ("F3", [-0.267197, -0.283586, 0.299279]),
-    ("Fz", [-0.002140, -0.564037, 0.219643]),
-    ("F4", [0.269280, -0.289258, 0.302449]),
-    ("F8", [0.625861, -0.247543, -0.086253]),
-    ("FT7", [-0.585197, -0.443445, -0.340458]),
-    ("FC5", [-0.330066, -0.703388, -0.120800]),
-    ("Fpz", [-0.001630, -0.768451, -0.022334]),
-    ("FC6", [0.334095, -0.709880, -0.122557]),
-    ("FT8", [0.591714, -0.447986, -0.339344]),
-    ("T7", [-0.700152, 0.002600, -0.347569]),
-    ("C3", [-0.520944, 0.002466, 0.187158]),
-    ("Cz", [-0.001196, 0.002249, 0.441163]),
-    ("C4", [0.526139, 0.002845, 0.185804]),
-    ("T8", [0.702304, 0.002579, -0.350121]),
-    ("TP7", [-0.601896, 0.458905, -0.350679]),
-    ("P7", [-0.649356, 0.258750, -0.080743]),
-    ("Pz", [0.001095, 0.757248, -0.029398]),
-    ("P8", [0.644480, 0.260224, -0.081404]),
-    ("TP8", [0.593524, 0.457163, -0.350079]),
-    ("P3", [-0.282980, 0.304257, 0.346607]),
-    ("P4", [0.284116, 0.305136, 0.342809]),
-    ("PO3", [-0.336383, 0.714337, -0.124809]),
-    ("PO4", [0.331977, 0.708350, -0.129170]),
-    ("O1", [-0.441245, 0.540079, 0.060832]),
-    ("Oz", [0.001170, 0.586293, 0.234527]),
-    ("O2", [0.436298, 0.536364, 0.057162]),
-    ("AF7", [-0.256955, -0.799661, -0.340073]),
-    ("AF8", [0.257060, -0.801834, -0.341984]),
-    ("AFz", [-0.001046, -0.848105, -0.334220]),
-    ("PO7", [-0.251448, 0.797272, -0.339165]),
-    ("Iz", [0.002242, 0.842137, -0.330715]),
-    ("PO8", [0.253805, 0.791455, -0.340214]),
+    ("Cz", [0.002241, 0.005675, 0.427471]),
+    ("P4", [0.306720, 0.331303, 0.325633]),
+    ("P3", [-0.305163, 0.332227, 0.321672]),
+    ("F3", [-0.289729, -0.309060, 0.277690]),
+    ("F4", [0.289257, -0.302944, 0.274654]),
+    ("Pz", [-0.000280, 0.635780, 0.204277]),
+    ("Fz", [0.003518, -0.605445, 0.188416]),
+    ("C4", [0.563655, 0.006221, 0.153387]),
+    ("C3", [-0.566303, 0.006119, 0.152315]),
+    ("PO4", [0.477880, 0.586132, 0.017004]),
+    ("PO3", [-0.469657, 0.582530, 0.012594]),
+    ("FC5", [-0.446680, -0.555067, -0.005127]),
+    ("FC6", [0.440731, -0.546881, -0.007877]),
+    ("Fpz", [0.002439, -0.826404, -0.072880]),
+    ("Oz", [-0.000230, 0.820178, -0.079924]),
+    ("TP8", [0.702032, 0.281952, -0.135462]),
+    ("TP7", [-0.694545, 0.283383, -0.135843]),
+    ("FT7", [-0.674657, -0.263925, -0.142081]),
+    ("FT8", [0.666750, -0.261320, -0.143126]),
+    ("AF8", [0.357727, -0.755752, -0.178690]),
+    ("AF7", [-0.359607, -0.762999, -0.181238]),
+    ("PO8", [0.363836, 0.774265, -0.183054]),
+    ("PO7", [-0.357082, 0.767674, -0.187924]),
+    ("Iz", [-0.001221, 0.912245, -0.405748]),
+    ("AFz", [0.001918, -0.912245, -0.409639]),
+    ("F7", [-0.637766, -0.480243, -0.414554]),
+    ("O2", [0.272604, 0.863561, -0.414640]),
+    ("F8", [0.632489, -0.475547, -0.415447]),
+    ("O1", [-0.272674, 0.857449, -0.415630]),
+    ("Fp2", [0.278538, -0.859902, -0.415939]),
+    ("Fp1", [-0.276378, -0.862284, -0.417675]),
+    ("T8", [0.756660, 0.005953, -0.423484]),
+    ("T7", [-0.756660, 0.005897, -0.426272]),
+    ("P7", [-0.639552, 0.496563, -0.426529]),
+    ("P8", [0.650765, 0.498441, -0.427471]),
 ];
 
 fn insert_sockets() -> Vec<Hole> {
@@ -994,6 +999,131 @@ mod tests {
             "Cz must be the highest insert, cz={} zmax={}",
             cz[2],
             zmax
+        );
+    }
+
+    #[test]
+    fn default_8_channel_anatomical_positions() {
+        // Verify the 8-channel Cyton default electrodes match official Mark IV anatomy
+        // per OpenBCI docs and M4H6_Medium Node Array.stl
+        let h = |n: &str| mesh().holes.iter().find(|h| h.name == n).unwrap().p;
+        let all: Vec<&str> = mesh().holes.iter().map(|h| h.name.as_str()).collect();
+
+        // Fp1/Fp2: frontmost left/right inserts (forehead, lowest front nodes)
+        let fp1 = h("Fp1");
+        let fp2 = h("Fp2");
+        let fpz = h("Fpz");
+        assert!(
+            fp1[1] < -0.8,
+            "Fp1 must be frontmost (Y < -0.8), got {}",
+            fp1[1]
+        );
+        assert!(
+            fp2[1] < -0.8,
+            "Fp2 must be frontmost (Y < -0.8), got {}",
+            fp2[1]
+        );
+        assert!(
+            fp1[0] < 0.0 && fp2[0] > 0.0,
+            "Fp1 left, Fp2 right: fp1.x={}, fp2.x={}",
+            fp1[0],
+            fp2[0]
+        );
+        // Fp1/Fp2 should be near Fpz in the Y direction
+        assert!(
+            (fp1[1] - fpz[1]).abs() < 0.1,
+            "Fp1 close to Fpz in Y: {} vs {}",
+            fp1[1],
+            fpz[1]
+        );
+
+        // O1/O2: backmost left/right inserts (occipital, near inion)
+        let o1 = h("O1");
+        let o2 = h("O2");
+        let oz = h("Oz");
+        let iz = h("Iz");
+        assert!(
+            o1[1] > 0.8,
+            "O1 must be backmost (Y > 0.8), got {}",
+            o1[1]
+        );
+        assert!(
+            o2[1] > 0.8,
+            "O2 must be backmost (Y > 0.8), got {}",
+            o2[1]
+        );
+        assert!(
+            o1[0] < 0.0 && o2[0] > 0.0,
+            "O1 left, O2 right: o1.x={}, o2.x={}",
+            o1[0],
+            o2[0]
+        );
+        // O1/O2 should be the lowest back inserts (closest to Iz)
+        assert!(
+            o1[1] > oz[1] && o2[1] > oz[1],
+            "O1/O2 more posterior than Oz: o1.y={}, o2.y={}, oz.y={}",
+            o1[1],
+            o2[1],
+            oz[1]
+        );
+
+        // C3/C4: lateral to Cz on the coronal plane (near crown)
+        let c3 = h("C3");
+        let c4 = h("C4");
+        let cz = h("Cz");
+        assert!(
+            (c3[1] - cz[1]).abs() < 0.02,
+            "C3 same Y as Cz (coronal plane): c3.y={}, cz.y={}",
+            c3[1],
+            cz[1]
+        );
+        assert!(
+            (c4[1] - cz[1]).abs() < 0.02,
+            "C4 same Y as Cz (coronal plane): c4.y={}, cz.y={}",
+            c4[1],
+            cz[1]
+        );
+        assert!(
+            c3[0] < -0.5 && c4[0] > 0.5,
+            "C3/C4 are lateral: c3.x={}, c4.x={}",
+            c3[0],
+            c4[0]
+        );
+
+        // P7/P8: behind and above ears (temporal-parietal, lateral posterior)
+        let p7 = h("P7");
+        let p8 = h("P8");
+        assert!(
+            p7[1] > 0.4 && p8[1] > 0.4,
+            "P7/P8 posterior (Y > 0.4): p7.y={}, p8.y={}",
+            p7[1],
+            p8[1]
+        );
+        assert!(
+            p7[0].abs() > 0.5 && p8[0].abs() > 0.5,
+            "P7/P8 lateral (|X| > 0.5): p7.x={}, p8.x={}",
+            p7[0],
+            p8[0]
+        );
+        assert!(
+            p7[0] < 0.0 && p8[0] > 0.0,
+            "P7 left, P8 right: p7.x={}, p8.x={}",
+            p7[0],
+            p8[0]
+        );
+
+        // Verify O1/O2 are a homologous pair (symmetric about midline)
+        assert!(
+            (o1[0].abs() - o2[0].abs()).abs() < 0.02,
+            "O1/O2 symmetric |X|: |o1.x|={}, |o2.x|={}",
+            o1[0].abs(),
+            o2[0].abs()
+        );
+        assert!(
+            (o1[1] - o2[1]).abs() < 0.02,
+            "O1/O2 same Y: o1.y={}, o2.y={}",
+            o1[1],
+            o2[1]
         );
     }
 
