@@ -1920,8 +1920,8 @@ impl eframe::App for OpenBciGuiApp {
                         .inner_margin(10.0)
                         .show(ui, |ui| {
                             ui.vertical_centered(|ui| {
-                                ui.colored_label(egui::Color32::from_rgb(255, 180, 180), "⚠️  Last connection attempt failed");
-                                ui.small(&err_msg);
+                                ui.colored_label(egui::Color32::from_rgb(255, 180, 180), "Couldn't open the board");
+                                let _ = &err_msg;
                                 ui.add_space(6.0);
                                 if let Some(ref params) = last_params {
                                     let label = match params.source {
@@ -1987,8 +1987,6 @@ impl eframe::App for OpenBciGuiApp {
                                             self.connection_status = "Panel restored — click the big Start Session button to retry".to_string();
                                         }
                                     }
-                                } else {
-                                    ui.small("No previous successful connection to replay yet.");
                                 }
                             });
                         });
