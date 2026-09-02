@@ -462,6 +462,7 @@ impl OpenBciGuiApp {
         let last = self.montage.last_name().to_string();
         let labels = self.montage.active().channel_labels();
         let holes = self.montage.active().channel_holes();
+        let mut live_holes: Option<[String; 8]> = None;
         for w in self
             .widget_manager
             .widgets
@@ -473,12 +474,24 @@ impl OpenBciGuiApp {
                 if force || !hp.is_dirty() {
                     hp.set_profile_clean(labels.clone(), holes.clone(), &last);
                 }
+                if live_holes.is_none() {
+                    live_holes = Some(hp.channel_holes());
+                }
             }
+        }
+        // Time Series left column = live Head Plot map (channel_holes), else store.
+        let ts_labels = live_holes.unwrap_or(holes);
+        for w in self
+            .widget_manager
+            .widgets
+            .iter_mut()
+            .chain(self.tool_widgets.iter_mut())
+        {
             if let Some(ts) = w
                 .as_any_mut()
                 .downcast_mut::<crate::widgets::time_series::WTimeSeries>()
             {
-                ts.set_channel_labels(labels.clone());
+                ts.set_channel_labels(ts_labels.clone());
             }
         }
     }
@@ -498,21 +511,37 @@ impl OpenBciGuiApp {
     }
 
     fn sync_head_plot_chrome(&mut self) {
-        let Some(hp) = self
+        let Some((show_waves, show_hemispheres, holes)) = self
             .widget_manager
             .widgets
             .iter()
             .chain(self.tool_widgets.iter())
-            .find_map(|w| w.as_any().downcast_ref::<WHeadPlot>())
+            .find_map(|w| {
+                w.as_any().downcast_ref::<WHeadPlot>().map(|hp| {
+                    (hp.show_waves, hp.show_hemispheres, hp.channel_holes())
+                })
+            })
         else {
             return;
         };
-        if hp.show_waves != self.head_show_waves
-            || hp.show_hemispheres != self.head_show_hemispheres
-        {
-            self.head_show_waves = hp.show_waves;
-            self.head_show_hemispheres = hp.show_hemispheres;
+        if show_waves != self.head_show_waves || show_hemispheres != self.head_show_hemispheres {
+            self.head_show_waves = show_waves;
+            self.head_show_hemispheres = show_hemispheres;
             self.save_current_persisted_settings();
+        }
+        // Keep Time Series left labels on the live electrode map (channel_holes).
+        for w in self
+            .widget_manager
+            .widgets
+            .iter_mut()
+            .chain(self.tool_widgets.iter_mut())
+        {
+            if let Some(ts) = w
+                .as_any_mut()
+                .downcast_mut::<crate::widgets::time_series::WTimeSeries>()
+            {
+                ts.set_channel_labels(holes.clone());
+            }
         }
     }
 

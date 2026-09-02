@@ -255,9 +255,10 @@ pub(crate) fn last_row_height(layout: &TraceStackLayout) -> f32 {
     layout.row_h + layout.last_row_extra
 }
 
-/// Left-column text: 10-20 site. Never `Ch N` — traces and holes share one name.
-pub(crate) fn left_channel_label(logical: usize, board_label: &str) -> String {
-    let t = board_label.trim();
+/// Left-column text: live electrode map (channel_holes), same as Head Plot.
+/// Never `Ch N`. Never board/BDF leftover names — only `map_label` or official LABELS.
+pub(crate) fn left_channel_label(logical: usize, map_label: &str) -> String {
+    let t = map_label.trim();
     if !t.is_empty() && !t.eq_ignore_ascii_case(&format!("Ch {}", logical + 1)) {
         return t.to_string();
     }
@@ -474,13 +475,12 @@ impl Widget for WTimeSeries {
             } else {
                 stack.row_h
             };
-            let board = source.channel_label(i);
-            let mont = self
+            let map = self
                 .montage_labels
                 .get(i)
                 .map(|s| s.as_str())
                 .unwrap_or("");
-            let row_label = left_channel_label(i, if !mont.is_empty() { mont } else { &board });
+            let row_label = left_channel_label(i, map);
 
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), row_h),
@@ -737,5 +737,38 @@ mod tests {
         assert_eq!(super::left_channel_label(0, "Ch 1"), "Fp1");
         assert_eq!(super::left_channel_label(0, "Fp1"), "Fp1");
         assert_eq!(super::left_channel_label(7, "O2"), "O2");
+        // Official 8 defaults (same as Head Plot holes / LABELS).
+        for (i, name) in crate::widgets::head_plot::LABELS.iter().enumerate() {
+            assert_eq!(super::left_channel_label(i, ""), *name);
+            assert_eq!(
+                super::left_channel_label(i, &format!("Ch {}", i + 1)),
+                *name
+            );
+            assert_eq!(super::left_channel_label(i, name), *name);
+        }
+        // Map slot wins only when it is the live electrode map — callers must not
+        // pass board/BDF names (P3/P4/F7). Empty / Ch N → LABELS, never those.
+        assert_eq!(super::left_channel_label(2, ""), "C3");
+        assert_eq!(super::left_channel_label(4, ""), "P7");
+        assert_eq!(super::left_channel_label(6, ""), "O1");
+        assert_ne!(super::left_channel_label(2, ""), "F7");
+        assert_ne!(super::left_channel_label(6, ""), "P3");
+        assert_ne!(super::left_channel_label(7, ""), "P4");
+    }
+
+    #[test]
+    fn draw_path_never_reads_board_channel_label() {
+        let src = include_str!("time_series.rs");
+        let draw = src
+            .split("fn show(")
+            .nth(1)
+            .and_then(|s| s.split("fn as_any(").next())
+            .unwrap_or("");
+        assert!(
+            !draw.contains("source.channel_label") && !draw.contains(".channel_label("),
+            "Time Series must use montage_labels / LABELS, not board channel_label"
+        );
+        assert!(draw.contains("left_channel_label(i, map)"));
+        assert!(draw.contains("montage_labels"));
     }
 }
