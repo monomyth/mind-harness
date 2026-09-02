@@ -32,6 +32,12 @@ pub enum SystemMode {
     PostInit,
 }
 
+/// True while the PreInit setup panel should keep the frame (no running session yet).
+/// Session start must flip to PostInit even when a PROPERTIES accordion section is open.
+pub(crate) fn setup_panel_active(mode: SystemMode) -> bool {
+    mode == SystemMode::PreInit
+}
+
 /// State while we are connecting to real hardware in the background.
 enum ConnectionState {
     Idle,
@@ -640,6 +646,16 @@ impl OpenBciGuiApp {
         }
     }
 
+    /// Shared tail for every successful session enter (live board, synthetic, or playback).
+    fn enter_running_session(&mut self) {
+        self.control_panel.show = false;
+        self.populate_widgets_for_new_session();
+        self.populate_tool_widgets();
+        self.apply_persisted_filters_to_current_board();
+        self.save_current_persisted_settings();
+        self.system_mode = SystemMode::PostInit;
+    }
+
     /// Phase 7 hybrid layout (plan.md Phase 7 step 5): populate the interactive tool widgets
     /// that live in the right SidePanel. These are always visible during a session.
     /// Focus (ML + audio) is now finally usable alongside the viz — the killer Phase 6 feature
@@ -648,27 +664,21 @@ impl OpenBciGuiApp {
         match crate::board::playback::PlaybackBoard::from_file(std::path::Path::new(path)) {
             Ok(mut pb) => {
                 let _ = pb.initialize();
-                let _ = pb.start_streaming();
-                self.streaming = true;
+                if pb.start_streaming().is_ok() {
+                    self.streaming = true;
+                }
                 if seek_sec > 0.0 {
                     let total = pb.playback_progress().map(|(_, t)| t).unwrap_or(1).max(1) as f32;
                     let sr = pb.sample_rate().max(1) as f32;
-                    crate::board::playback::PlaybackBoard::seek_to_fraction(
-                        &mut pb,
-                        (seek_sec * sr / total).clamp(0.0, 1.0),
-                    );
+                    pb.seek_to_fraction((seek_sec * sr / total).clamp(0.0, 1.0));
                 }
                 self.board = Some(Box::new(pb) as Box<dyn DataSource>);
                 self.control_panel.playback_file = Some(path.to_string());
-                self.control_panel.show = false;
-                self.system_mode = SystemMode::PostInit;
                 self.current_layout = 1;
                 self.grid_layout_assignments
                     .insert(1, vec!["Head Plot".into()]);
                 self.pending_layout_rebuild = true;
-                self.populate_widgets_for_new_session();
-                self.populate_tool_widgets();
-                self.apply_persisted_filters_to_current_board();
+                self.enter_running_session();
                 self.connection_status = format!("Playback: {path}");
                 self.event_log.log_connection(&format!(
                     "Playback · {}",
@@ -1562,12 +1572,7 @@ impl eframe::App for OpenBciGuiApp {
                         .log_connection(&format!("Connected to {}", self.connection_status));
                     // Phase 7 Reconnect: remember this successful real-hardware connect
                     self.save_last_connection();
-                    // Phase 7 hybrid: populate viz + tool SidePanel (Focus etc. now visible)
-                    self.populate_widgets_for_new_session();
-                    self.populate_tool_widgets();
-                    self.apply_persisted_filters_to_current_board();
-                    self.save_current_persisted_settings();
-                    self.system_mode = SystemMode::PostInit;
+                    self.enter_running_session();
                     self.connection_state = ConnectionState::Idle;
                 }
                 Ok(Err(err)) => {
@@ -1628,7 +1633,7 @@ impl eframe::App for OpenBciGuiApp {
             }
         }
 
-        if self.system_mode == SystemMode::PreInit {
+        if setup_panel_active(self.system_mode) {
             // === Control Panel (PreInit) ===
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some((source, chans, serial_port)) = self.control_panel.draw(ui) {
@@ -1653,12 +1658,7 @@ impl eframe::App for OpenBciGuiApp {
                             self.event_log.log_connection("Connected to BrainFlow Synthetic board");
                             // Phase 7 Reconnect: remember the Synthetic settings (chans etc.)
                             self.save_last_connection();
-                            // Phase 7 hybrid: populate viz grid + tool SidePanel (Focus/Networking/Marker always visible)
-                            self.populate_widgets_for_new_session();
-                            self.populate_tool_widgets();
-                            self.apply_persisted_filters_to_current_board();
-                            self.save_current_persisted_settings();
-                            self.system_mode = SystemMode::PostInit;
+                            self.enter_running_session();
                         }
                         DataSourceType::CytonSerial => {
                             // Prefer cu.* on macOS by default (tty.* versions are a very common source of failure)
@@ -1772,11 +1772,7 @@ impl eframe::App for OpenBciGuiApp {
                                     ));
                                     // Phase 7 Reconnect: remember the exact playback file so "Reconnect" replays the same recording
                                     self.save_last_connection();
-                                    self.populate_widgets_for_new_session();
-                                    self.populate_tool_widgets();
-                                    self.apply_persisted_filters_to_current_board();
-                                    self.save_current_persisted_settings();
-                                    self.system_mode = SystemMode::PostInit;
+                                    self.enter_running_session();
                                 }
                                 Err(e) => {
                                     self.connection_status = format!("Failed to load playback file: {}", e);
@@ -1803,11 +1799,7 @@ impl eframe::App for OpenBciGuiApp {
                                     self.connection_status = format!("SD playback: {}", file_path);
                                     self.event_log.log_connection(&format!("SD card playback {file_path}"));
                                     self.save_last_connection();
-                                    self.populate_widgets_for_new_session();
-                                    self.populate_tool_widgets();
-                                    self.apply_persisted_filters_to_current_board();
-                                    self.save_current_persisted_settings();
-                                    self.system_mode = SystemMode::PostInit;
+                                    self.enter_running_session();
                                 }
                                 Err(e) => {
                                     self.control_panel.show = true;
@@ -1819,7 +1811,7 @@ impl eframe::App for OpenBciGuiApp {
                     }
                 }
 
-                // Phase 7 Reconnect banner (plan.md Phase 7 polish) — always visible in PreInit when we are in Failed state.
+                // Phase 7 Reconnect banner
                 // The button restores the last good params (port, chans, file) into the control panel dropdowns
                 // and for instant sources (Synthetic/Playback) performs a true 1-click reconnect. Cyton gets
                 // the dropdowns fixed + a hint to hit the normal Start (the background thread path is not duped).
@@ -1878,11 +1870,7 @@ impl eframe::App for OpenBciGuiApp {
                                             self.board = Some(Box::new(board) as Box<dyn DataSource>);
                                             self.event_log.log_connection("Connected to Synthetic (Reconnect)");
                                             self.save_last_connection();
-                                            self.populate_widgets_for_new_session();
-                                            self.populate_tool_widgets();
-                                            self.apply_persisted_filters_to_current_board();
-                                            self.save_current_persisted_settings();
-                                            self.system_mode = SystemMode::PostInit;
+                                            self.enter_running_session();
                                             self.connection_state = ConnectionState::Idle;
                                         } else if params.source == DataSourceType::Playback {
                                             if let Some(ref f) = params.playback_file {
@@ -1899,11 +1887,7 @@ impl eframe::App for OpenBciGuiApp {
                                                             .unwrap_or("file"),
                                                     ));
                                                     self.save_last_connection();
-                                                    self.populate_widgets_for_new_session();
-                                                    self.populate_tool_widgets();
-                                                    self.apply_persisted_filters_to_current_board();
-                                                    self.save_current_persisted_settings();
-                                                    self.system_mode = SystemMode::PostInit;
+                                                    self.enter_running_session();
                                                     self.connection_state = ConnectionState::Idle;
                                                 }
                                             }
@@ -1919,7 +1903,11 @@ impl eframe::App for OpenBciGuiApp {
                         });
                 }
             });
-            return;
+            // Session may have started this frame (Synthetic / Playback / SD). Fall through to transport.
+            if setup_panel_active(self.system_mode) {
+                ctx.request_repaint();
+                return;
+            }
         }
 
         // === PostInit (normal GUI) ===
@@ -3161,5 +3149,34 @@ mod properties_rack_tests {
                 "section {section} must be in PROPERTIES_SPINE_IDS"
             );
         }
+    }
+
+    #[test]
+    fn session_start_not_gated_by_properties_accordion() {
+        use super::{setup_panel_active, SystemMode};
+
+        // Hardware open collapses Session in the rack, but must not block PostInit.
+        assert!(!setup_panel_active(SystemMode::PostInit));
+        assert!(setup_panel_active(SystemMode::PreInit));
+
+        let properties_open = Some("Hardware".to_string());
+        assert!(
+            exclusive_section_open(&properties_open, "Hardware"),
+            "accordion state is independent of session mode"
+        );
+        assert!(!setup_panel_active(SystemMode::PostInit));
+    }
+
+    #[test]
+    fn setup_panel_fallthrough_after_start_is_in_update() {
+        let src = include_str!("app.rs");
+        assert!(
+            src.contains("Session may have started this frame"),
+            "PreInit must fall through to transport when session enters on the same frame"
+        );
+        assert!(
+            src.contains("if setup_panel_active(self.system_mode)"),
+            "setup panel early return must be conditional on still being PreInit"
+        );
     }
 }

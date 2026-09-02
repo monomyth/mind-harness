@@ -723,4 +723,47 @@ mod tests {
         assert!(pb.parsed_rows()[0][0] > 0.0);
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn streaming_playhead_advances_with_wall_clock() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("openbci_playback_transport.txt");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "OpenBCI Data Format (Rust port)").unwrap();
+        writeln!(f, "Sample Rate: 250 Hz, Channels: 2").unwrap();
+        writeln!(f, "ch0,ch1").unwrap();
+        for i in 0..5000 {
+            writeln!(f, "{i},{i}").unwrap();
+        }
+        drop(f);
+
+        let mut pb = PlaybackBoard::from_file(&path).unwrap();
+        pb.start_streaming().unwrap();
+        let pos0 = pb.playback_progress().unwrap().0;
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        pb.update();
+        let pos1 = pb.playback_progress().unwrap().0;
+        assert!(
+            pos1 > pos0,
+            "transport must advance playhead while streaming (pos0={pos0} pos1={pos1})"
+        );
+        assert!(pb.is_streaming());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn brow_recording_playback_advances_when_present() {
+        let path =
+            std::path::Path::new("Recordings/OpenBCI_2026-08-30_17-55-39_625_626066000_0.bdf");
+        if !path.exists() {
+            return;
+        }
+        let mut pb = PlaybackBoard::from_file(path).expect("bdf");
+        pb.start_streaming().unwrap();
+        let pos0 = pb.playback_progress().unwrap().0;
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        pb.update();
+        let pos1 = pb.playback_progress().unwrap().0;
+        assert!(pos1 > pos0, "BDF playback playhead must advance");
+    }
 }
