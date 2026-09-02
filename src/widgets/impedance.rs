@@ -9,6 +9,7 @@
 //!   calls the DataSource mut methods. This keeps the Widget trait surface unchanged.
 
 use crate::board::DataSource;
+use crate::laterality::latch_rails;
 use crate::widgets::head_plot::LABELS;
 use crate::widgets::Widget;
 use eframe::egui;
@@ -20,6 +21,8 @@ pub struct WImpedance {
     pending_stop: bool,
     /// Last Start / scan error; kept until the next successful Start.
     last_error: Option<String>,
+    /// Railed (contact lost) channels — same detection as Head Plot.
+    railed: [bool; 8],
 }
 
 impl WImpedance {
@@ -30,6 +33,7 @@ impl WImpedance {
             pending_start: false,
             pending_stop: false,
             last_error: None,
+            railed: [false; 8],
         }
     }
 
@@ -70,6 +74,19 @@ impl Widget for WImpedance {
         if source.supports_impedance() {
             self.last_values = source.get_impedance();
         }
+        let exg = source.exg_channels();
+        let n = (source.sample_rate() as f64 * crate::laterality::WINDOW_SEC) as usize;
+        let data = source.get_data(n.max(32));
+        let chs: Vec<Vec<f64>> = exg
+            .iter()
+            .take(8)
+            .map(|&col| {
+                data.iter()
+                    .map(|row| row.get(col).copied().unwrap_or(0.0))
+                    .collect()
+            })
+            .collect();
+        latch_rails(&mut self.railed, &chs);
     }
 
     fn show(
@@ -135,27 +152,34 @@ impl Widget for WImpedance {
 
             for (i, val) in self.last_values.iter().enumerate().take(n) {
                 let label = LABELS.get(i).copied().unwrap_or_else(|| "—");
+                let is_railed = self.railed.get(i).copied().unwrap_or(false);
                 ui.label(label);
-                match val {
-                    Some(v) if *v > 0.0 => {
-                        let v = *v;
-                        let (color, qual) = if v < green_max {
-                            (egui::Color32::from_rgb(60, 180, 90), "Good")
-                        } else if v < yellow_max {
-                            (egui::Color32::from_rgb(230, 180, 60), "OK")
-                        } else {
-                            (egui::Color32::from_rgb(230, 80, 70), "Poor / dry")
-                        };
-                        ui.colored_label(color, format!("{:.1}", v));
-                        ui.colored_label(color, qual);
-                    }
-                    _ => {
-                        ui.label("—");
-                        ui.label(if source.impedance_is_simulated() {
-                            "n/a"
-                        } else {
-                            "no hardware reading"
-                        });
+                if is_railed {
+                    let stop = egui::Color32::from_rgb(0xc8, 0x50, 0x50);
+                    ui.colored_label(stop, "Contact lost");
+                    ui.label("");
+                } else {
+                    match val {
+                        Some(v) if *v > 0.0 => {
+                            let v = *v;
+                            let (color, qual) = if v < green_max {
+                                (egui::Color32::from_rgb(60, 180, 90), "Good")
+                            } else if v < yellow_max {
+                                (egui::Color32::from_rgb(230, 180, 60), "OK")
+                            } else {
+                                (egui::Color32::from_rgb(230, 80, 70), "Poor / dry")
+                            };
+                            ui.colored_label(color, format!("{:.1}", v));
+                            ui.colored_label(color, qual);
+                        }
+                        _ => {
+                            ui.label("—");
+                            ui.label(if source.impedance_is_simulated() {
+                                "n/a"
+                            } else {
+                                "no hardware reading"
+                            });
+                        }
                     }
                 }
                 ui.end_row();
