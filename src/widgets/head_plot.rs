@@ -590,18 +590,7 @@ impl Widget for WHeadPlot {
         // Hole assignment UI (appears when user clicks a hole on the 3D head)
         if let Some(hole) = self.assign_hole.clone() {
             ui.horizontal(|ui| {
-                ui.label(format!("Wire {hole}"));
-                for ch in 0..8 {
-                    let cur = if self.map[ch].is_empty() {
-                        "—".to_string()
-                    } else {
-                        self.map[ch].clone()
-                    };
-                    let txt = format!("{} {cur}", ch + 1);
-                    if ui.add(egui::Button::new(txt).small()).clicked() {
-                        self.assign_channel(ch, &hole);
-                    }
-                }
+                ui.label(egui::RichText::new(&hole).color(theme::TEXT));
                 if ui.add(egui::Button::new("Unassign").small()).clicked() {
                     self.clear_hole(&hole);
                 }
@@ -628,7 +617,13 @@ impl Widget for WHeadPlot {
             if let Some(pos) = resp.interact_pointer_pos() {
                 if let Some(i) = hit_hole(pos, &projected, HIT_R) {
                     if let Some(name) = mark_iv::hole_name(i) {
-                        self.assign_hole = Some(name.to_string());
+                        if self.occupied(name).is_some() {
+                            self.assign_hole = Some(name.to_string());
+                        } else if let Some(ch) = self.map.iter().position(|s| s.is_empty()) {
+                            self.assign_channel(ch, name);
+                        } else {
+                            self.assign_hole = Some(name.to_string());
+                        }
                     }
                 }
             }

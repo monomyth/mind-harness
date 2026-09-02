@@ -106,6 +106,8 @@ pub struct ContactLog {
     latched: [bool; 8],
     ring: VecDeque<RingFrame>,
     pending_after: Vec<PendingAfter>,
+    last_common_t: f64,
+    common_notice: Option<String>,
 }
 
 impl Default for ContactLog {
@@ -120,6 +122,8 @@ impl ContactLog {
             latched: [false; 8],
             ring: VecDeque::new(),
             pending_after: Vec::new(),
+            last_common_t: f64::NEG_INFINITY,
+            common_notice: None,
         }
     }
 
@@ -127,6 +131,12 @@ impl ContactLog {
         self.latched = [false; 8];
         self.ring.clear();
         self.pending_after.clear();
+        self.last_common_t = f64::NEG_INFINITY;
+        self.common_notice = None;
+    }
+
+    pub fn take_common_mode_notice(&mut self) -> Option<String> {
+        self.common_notice.take()
     }
 
     pub fn observe(
@@ -167,6 +177,39 @@ impl ContactLog {
         if !after_recording_stopped(markers, t_s) {
             latch_rails(&mut self.latched, channels);
         }
+
+        if let Some((n_jump, mag)) = crate::laterality::common_mode_jump(channels) {
+            if t_s - self.last_common_t > 1.0 {
+                self.last_common_t = t_s;
+                let mark = nearest_mark(markers, t_s);
+                let vs = if n_jump >= 8 { "all eight" } else { "many vs one" };
+                let line = format!(
+                    "common-mode jump t={t_s:.2}s n={n_jump} {vs} mag={mag:.0}uV loss={loss_pct:.1}% mark={}",
+                    mark.as_deref().unwrap_or("-")
+                );
+                self.common_notice = Some(line);
+                if let Some(path) = recording {
+                    let ev = ContactEvent::line(
+                        "common_mode",
+                        sample,
+                        t_s,
+                        "all",
+                        SiteNums {
+                            max_step: mag,
+                            neighbor_med: mag,
+                            p2p: 0.0,
+                            ratio: 1.0,
+                        },
+                        loss_pct,
+                        sr_hz,
+                        mark,
+                        None,
+                    );
+                    let _ = append_event(path, &ev);
+                }
+            }
+        }
+
 
         let Some(path) = recording else {
             return;

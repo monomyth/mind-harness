@@ -684,8 +684,7 @@ impl OpenBciGuiApp {
                 "Digital Read" => Box::new(WDigitalRead::new()),
                 "Pulse Sensor" => Box::new(WPulseSensor::new()),
                 "Board" => Box::new(WHardwareSettings::new()),
-                "Left / right" => Box::new(WHemispheres::new()),
-                "Which first" => Box::new(WSlowWaves::new()),
+                "Left / right" | "Which first" => Box::new(WHeadPlot::new()),
                 _ => Box::new(WTimeSeries::new()),
             };
             wm.add_widget(widget);
@@ -974,6 +973,9 @@ impl OpenBciGuiApp {
             &markers,
             path.as_deref(),
         );
+        if let Some(line) = self.contact.take_common_mode_notice() {
+            self.event_log.log_system(&line);
+        }
     }
 
     fn write_experiment_marker(&mut self, label: &str) {
@@ -1335,8 +1337,6 @@ impl OpenBciGuiApp {
             "Band Power",
             "Accelerometer",
             "Head Plot",
-            "Left / right",
-            "Which first",
             "Impedance",
             "Spectrogram",
             "EMG",
@@ -2377,6 +2377,32 @@ impl eframe::App for OpenBciGuiApp {
                                     ui.label(
                                         egui::RichText::new("Guided recording").color(theme::TEXT),
                                     );
+                                    let exp_running = self.experiment.is_running();
+                                    let exp_label = if exp_running {
+                                        "Stop"
+                                    } else {
+                                        "Start"
+                                    };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new(exp_label).color(theme::TEXT),
+                                            )
+                                            .fill(if exp_running {
+                                                theme::STOP
+                                            } else {
+                                                theme::START
+                                            })
+                                            .stroke(theme::hairline()),
+                                        )
+                                        .clicked()
+                                    {
+                                        if exp_running {
+                                            self.cancel_experiment();
+                                        } else {
+                                            self.start_experiment();
+                                        }
+                                    }
                                     if let Some(board) = self.board.as_deref() {
                                         let mut widget_ctx = WidgetContext::new(
                                             &mut self.networking,
@@ -2494,6 +2520,47 @@ impl eframe::App for OpenBciGuiApp {
                                                     w.as_any_mut().downcast_mut::<WHeadPlot>()
                                                 {
                                                     hp.set_action(MontageUiAction::Save);
+                                                }
+                                            }
+                                        }
+                                        if ui
+                                            .add(egui::Button::new("Load").small().frame(false))
+                                            .on_hover_text("Load the selected profile")
+                                            .clicked()
+                                        {
+                                            for w in self
+                                                .widget_manager
+                                                .widgets
+                                                .iter_mut()
+                                                .chain(self.tool_widgets.iter_mut())
+                                            {
+                                                if let Some(hp) =
+                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                                {
+                                                    hp.set_action(MontageUiAction::Select(
+                                                        shown.clone(),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        if ui
+                                            .add(egui::Button::new("Default").small().frame(false))
+                                            .on_hover_text("Official 8 inserts")
+                                            .clicked()
+                                        {
+                                            for w in self
+                                                .widget_manager
+                                                .widgets
+                                                .iter_mut()
+                                                .chain(self.tool_widgets.iter_mut())
+                                            {
+                                                if let Some(hp) =
+                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                                {
+                                                    hp.set_action(MontageUiAction::Select(
+                                                        crate::widgets::head_plot::DEFAULT_PROFILE_NAME
+                                                            .to_string(),
+                                                    ));
                                                 }
                                             }
                                         }
@@ -3321,8 +3388,8 @@ mod properties_rack_tests {
             .next()
             .unwrap_or("");
         assert!(slots.contains("\"Head Plot\""), "{slots}");
-        assert!(slots.contains("\"Left / right\""), "{slots}");
-        assert!(slots.contains("\"Which first\""), "{slots}");
+        assert!(!slots.contains("\"Left / right\""), "{slots}");
+        assert!(!slots.contains("\"Which first\""), "{slots}");
         assert!(!slots.contains("\"Hemispheres\""), "{slots}");
         assert!(!slots.contains("\"Slow Waves\""), "{slots}");
         let rebuild = src

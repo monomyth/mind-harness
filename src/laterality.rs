@@ -385,6 +385,28 @@ pub fn channels_railed(channels: &[Vec<f64>]) -> [bool; 8] {
     out
 }
 
+
+/// Every used hole jumps together (ear clip, bias, cable). Not one insert lifting.
+pub fn common_mode_jump(channels: &[Vec<f64>]) -> Option<(usize, f64)> {
+    let n = channels.len().min(8);
+    if n < 6 {
+        return None;
+    }
+    let steps: Vec<f64> = (0..n).map(|i| max_abs_step(&channels[i])).collect();
+    let jumped: Vec<usize> = (0..n).filter(|&i| steps[i] >= SQUARE_STEP_UV).collect();
+    if jumped.len() < 6 {
+        return None;
+    }
+    let mut js: Vec<f64> = jumped.iter().map(|&i| steps[i]).collect();
+    js.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let med = js[js.len() / 2];
+    let maxs = *js.last().unwrap_or(&0.0);
+    if med > 0.0 && maxs > med * RAIL_RATIO {
+        return None;
+    }
+    Some((jumped.len(), maxs))
+}
+
 pub fn latch_rails(current: &mut [bool; 8], channels: &[Vec<f64>]) {
     let flags = channels_railed(channels);
     for i in 0..8 {
