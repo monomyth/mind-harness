@@ -226,7 +226,7 @@ pub struct OpenBciGuiApp {
     persisted_ads_channels: Vec<AdsChannel>,
     last_recording_path: Option<std::path::PathBuf>,
 
-    /// Exclusive PROPERTIES accordion. Session is independent and not stored here.
+    /// Exclusive PROPERTIES accordion. None = Session open; Some(id) = that section open.
     properties_open: Option<String>,
 
     experiment: crate::experiment::ExperimentRun,
@@ -1386,9 +1386,10 @@ impl OpenBciGuiApp {
         });
     }
 
-    fn draw_session_rack(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Session")
-            .default_open(true)
+    fn draw_session_rack(&mut self, ui: &mut egui::Ui, exclusive_open: &mut Option<String>) {
+        let session_is_open = exclusive_open.is_none();
+        let resp = egui::CollapsingHeader::new("Session")
+            .open(Some(session_is_open))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Layout");
@@ -1508,6 +1509,9 @@ impl OpenBciGuiApp {
                     });
                 }
             });
+        if resp.header_response.clicked() && !session_is_open {
+            *exclusive_open = None;
+        }
     }
 }
 
@@ -2286,10 +2290,10 @@ impl eframe::App for OpenBciGuiApp {
                             .auto_shrink([false; 2])
                             .show(ui, |ui| {
                                 ui.spacing_mut().item_spacing.y = 0.0;
-                                properties_card(ui, |ui| {
-                                    self.draw_session_rack(ui);
-                                });
                                 let mut open = self.properties_open.take();
+                                properties_card(ui, |ui| {
+                                    self.draw_session_rack(ui, &mut open);
+                                });
                                 draw_exclusive_section(ui, &mut open, "Experiments", |ui| {
                                     ui.label(
                                         egui::RichText::new("Guided recording").color(theme::TEXT),
@@ -2939,7 +2943,7 @@ fn properties_card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) 
     ui.add_space(8.0);
 }
 
-/// PROPERTIES accordion spine (Session is independent and drawn first).
+/// PROPERTIES accordion spine (Session = None; these ids = Some(id)).
 pub(crate) const PROPERTIES_SPINE_IDS: &[&str] = &["Experiments", "Networking", "Hardware"];
 
 fn show_named_tool(
@@ -2954,7 +2958,7 @@ fn show_named_tool(
     }
 }
 
-/// PROPERTIES accordion: Session is independent. At most one other section is open.
+/// PROPERTIES accordion: None = Session open; Some(id) = that section open, Session closed.
 pub(crate) fn exclusive_section_open(current: &Option<String>, id: &str) -> bool {
     current.as_deref() == Some(id)
 }
@@ -3116,12 +3120,23 @@ mod properties_rack_tests {
     }
 
     #[test]
-    fn session_is_not_an_accordion_member() {
-        let mut current = Some("Experiments".into());
+    fn session_is_open_when_none_closed_when_some() {
+        let current: Option<String> = None;
+        assert!(
+            current.is_none(),
+            "None = Session open, exclusive sections closed"
+        );
+
+        let current = Some("Experiments".into());
         assert!(exclusive_section_open(&current, "Experiments"));
-        assert!(!exclusive_section_open(&current, "Session"));
+        assert!(
+            current.is_some(),
+            "Some = Session closed, that exclusive section open"
+        );
+
+        let mut current = Some("Experiments".into());
         exclusive_section_clicked(&mut current, "Hardware");
-        assert!(!exclusive_section_open(&current, "Session"));
+        assert!(!exclusive_section_open(&current, "Experiments"));
         assert!(exclusive_section_open(&current, "Hardware"));
     }
 

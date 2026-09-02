@@ -9,6 +9,7 @@
 //!   calls the DataSource mut methods. This keeps the Widget trait surface unchanged.
 
 use crate::board::DataSource;
+use crate::widgets::head_plot::LABELS;
 use crate::widgets::Widget;
 use eframe::egui;
 
@@ -108,7 +109,8 @@ impl Widget for WImpedance {
                 ui.colored_label(egui::Color32::from_rgb(80, 200, 120), "● Testing...");
             }
             if let Some(ch) = source.impedance_scan_channel() {
-                ui.small(format!("measuring ch {} (ADS1299 lead-off)", ch + 1));
+                let site = LABELS.get(ch).copied().unwrap_or("—");
+                ui.small(format!("measuring {} (ADS1299 lead-off)", site));
             }
         });
 
@@ -126,13 +128,14 @@ impl Widget for WImpedance {
         let (green_max, yellow_max) = source.impedance_quality_kohm();
 
         egui::Grid::new("imp_grid").striped(true).show(ui, |ui| {
-            ui.strong("Ch");
+            ui.strong("Site");
             ui.strong("Impedance (kΩ)");
             ui.strong("Quality");
             ui.end_row();
 
             for (i, val) in self.last_values.iter().enumerate().take(n) {
-                ui.label(format!("{}", i + 1));
+                let label = LABELS.get(i).copied().unwrap_or_else(|| "—");
+                ui.label(label);
                 match val {
                     Some(v) if *v > 0.0 => {
                         let v = *v;
