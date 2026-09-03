@@ -58,6 +58,7 @@ impl WSlowWaves {
                 .map(|idx| OverlaySite {
                     idx,
                     fill: fill[idx],
+                    hz: None,
                 })
                 .collect(),
             railed: self.railed,

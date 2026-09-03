@@ -1,61 +1,115 @@
-//! Ten-step spoken guided experiment.
+//! Guided recording (ten-step) and Eyes closed (second protocol).
 //!
 //! Holds live on an Instant clock (not packet time). Speech is fire-and-forget
-//! (`say` in a background thread) so the egui thread never blocks.
+//! (`say` in a background thread) so the egui thread never blocks. Bells are
+//! `afplay` system sounds, never a spoken word and never a trace label.
 
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtocolKind {
+    Guided,
+    EyesClosed,
+}
+
+impl ProtocolKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            ProtocolKind::Guided => "Guided recording",
+            ProtocolKind::EyesClosed => "Eyes closed",
+        }
+    }
+
+    pub fn steps(self) -> &'static [Step] {
+        match self {
+            ProtocolKind::Guided => &STEPS,
+            ProtocolKind::EyesClosed => &EYES_CLOSED,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cue {
+    Speak,
+    SpeakThenBell,
+    BellThenSpeak,
+    Silence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Step {
     pub spoken: &'static str,
-    /// `None` = no hold; enter and finish (step 10).
+    /// `None` = no hold; enter and finish (guided step 10).
     pub hold: Option<Duration>,
+    pub file_mark: Option<&'static str>,
+    pub cue: Cue,
+}
+
+const fn guided(spoken: &'static str, hold: Option<Duration>) -> Step {
+    Step {
+        spoken,
+        hold,
+        file_mark: None,
+        cue: Cue::Speak,
+    }
 }
 
 /// Locked Creative Writer / Neuroscience copy. Holds are on the clock, not in the voice.
 pub const STEPS: [Step; 10] = [
+    guided(
+        "Recording started. Sit still. Eyes open, face relaxed.",
+        Some(Duration::from_secs(45)),
+    ),
+    guided("Close your eyes.", Some(Duration::from_secs(45))),
+    guided("Open your eyes.", Some(Duration::from_secs(20))),
+    guided("Blink ten times.", Some(Duration::from_secs(15))),
+    guided(
+        "Clench your jaw. Keep your eyes open.",
+        Some(Duration::from_secs(10)),
+    ),
+    guided("Relax your jaw.", Some(Duration::from_secs(10))),
+    guided("Raise your eyebrows.", Some(Duration::from_secs(10))),
+    guided("Relax your face.", Some(Duration::from_secs(10))),
+    guided("Sit still.", Some(Duration::from_secs(15))),
+    guided("Recording stopped.", None),
+];
+
+/// Eyes closed: spoken as-is. File marks only sit still · close eyes · open eyes · sit still.
+pub const EYES_CLOSED: [Step; 5] = [
     Step {
-        spoken: "Recording started. Sit still. Eyes open, face relaxed.",
-        hold: Some(Duration::from_secs(45)),
+        spoken: "Sit still. Eyes open. Face and jaw relaxed. Take a minute to prepare for a ten-minute meditation.",
+        hold: Some(Duration::from_secs(60)),
+        file_mark: Some("sit still"),
+        cue: Cue::Speak,
     },
     Step {
         spoken: "Close your eyes.",
-        hold: Some(Duration::from_secs(45)),
+        hold: Some(Duration::from_secs(4)),
+        file_mark: Some("close eyes"),
+        cue: Cue::SpeakThenBell,
+    },
+    Step {
+        spoken: "",
+        hold: Some(Duration::from_secs(600)),
+        file_mark: None,
+        cue: Cue::Silence,
     },
     Step {
         spoken: "Open your eyes.",
-        hold: Some(Duration::from_secs(20)),
-    },
-    Step {
-        spoken: "Blink ten times.",
-        hold: Some(Duration::from_secs(15)),
-    },
-    Step {
-        spoken: "Clench your jaw. Keep your eyes open.",
-        hold: Some(Duration::from_secs(10)),
-    },
-    Step {
-        spoken: "Relax your jaw.",
-        hold: Some(Duration::from_secs(10)),
-    },
-    Step {
-        spoken: "Raise your eyebrows.",
-        hold: Some(Duration::from_secs(10)),
-    },
-    Step {
-        spoken: "Relax your face.",
-        hold: Some(Duration::from_secs(10)),
+        hold: Some(Duration::from_secs(5)),
+        file_mark: Some("open eyes"),
+        cue: Cue::BellThenSpeak,
     },
     Step {
         spoken: "Sit still.",
-        hold: Some(Duration::from_secs(15)),
-    },
-    Step {
-        spoken: "Recording stopped.",
-        hold: None,
+        hold: Some(Duration::from_secs(20)),
+        file_mark: Some("sit still"),
+        cue: Cue::Speak,
     },
 ];
+
+pub const BELL_SOUND: &str = "/System/Library/Sounds/Glass.aiff";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExperimentEvent {
@@ -64,7 +118,7 @@ pub enum ExperimentEvent {
     Cancelled,
 }
 
-/// Quiet chrome for the Time Series traces (current step + whisper of next).
+/// Quiet chrome for the Time Series traces: only the current spoken beat.
 #[derive(Clone, Debug)]
 pub struct ExperimentOverlay {
     pub step_number: usize,
@@ -73,11 +127,22 @@ pub struct ExperimentOverlay {
     pub next_spoken: Option<&'static str>,
 }
 
+pub fn format_remaining(secs: u64) -> String {
+    if secs >= 60 {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 impl ExperimentOverlay {
     pub fn current_line(&self) -> String {
-        match self.remaining_secs {
-            Some(s) => format!("{}/10 {}  {s}s", self.step_number, self.spoken),
-            None => format!("{}/10 {}", self.step_number, self.spoken),
+        let beat = self.spoken.trim();
+        match (beat.is_empty(), self.remaining_secs) {
+            (true, Some(s)) => format_remaining(s),
+            (true, None) => String::new(),
+            (false, Some(s)) => format!("{beat}  {}", format_remaining(s)),
+            (false, None) => beat.to_string(),
         }
     }
 
@@ -91,8 +156,29 @@ pub fn marker_label(index: usize) -> String {
     format!("{}/10 {}", index + 1, step.spoken)
 }
 
+pub fn file_mark(protocol: ProtocolKind, index: usize) -> String {
+    let steps = protocol.steps();
+    match protocol {
+        ProtocolKind::Guided => {
+            if index < steps.len() {
+                marker_label(index)
+            } else {
+                String::new()
+            }
+        }
+        ProtocolKind::EyesClosed => steps
+            .get(index)
+            .and_then(|s| s.file_mark)
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
 /// macOS `say` in a detached process. Never call this on the egui thread with `.wait()`.
 pub fn speak_detached(text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
     let text = text.to_string();
     std::thread::spawn(move || {
         let _ = Command::new("say")
@@ -102,6 +188,50 @@ pub fn speak_detached(text: &str) {
             .stderr(std::process::Stdio::null())
             .spawn();
     });
+}
+
+pub fn play_bell_blocking() {
+    let _ = Command::new("afplay")
+        .arg(BELL_SOUND)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+pub fn play_step_cue(step: Step) {
+    match step.cue {
+        Cue::Silence => {}
+        Cue::Speak => speak_detached(step.spoken),
+        Cue::SpeakThenBell => {
+            let text = step.spoken.to_string();
+            std::thread::spawn(move || {
+                if !text.trim().is_empty() {
+                    let _ = Command::new("say")
+                        .arg(&text)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+                play_bell_blocking();
+            });
+        }
+        Cue::BellThenSpeak => {
+            let text = step.spoken.to_string();
+            std::thread::spawn(move || {
+                play_bell_blocking();
+                if !text.trim().is_empty() {
+                    let _ = Command::new("say")
+                        .arg(&text)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+            });
+        }
+    }
 }
 
 fn ceil_secs(d: Duration) -> u64 {
@@ -115,6 +245,7 @@ fn ceil_secs(d: Duration) -> u64 {
 
 pub struct ExperimentRun {
     running: bool,
+    protocol: ProtocolKind,
     index: usize,
     step_started: Instant,
 }
@@ -129,6 +260,7 @@ impl ExperimentRun {
     pub fn new() -> Self {
         Self {
             running: false,
+            protocol: ProtocolKind::Guided,
             index: 0,
             step_started: Instant::now(),
         }
@@ -142,13 +274,26 @@ impl ExperimentRun {
         self.index
     }
 
+    pub fn protocol(&self) -> ProtocolKind {
+        self.protocol
+    }
+
+    pub fn current_step(&self) -> Option<Step> {
+        self.protocol.steps().get(self.index).copied()
+    }
+
     pub fn start(&mut self, now: Instant) -> ExperimentEvent {
+        self.start_protocol(ProtocolKind::Guided, now)
+    }
+
+    pub fn start_protocol(&mut self, protocol: ProtocolKind, now: Instant) -> ExperimentEvent {
         self.running = true;
+        self.protocol = protocol;
         self.index = 0;
         self.step_started = now;
         ExperimentEvent::EnteredStep {
             index: 0,
-            label: marker_label(0),
+            label: file_mark(protocol, 0),
         }
     }
 
@@ -165,7 +310,8 @@ impl ExperimentRun {
         if !self.running {
             return None;
         }
-        let step = STEPS[self.index];
+        let steps = self.protocol.steps();
+        let step = steps[self.index];
         match step.hold {
             None => {
                 self.running = false;
@@ -176,13 +322,13 @@ impl ExperimentRun {
                 if elapsed >= hold {
                     self.index += 1;
                     self.step_started = now;
-                    if self.index >= STEPS.len() {
+                    if self.index >= steps.len() {
                         self.running = false;
                         return Some(ExperimentEvent::Finished);
                     }
                     Some(ExperimentEvent::EnteredStep {
                         index: self.index,
-                        label: marker_label(self.index),
+                        label: file_mark(self.protocol, self.index),
                     })
                 } else {
                     None
@@ -195,7 +341,8 @@ impl ExperimentRun {
         if !self.running {
             return None;
         }
-        let step = STEPS[self.index];
+        let steps = self.protocol.steps();
+        let step = steps[self.index];
         let remaining_secs = step.hold.map(|hold| {
             ceil_secs(hold.saturating_sub(now.saturating_duration_since(self.step_started)))
         });
@@ -203,7 +350,7 @@ impl ExperimentRun {
             step_number: self.index + 1,
             spoken: step.spoken,
             remaining_secs,
-            next_spoken: STEPS.get(self.index + 1).map(|s| s.spoken),
+            next_spoken: None,
         })
     }
 
@@ -316,10 +463,10 @@ mod tests {
         let ov = run.overlay(t0).expect("running");
         assert_eq!(ov.step_number, 1);
         assert_eq!(ov.remaining_secs, Some(45));
-        assert_eq!(ov.next_spoken, Some("Close your eyes."));
+        assert_eq!(ov.next_spoken, None);
         assert_eq!(
             ov.current_line(),
-            "1/10 Recording started. Sit still. Eyes open, face relaxed.  45s"
+            "Recording started. Sit still. Eyes open, face relaxed.  45s"
         );
         let ov = run.overlay(t0 + Duration::from_secs(10)).unwrap();
         assert_eq!(ov.remaining_secs, Some(35));
@@ -341,5 +488,82 @@ mod tests {
         assert!(!run.is_running());
         assert!(run.cancel().is_none());
         assert!(run.overlay(t0).is_none());
+    }
+
+    #[test]
+    fn eyes_closed_spoken_holds_and_file_marks() {
+        assert_eq!(
+            EYES_CLOSED[0].spoken,
+            "Sit still. Eyes open. Face and jaw relaxed. Take a minute to prepare for a ten-minute meditation."
+        );
+        assert_eq!(EYES_CLOSED[0].hold, Some(Duration::from_secs(60)));
+        assert_eq!(EYES_CLOSED[0].file_mark, Some("sit still"));
+        assert_eq!(EYES_CLOSED[1].spoken, "Close your eyes.");
+        assert_eq!(EYES_CLOSED[1].cue, Cue::SpeakThenBell);
+        assert_eq!(EYES_CLOSED[1].file_mark, Some("close eyes"));
+        assert_eq!(EYES_CLOSED[2].spoken, "");
+        assert_eq!(EYES_CLOSED[2].hold, Some(Duration::from_secs(600)));
+        assert_eq!(EYES_CLOSED[2].cue, Cue::Silence);
+        assert_eq!(EYES_CLOSED[2].file_mark, None);
+        assert_eq!(EYES_CLOSED[3].spoken, "Open your eyes.");
+        assert_eq!(EYES_CLOSED[3].cue, Cue::BellThenSpeak);
+        assert_eq!(EYES_CLOSED[3].file_mark, Some("open eyes"));
+        assert_eq!(EYES_CLOSED[4].spoken, "Sit still.");
+        assert_eq!(EYES_CLOSED[4].hold, Some(Duration::from_secs(20)));
+        assert_eq!(EYES_CLOSED[4].file_mark, Some("sit still"));
+        let marks: Vec<_> = (0..5)
+            .map(|i| file_mark(ProtocolKind::EyesClosed, i))
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(
+            marks,
+            vec!["sit still", "close eyes", "open eyes", "sit still"]
+        );
+        assert_eq!(BELL_SOUND, "/System/Library/Sounds/Glass.aiff");
+    }
+
+    #[test]
+    fn eyes_closed_silence_overlay_is_remaining_only() {
+        let mut run = ExperimentRun::new();
+        let t0 = Instant::now();
+        match run.start_protocol(ProtocolKind::EyesClosed, t0) {
+            ExperimentEvent::EnteredStep { label, .. } => assert_eq!(label, "sit still"),
+            other => panic!("{other:?}"),
+        }
+        let ov = run.overlay(t0).unwrap();
+        assert!(ov.current_line().contains("Sit still. Eyes open"));
+        assert_eq!(ov.next_spoken, None);
+        let _ = run.tick(t0 + Duration::from_secs(60));
+        let _ = run.tick(t0 + Duration::from_secs(64));
+        assert_eq!(run.index(), 2);
+        let ov = run.overlay(t0 + Duration::from_secs(64)).unwrap();
+        assert!(ov.spoken.is_empty());
+        assert_eq!(ov.remaining_secs, Some(600));
+        assert_eq!(ov.current_line(), "10:00");
+        assert!(!ov.current_line().to_lowercase().contains("bell"));
+    }
+
+    #[test]
+    fn eyes_closed_silence_remaining_is_wall_clock_when_samples_missing() {
+        let mut run = ExperimentRun::new();
+        let t0 = Instant::now();
+        let _ = run.start_protocol(ProtocolKind::EyesClosed, t0);
+        assert!(run.tick(t0 + Duration::from_secs(60)).is_some());
+        assert!(run.tick(t0 + Duration::from_secs(64)).is_some());
+        assert_eq!(run.index(), 2);
+        // No samples for a minute of wall time: remaining is 9:00, not a skip.
+        let ov = run
+            .overlay(t0 + Duration::from_secs(64 + 60))
+            .expect("silence");
+        assert_eq!(ov.remaining_secs, Some(540));
+        assert_eq!(ov.current_line(), "9:00");
+        assert!(run.tick(t0 + Duration::from_secs(64 + 60)).is_none());
+        assert!(run.tick(t0 + Duration::from_secs(64 + 599)).is_none());
+        match run.tick(t0 + Duration::from_secs(64 + 600)) {
+            Some(ExperimentEvent::EnteredStep { label, .. }) => {
+                assert_eq!(label, "open eyes");
+            }
+            other => panic!("silence is 600s wall, got {other:?}"),
+        }
     }
 }

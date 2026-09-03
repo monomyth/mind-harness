@@ -190,15 +190,6 @@ fn paint_experiment_overlay(ui: &egui::Ui, rect: Rect, overlay: &ExperimentOverl
         egui::FontId::proportional(11.0),
         theme::TEXT,
     );
-    if let Some(next) = overlay.next_spoken {
-        painter.text(
-            pos2(rect.left() + 6.0, rect.top() + 30.0),
-            egui::Align2::LEFT_TOP,
-            next,
-            egui::FontId::proportional(10.0),
-            theme::HAIRLINE,
-        );
-    }
 }
 
 fn sample_at(row: &[f64], board_ch: usize) -> f64 {
@@ -419,28 +410,6 @@ impl Widget for WTimeSeries {
                     }
                 });
 
-            ui.label("Window");
-            let options = [1.0, 3.0, 5.0, 10.0, 20.0];
-            let labels = ["1 sec", "3 sec", "5 sec", "10 sec", "20 sec"];
-            let mut selected_text = format!("{:.0} sec", self.time_window_sec);
-            for (i, &secs) in options.iter().enumerate() {
-                if (self.time_window_sec - secs).abs() < 0.1 {
-                    selected_text = labels[i].to_string();
-                    break;
-                }
-            }
-            egui::ComboBox::from_id_salt("ts_window")
-                .selected_text(selected_text)
-                .show_ui(ui, |ui| {
-                    for (i, &secs) in options.iter().enumerate() {
-                        if ui
-                            .selectable_label((self.time_window_sec - secs).abs() < 0.1, labels[i])
-                            .clicked()
-                        {
-                            self.time_window_sec = secs;
-                        }
-                    }
-                });
         });
 
         let available_height = ui.available_height();

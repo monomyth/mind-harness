@@ -7,12 +7,14 @@ use eframe::egui;
 use std::collections::VecDeque;
 
 const BINS: usize = 48;
-const MAX_COLS: usize = 180;
+const COLS_PER_SEC: f32 = 20.0;
 
 pub struct WSpectrogram {
     title: String,
     channel: usize,
     columns: VecDeque<Vec<f32>>,
+    window_sec: f32,
+    smoothing_index: usize,
 }
 
 impl WSpectrogram {
@@ -20,9 +22,38 @@ impl WSpectrogram {
         Self {
             title: "Spectrogram".to_string(),
             channel: 0,
-            columns: VecDeque::with_capacity(MAX_COLS),
+            columns: VecDeque::new(),
+            window_sec: 5.0,
+            smoothing_index: 2,
         }
     }
+
+    pub fn set_window_sec(&mut self, seconds: f32) {
+        self.window_sec = seconds.max(1.0);
+    }
+
+    pub fn set_smoothing_index(&mut self, index: usize) {
+        self.smoothing_index = index.min(crate::widgets::SMOOTH_FACTORS.len() - 1);
+    }
+
+    pub fn window_sec(&self) -> f32 {
+        self.window_sec
+    }
+}
+
+/// Columns spanning `window_sec`, hop so newest is last. `nfft` is the FFT slice.
+pub fn spectrogram_starts(n_samples: usize, nfft: usize, hop: usize) -> Vec<usize> {
+    if n_samples < nfft || hop == 0 {
+        return Vec::new();
+    }
+    let extra = (n_samples - nfft) % hop;
+    let mut starts = Vec::new();
+    let mut s = extra;
+    while s + nfft <= n_samples {
+        starts.push(s);
+        s += hop;
+    }
+    starts
 }
 
 impl Default for WSpectrogram {
@@ -61,7 +92,9 @@ impl Widget for WSpectrogram {
         }
         self.channel = self.channel.min(exg.len() - 1);
         let ch = exg[self.channel];
-        let data = source.get_data(256);
+        let sr = source.sample_rate() as f64;
+        let n = ((self.window_sec as f64) * sr).round() as usize;
+        let data = source.get_data(n.max(32));
         if data.len() < 32 {
             return;
         }
@@ -69,25 +102,43 @@ impl Widget for WSpectrogram {
             .iter()
             .map(|row| row.get(ch).copied().unwrap_or(0.0))
             .collect();
-        let (_freqs, mags) = compute_fft_magnitude(&samples, source.sample_rate() as f64, 60.0);
-        if mags.is_empty() {
-            return;
-        }
-        let mut col = vec![0.0f32; BINS];
-        let step = (mags.len() as f32 / BINS as f32).max(1.0);
-        for (i, slot) in col.iter_mut().enumerate() {
-            let start = (i as f32 * step) as usize;
-            let end = ((i as f32 + 1.0) * step) as usize;
-            let slice =
-                &mags[start.min(mags.len())..end.min(mags.len()).max(start + 1).min(mags.len())];
-            if !slice.is_empty() {
-                *slot = slice.iter().copied().fold(f64::NEG_INFINITY, f64::max) as f32;
+        let nfft = 256.min(samples.len());
+        let hop = ((sr / COLS_PER_SEC as f64).round() as usize).max(1);
+        let starts = spectrogram_starts(samples.len(), nfft, hop);
+        let factor = crate::widgets::SMOOTH_FACTORS
+            .get(self.smoothing_index)
+            .copied()
+            .unwrap_or(0.0) as f64;
+        let mut new_cols: VecDeque<Vec<f32>> = VecDeque::new();
+        for (ci, start) in starts.iter().enumerate() {
+            let slice = &samples[*start..*start + nfft];
+            let (_freqs, mags) = compute_fft_magnitude(slice, sr, 60.0);
+            if mags.is_empty() {
+                continue;
             }
+            let mut col = vec![0.0f32; BINS];
+            let step = (mags.len() as f32 / BINS as f32).max(1.0);
+            for (i, slot) in col.iter_mut().enumerate() {
+                let a = (i as f32 * step) as usize;
+                let b = ((i as f32 + 1.0) * step) as usize;
+                let slice =
+                    &mags[a.min(mags.len())..b.min(mags.len()).max(a + 1).min(mags.len())];
+                if !slice.is_empty() {
+                    *slot = slice.iter().copied().fold(f64::NEG_INFINITY, f64::max) as f32;
+                }
+            }
+            if factor > 0.0 {
+                if let Some(prev) = self.columns.get(ci) {
+                    if prev.len() == col.len() {
+                        for (n, o) in col.iter_mut().zip(prev.iter()) {
+                            *n = (*o as f64 * factor + *n as f64 * (1.0 - factor)) as f32;
+                        }
+                    }
+                }
+            }
+            new_cols.push_back(col);
         }
-        self.columns.push_back(col);
-        while self.columns.len() > MAX_COLS {
-            self.columns.pop_front();
-        }
+        self.columns = new_cols;
     }
 
     fn show(
@@ -112,7 +163,10 @@ impl Widget for WSpectrogram {
                         }
                     }
                 });
-            ui.small("0–60 Hz  •  newest on the right");
+            ui.small(format!(
+                "0–60 Hz  •  {:.0}s  •  newest on the right",
+                self.window_sec
+            ));
         });
 
         let desired = egui::vec2(ui.available_width(), ui.available_height().max(80.0));
@@ -170,5 +224,29 @@ impl Widget for WSpectrogram {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn columns_span_the_window_and_newest_is_last() {
+        let sr = 250.0_f64;
+        let window = 5.0_f32;
+        let n = (window as f64 * sr) as usize;
+        let nfft = 256;
+        let hop = (sr / COLS_PER_SEC as f64).round() as usize;
+        let starts = spectrogram_starts(n, nfft, hop);
+        assert!(!starts.is_empty());
+        let last_end = starts.last().copied().unwrap() + nfft;
+        assert_eq!(last_end, n, "newest column ends at the newest sample");
+        let span = (n - starts[0]) as f32 / sr as f32;
+        assert!(
+            (span - window).abs() < 1.1,
+            "span {span}s should be the window {window}s"
+        );
+        assert!(starts.windows(2).all(|w| w[1] > w[0]));
     }
 }

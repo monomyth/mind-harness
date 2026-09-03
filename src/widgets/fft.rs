@@ -27,6 +27,7 @@ pub struct WFFT {
     max_freq: f64,
     max_uv: f64,
     smoothing_index: usize, // index into SMOOTH_FACTORS (0.0 = raw, higher = more temporal averaging)
+    window_sec: f32,
     // Previous smoothed magnitudes per channel (for exponential smoothing over frames)
     prev_mags: Vec<Vec<f64>>,
     railed: [bool; 8],
@@ -39,6 +40,7 @@ impl WFFT {
             max_freq: 100.0,    // past 60 Hz so a 60 Hz notch is an interior dip, not an axis-edge spike
             max_uv: 100.0,      // Java `yLimOptions[2]`
             smoothing_index: 2, // default 0.75 — matches original Java GUI
+            window_sec: 5.0,
             prev_mags: vec![],
             railed: [false; 8],
         }
@@ -51,6 +53,10 @@ impl WFFT {
 
     pub fn smoothing_index(&self) -> usize {
         self.smoothing_index
+    }
+
+    pub fn set_window_sec(&mut self, seconds: f32) {
+        self.window_sec = seconds.max(1.0);
     }
 }
 
@@ -114,31 +120,12 @@ impl Widget for WFFT {
                     }
                 });
 
-            ui.label("Smooth:");
-            let labels = ["0.0", "0.5", "0.75", "0.9", "0.95", "0.98", "0.99", "0.999"];
-            let current = crate::widgets::SMOOTH_FACTORS
-                .get(self.smoothing_index)
-                .copied()
-                .unwrap_or(0.75);
-            let current_label = labels.get(self.smoothing_index).copied().unwrap_or("0.75");
-            egui::ComboBox::from_id_salt("fft_smooth")
-                .selected_text(current_label)
-                .show_ui(ui, |ui| {
-                    for (i, &lab) in labels.iter().enumerate() {
-                        if ui
-                            .selectable_label(self.smoothing_index == i, lab)
-                            .clicked()
-                        {
-                            self.smoothing_index = i;
-                        }
-                    }
-                });
-            ui.small(format!("factor {:.2}", current));
         });
 
         // Java nfft at 250 Hz is 256 (~1 Hz/bin), so a 1 Hz high-pass is invisible because the first bin is the corner.
         let nfft = crate::fft::nfft_safe(source.sample_rate()).max(1024);
-        let data = source.get_data(nfft);
+        let want = ((self.window_sec as f64) * sample_rate).round() as usize;
+        let data = source.get_data(want.max(nfft));
         let exg = source.exg_channels();
         let raw_rows = source.get_raw_data(nfft.max(32));
         let mut raw_chs: Vec<Vec<f64>> = Vec::new();

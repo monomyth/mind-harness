@@ -8,6 +8,129 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const BDF_HEADER_SIZE: usize = 256;
+const DIG_MIN: i32 = -8_388_608;
+const DIG_MAX: i32 = 8_388_607;
+const EXG_PHYS: i32 = 187_500;
+const ACCEL_PHYS: i32 = 4;
+
+#[derive(Clone, Debug)]
+pub struct BdfSignal {
+    pub label: String,
+    pub transducer: String,
+    pub dimension: String,
+    pub phys_min: i32,
+    pub phys_max: i32,
+    pub dig_min: i32,
+    pub dig_max: i32,
+    pub prefilter: String,
+}
+
+impl BdfSignal {
+    pub fn exg(i: usize) -> Self {
+        Self {
+            label: format!("EXG{i}"),
+            transducer: "AgAgCl electrode".into(),
+            dimension: "uV".into(),
+            phys_min: -EXG_PHYS,
+            phys_max: EXG_PHYS,
+            dig_min: DIG_MIN,
+            dig_max: DIG_MAX,
+            prefilter: "HP:0.1Hz LP:75Hz".into(),
+        }
+    }
+
+    pub fn accel(axis: &str) -> Self {
+        Self {
+            label: format!("Accel {axis}"),
+            transducer: "Accelerometer".into(),
+            dimension: "g".into(),
+            phys_min: -ACCEL_PHYS,
+            phys_max: ACCEL_PHYS,
+            dig_min: DIG_MIN,
+            dig_max: DIG_MAX,
+            prefilter: String::new(),
+        }
+    }
+
+    pub fn index() -> Self {
+        Self {
+            label: "Index".into(),
+            transducer: String::new(),
+            dimension: String::new(),
+            phys_min: DIG_MIN,
+            phys_max: DIG_MAX,
+            dig_min: DIG_MIN,
+            dig_max: DIG_MAX,
+            prefilter: String::new(),
+        }
+    }
+
+    pub fn is_index(&self) -> bool {
+        self.label.trim().eq_ignore_ascii_case("Index")
+    }
+
+    pub fn to_digital(&self, sample: f64) -> i32 {
+        if self.is_index() {
+            return sample
+                .round()
+                .clamp(self.dig_min as f64, self.dig_max as f64) as i32;
+        }
+        if self.dimension.trim() == "uV" {
+            let scale = DIG_MAX as f64 / EXG_PHYS as f64;
+            return (sample * scale).clamp(self.dig_min as f64, self.dig_max as f64) as i32;
+        }
+        let span_p = (self.phys_max - self.phys_min) as f64;
+        let span_d = (self.dig_max - self.dig_min) as f64;
+        let d = (sample - self.phys_min as f64) / span_p.max(1.0) * span_d + self.dig_min as f64;
+        d.round()
+            .clamp(self.dig_min as f64, self.dig_max as f64) as i32
+    }
+}
+
+/// 8 (or N) EXG + Accel X/Y/Z + packet/sample index. Annotations are added by the writer.
+pub fn recording_signals(n_exg: usize) -> Vec<BdfSignal> {
+    let mut out = Vec::with_capacity(n_exg + 4);
+    for i in 0..n_exg {
+        out.push(BdfSignal::exg(i));
+    }
+    out.push(BdfSignal::accel("X"));
+    out.push(BdfSignal::accel("Y"));
+    out.push(BdfSignal::accel("Z"));
+    out.push(BdfSignal::index());
+    out
+}
+
+fn pad_field(s: &str, n: usize) -> Vec<u8> {
+    let mut v = s.as_bytes().to_vec();
+    if v.len() > n {
+        v.truncate(n);
+    } else {
+        v.resize(n, b' ');
+    }
+    v
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BdfKind {
+    Exg,
+    Accel,
+    Index,
+    Annotation,
+}
+
+fn classify_label(label: &str) -> BdfKind {
+    let t = label.trim();
+    let lower = t.to_ascii_lowercase();
+    if lower.starts_with("annot") {
+        BdfKind::Annotation
+    } else if lower.starts_with("accel") {
+        BdfKind::Accel
+    } else if lower == "index" || lower.contains("package") || lower == "sample index" {
+        BdfKind::Index
+    } else {
+        BdfKind::Exg
+    }
+}
 
 pub struct DataWriterBDF {
     writer: BufWriter<File>,
@@ -15,7 +138,7 @@ pub struct DataWriterBDF {
     /// Not read in the current hot path (written once at open).
     #[allow(dead_code)]
     fname: PathBuf,
-    nb_signals: usize, // number of real signals (not counting annotations)
+    signals: Vec<BdfSignal>,
     sample_rate: i32,
     records_written: i64, // can be -1 during writing
     /// Phase 7: BDF record geometry (written to header, kept for potential duration / size queries).
@@ -29,20 +152,21 @@ pub struct DataWriterBDF {
 }
 
 impl DataWriterBDF {
-    pub fn new(path: PathBuf, nb_signals: usize, sample_rate: i32) -> std::io::Result<Self> {
+    pub fn new(path: PathBuf, signals: Vec<BdfSignal>, sample_rate: i32) -> std::io::Result<Self> {
         let file = File::create(&path)?;
         let mut writer = BufWriter::new(file);
 
         let data_record_duration = 1.0;
         let samples_per_record = (sample_rate as f64 * data_record_duration) as usize;
-        // Each sample is 3 bytes (24-bit) + 1 annotation channel (also 3 bytes per sample for simplicity in this MVP)
+        let nb_signals = signals.len();
+        // Each sample is 3 bytes (24-bit) + 1 annotation channel (also 3 bytes per sample)
         let bytes_per_record = (nb_signals + 1) * samples_per_record * 3;
 
         let header_size = BDF_HEADER_SIZE + (nb_signals + 1) * BDF_HEADER_SIZE;
 
         Self::write_header(
             &mut writer,
-            nb_signals,
+            &signals,
             sample_rate,
             header_size,
             data_record_duration,
@@ -51,7 +175,7 @@ impl DataWriterBDF {
         Ok(Self {
             writer,
             fname: path,
-            nb_signals,
+            signals,
             sample_rate,
             records_written: 0,
             data_record_duration,
@@ -63,104 +187,80 @@ impl DataWriterBDF {
 
     fn write_header(
         w: &mut BufWriter<File>,
-        nb_signals: usize,
+        signals: &[BdfSignal],
         fs: i32,
         header_size: usize,
         duration: f64,
     ) -> std::io::Result<()> {
+        let nb_signals = signals.len();
         // 1 byte: 0xFF
         w.write_all(&[0xFF])?;
         // 7 bytes: "BIOSEMI"
         w.write_all(b"BIOSEMI")?;
 
-        // 80 bytes: Local patient identification
-        let patient = format!("{: <80}", "OpenBCI Subject");
-        w.write_all(patient.as_bytes())?;
+        w.write_all(&pad_field("OpenBCI Subject", 80))?;
+        w.write_all(&pad_field("OpenBCI Rust GUI", 80))?;
 
-        // 80 bytes: Local recording identification
-        let recording = format!("{: <80}", "OpenBCI Rust GUI");
-        w.write_all(recording.as_bytes())?;
-
-        // 16 bytes: Start date + time (dd.mm.yyHH.MM.SS)
         let now = chrono::Local::now();
         let dt = now.format("%d.%m.%y%H.%M.%S").to_string();
-        w.write_all(format!("{: <16}", dt).as_bytes())?;
+        w.write_all(&pad_field(&dt, 16))?;
 
-        // 8 bytes: Number of bytes in header
-        w.write_all(format!("{: <8}", header_size).as_bytes())?;
+        w.write_all(&pad_field(&format!("{header_size}"), 8))?;
+        w.write_all(&pad_field("24BIT", 44))?;
+        w.write_all(&pad_field("-1", 8))?;
+        w.write_all(&pad_field(&format!("{duration}"), 8))?;
 
-        // 44 bytes: Reserved
-        w.write_all(format!("{: <44}", "24BIT").as_bytes())?;
-
-        // 8 bytes: Number of data records (-1 = unknown)
-        w.write_all(format!("{: <8}", -1i32).as_bytes())?;
-
-        // 8 bytes: Duration of a data record in seconds
-        w.write_all(format!("{: <8}", duration).as_bytes())?;
-
-        // 4 bytes: Number of signals (including annotations)
         let total_signals = nb_signals + 1;
-        w.write_all(format!("{: <4}", total_signals).as_bytes())?;
+        w.write_all(&pad_field(&format!("{total_signals}"), 4))?;
 
-        // --- Per-signal headers (256 bytes each) ---
-
-        // Labels (16 bytes each)
-        for i in 0..nb_signals {
-            let label = format!("EXG{: <13}", i);
-            w.write_all(label.as_bytes())?;
+        for sig in signals {
+            w.write_all(&pad_field(&sig.label, 16))?;
         }
-        w.write_all(format!("{: <16}", "Annotations").as_bytes())?;
+        w.write_all(&pad_field("Annotations", 16))?;
 
-        // Transducer type (80 bytes each)
+        for sig in signals {
+            w.write_all(&pad_field(&sig.transducer, 80))?;
+        }
+        w.write_all(&pad_field("", 80))?;
+
+        for sig in signals {
+            w.write_all(&pad_field(&sig.dimension, 8))?;
+        }
+        w.write_all(&pad_field("", 8))?;
+
+        for sig in signals {
+            w.write_all(&pad_field(&format!("{}", sig.phys_min), 8))?;
+        }
+        w.write_all(&pad_field("-1", 8))?;
+
+        for sig in signals {
+            w.write_all(&pad_field(&format!("{}", sig.phys_max), 8))?;
+        }
+        w.write_all(&pad_field("1", 8))?;
+
+        for sig in signals {
+            w.write_all(&pad_field(&format!("{}", sig.dig_min), 8))?;
+        }
+        w.write_all(&pad_field(&format!("{DIG_MIN}"), 8))?;
+
+        for sig in signals {
+            w.write_all(&pad_field(&format!("{}", sig.dig_max), 8))?;
+        }
+        w.write_all(&pad_field(&format!("{DIG_MAX}"), 8))?;
+
+        for sig in signals {
+            w.write_all(&pad_field(&sig.prefilter, 80))?;
+        }
+        w.write_all(&pad_field("", 80))?;
+
+        let samples_per_record = fs;
+        for _ in 0..nb_signals {
+            w.write_all(&pad_field(&format!("{samples_per_record}"), 8))?;
+        }
+        w.write_all(&pad_field(&format!("{samples_per_record}"), 8))?;
+
         for _ in 0..total_signals {
-            w.write_all(format!("{: <80}", "AgAgCl electrode").as_bytes())?;
-        }
-
-        // Physical dimension (8 bytes each)
-        for _ in 0..nb_signals {
-            w.write_all(format!("{: <8}", "uV").as_bytes())?;
-        }
-        w.write_all(format!("{: <8}", "").as_bytes())?; // annotations
-
-        // Physical minimum (8 bytes each)
-        for _ in 0..nb_signals {
-            w.write_all(format!("{: <8}", -187500).as_bytes())?;
-        }
-        w.write_all(format!("{: <8}", -1).as_bytes())?;
-
-        // Physical maximum (8 bytes each)
-        for _ in 0..nb_signals {
-            w.write_all(format!("{: <8}", 187500).as_bytes())?;
-        }
-        w.write_all(format!("{: <8}", 1).as_bytes())?;
-
-        // Digital minimum (8 bytes each)
-        for _ in 0..nb_signals {
-            w.write_all(format!("{: <8}", -8388608).as_bytes())?;
-        }
-        w.write_all(format!("{: <8}", -8388608).as_bytes())?;
-
-        // Digital maximum (8 bytes each)
-        for _ in 0..nb_signals {
-            w.write_all(format!("{: <8}", 8388607).as_bytes())?;
-        }
-        w.write_all(format!("{: <8}", 8388607).as_bytes())?;
-
-        // Prefiltering (80 bytes each) - simplified
-        for _ in 0..total_signals {
-            w.write_all(format!("{: <80}", "HP:0.1Hz LP:75Hz").as_bytes())?;
-        }
-
-        // Samples per data record (8 bytes each)
-        let samples_per_record = fs; // 1 second records
-        for _ in 0..nb_signals {
-            w.write_all(format!("{: <8}", samples_per_record).as_bytes())?;
-        }
-        w.write_all(format!("{: <8}", samples_per_record).as_bytes())?; // annotations also get space
-
-        // Reserved per signal (32 bytes each)
-        for _ in 0..total_signals {
-            w.write_all(format!("{: <32}", "").as_bytes())?;
+            w.write_all(&pad_field("", 32))?;
         }
 
         Ok(())
@@ -169,27 +269,22 @@ impl DataWriterBDF {
     /// Write one data record worth of data.
     /// `data` should be a slice of vectors, one per channel, each containing `sample_rate` samples.
     pub fn write_data_record(&mut self, data: &[Vec<f64>]) -> std::io::Result<()> {
-        if data.len() != self.nb_signals {
-            // For simplicity we just pad or truncate
-        }
-
-        for ch in 0..self.nb_signals {
+        let nb_signals = self.signals.len();
+        let n_samp = self.sample_rate as usize;
+        for ch in 0..nb_signals {
             let channel_data = if ch < data.len() { &data[ch] } else { &vec![] };
+            let sig = &self.signals[ch];
 
-            for &sample in channel_data.iter().take(self.sample_rate as usize) {
-                // Cyton Java GUI: physical ±187500 µV, digital ±8388607 (gain=24).
-                let scale = 8388607.0 / 187500.0;
-                let digital = (sample * scale).clamp(-8388608.0, 8388607.0) as i32;
-
+            for &sample in channel_data.iter().take(n_samp) {
+                let digital = sig.to_digital(sample);
                 let b0 = (digital & 0xFF) as u8;
                 let b1 = ((digital >> 8) & 0xFF) as u8;
                 let b2 = ((digital >> 16) & 0xFF) as u8;
                 self.writer.write_all(&[b0, b1, b2])?;
             }
 
-            // Fill remaining samples with zeros if we didn't get enough
-            let written = channel_data.len().min(self.sample_rate as usize);
-            for _ in written..self.sample_rate as usize {
+            let written = channel_data.len().min(n_samp);
+            for _ in written..n_samp {
                 self.writer.write_all(&[0, 0, 0])?;
             }
         }
@@ -217,7 +312,7 @@ impl DataWriterBDF {
 
     pub fn close(&mut self) -> std::io::Result<()> {
         if !self.pending_ann.is_empty() {
-            let empty = vec![Vec::new(); self.nb_signals];
+            let empty = vec![Vec::new(); self.signals.len()];
             let _ = self.write_data_record(&empty);
         }
         self.writer.flush()?;
@@ -393,7 +488,8 @@ pub fn read_bdf(path: &Path) -> std::io::Result<BdfRecording> {
         f.seek(SeekFrom::Start(header_size as u64))?;
     }
 
-    let n_exg = n_signals.saturating_sub(1).max(1);
+    let kinds: Vec<BdfKind> = labels.iter().map(|l| classify_label(l)).collect();
+    let n_exg = kinds.iter().filter(|k| **k == BdfKind::Exg).count().max(1);
     let fs = spr.first().copied().unwrap_or(250) as i32;
     let mut samples: Vec<Vec<f64>> = Vec::new();
     let mut markers = Vec::new();
@@ -404,10 +500,26 @@ pub fn read_bdf(path: &Path) -> std::io::Result<BdfRecording> {
         n_records
     };
     for _ in 0..records {
-        let mut rec_ch: Vec<Vec<f64>> = Vec::with_capacity(n_exg);
+        let mut rec_all: Vec<(BdfKind, Vec<f64>)> = Vec::with_capacity(n_signals);
         let mut eof = false;
-        for ch in 0..n_exg {
+        for ch in 0..n_signals {
             let n = spr.get(ch).copied().unwrap_or(fs as usize);
+            let kind = kinds.get(ch).copied().unwrap_or(BdfKind::Exg);
+            if kind == BdfKind::Annotation {
+                let mut ann = vec![0u8; n * 3];
+                if f.read_exact(&mut ann).is_err() {
+                    eof = true;
+                    break;
+                }
+                for (onset, label) in parse_tal_bytes(&ann) {
+                    let idx = (onset * fs as f64).round().max(0.0) as u64;
+                    let label = label.trim_start_matches("Marker: ").to_string();
+                    if label != "Recording started" && label != "Recording stopped" {
+                        markers.push(MarkerEvent::new(idx, onset, label));
+                    }
+                }
+                continue;
+            }
             let mut col = Vec::with_capacity(n);
             for _ in 0..n {
                 let mut b = [0u8; 3];
@@ -426,30 +538,35 @@ pub fn read_bdf(path: &Path) -> std::io::Result<BdfRecording> {
             if eof {
                 break;
             }
-            rec_ch.push(col);
+            rec_all.push((kind, col));
         }
         if eof {
             break;
         }
-        let ann_n = spr.get(n_exg).copied().unwrap_or(fs as usize);
-        let mut ann = vec![0u8; ann_n * 3];
-        if f.read_exact(&mut ann).is_err() {
-            break;
-        }
-        for (onset, label) in parse_tal_bytes(&ann) {
-            let idx = (onset * fs as f64).round().max(0.0) as u64;
-            let label = label.trim_start_matches("Marker: ").to_string();
-            if label != "Recording started" && label != "Recording stopped" {
-                markers.push(MarkerEvent::new(idx, onset, label));
+        let mut exg_ch = Vec::new();
+        let mut accel_ch = Vec::new();
+        let mut index_ch = Vec::new();
+        for (kind, col) in rec_all {
+            match kind {
+                BdfKind::Exg => exg_ch.push(col),
+                BdfKind::Accel => accel_ch.push(col),
+                BdfKind::Index => index_ch.push(col),
+                BdfKind::Annotation => {}
             }
         }
-        if rec_ch.is_empty() {
+        if exg_ch.is_empty() {
             break;
         }
-        let n_samp = rec_ch[0].len();
+        let n_samp = exg_ch[0].len();
         for t in 0..n_samp {
-            let mut row = Vec::with_capacity(n_exg);
-            for ch in &rec_ch {
+            let mut row = Vec::with_capacity(exg_ch.len() + accel_ch.len() + index_ch.len());
+            for ch in &exg_ch {
+                row.push(ch.get(t).copied().unwrap_or(0.0));
+            }
+            for ch in &accel_ch {
+                row.push(ch.get(t).copied().unwrap_or(0.0));
+            }
+            for ch in &index_ch {
                 row.push(ch.get(t).copied().unwrap_or(0.0));
             }
             samples.push(row);
@@ -477,5 +594,37 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert!((got[0].0 - 0.168).abs() < 1e-4);
         assert_eq!(got[0].1, "blink");
+    }
+
+    #[test]
+    fn index_channel_identity_is_exact_integer() {
+        let sig = BdfSignal::index();
+        for n in [0.0, 1.0, 42.0, 255.0, 1024.0] {
+            let d = sig.to_digital(n);
+            assert_eq!(d, n as i32, "digital for {n}");
+            let span = (sig.dig_max - sig.dig_min) as f64;
+            let back = (d as f64 - sig.dig_min as f64) / span
+                * (sig.phys_max - sig.phys_min) as f64
+                + sig.phys_min as f64;
+            assert!(
+                (back - n).abs() < 1e-9,
+                "identity roundtrip {n} -> {d} -> {back}"
+            );
+        }
+    }
+
+    #[test]
+    fn recording_signals_are_eight_exg_accel_xyz_index() {
+        let s = recording_signals(8);
+        assert_eq!(s.len(), 12);
+        assert_eq!(s[0].label, "EXG0");
+        assert_eq!(s[7].label, "EXG7");
+        assert_eq!(s[7].dimension, "uV");
+        assert_eq!(s[8].label, "Accel X");
+        assert_eq!(s[9].label, "Accel Y");
+        assert_eq!(s[10].label, "Accel Z");
+        assert_eq!(s[8].dimension, "g");
+        assert_eq!(s[11].label, "Index");
+        assert!(s[11].is_index());
     }
 }

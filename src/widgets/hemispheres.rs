@@ -64,6 +64,7 @@ impl WHemispheres {
             .map(|idx| OverlaySite {
                 idx,
                 fill: fill[idx],
+                hz: None,
             })
             .collect();
         HeadOverlayFrame {

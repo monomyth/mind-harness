@@ -1,6 +1,6 @@
 [package]
 name = "mind-harness"
-version = "2.0.0"
+version = "2.1.2"
 edition = "2021"
 authors = ["Eugene Ray"]
 description = "Mind Harness — native EEG instrument for the Ultracortex Mark IV"
@@ -26,6 +26,7 @@ tokio = { version = "1", features = ["full"] }
 
 # Serialization for settings persistence (matches SessionSettings.pde JSON approach)
 serde = { version = "1", features = ["derive"] }
+libc = "0.2"
 serde_json = "1"
 
 # Cross-platform user config directory (Phase 8 persistence)
@@ -90,7 +91,7 @@ identifier = "com.openbci.gui"
 # Product icon (Grok Imagine Mark IV head) — not the Java sketch.icns / eframe e-icon.
 # Window icon: resources/mind-harness-icon.rgba via ViewportBuilder::with_icon in main.rs.
 icon = ["resources/icon.icns"]
-version = "2.0.0"
+version = "2.1.2"
 resources = ["resources/"]
 copyright = "Copyright © 2026 OpenBCI"
 category = "public.app-category.education"
@@ -100,3 +101,7 @@ The OpenBCI GUI provides a stable and powerful interface for any OpenBCI device
 (Cyton, Ganglion). Features real-time visualization, filtering, networking (LSL/OSC/UDP),
 and data logging in BDF/ODF formats.
 """
+
+[[bin]]
+name = "cyton-probe"
+path = "src/bin/cyton_probe.rs"

@@ -1,5 +1,7 @@
 //! Ultracortex Mark IV medium frame (official STL, decimated).
 //! Mesh: `resources/ultracortex_mark_iv/frame.bin` (M4_Medium_Front + Back).
+//! Dummy: `resources/dummy_head.bin` from dummy_head/ultracortex_dummy.blend
+//! (DummyHead + DummyEyes, bald, no hair cap). Not the lat-long ellipsoid.
 //! 35 named holes are the circular INSERT sockets (electrode nodes), not
 //! decorative lattice openings. Default 3/4 camera, slightly above; Head Plot drag orbits.
 
@@ -15,7 +17,28 @@ pub const DEFAULT_SITES: [&str; 8] = ["Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1"
 pub const VIEW_YAW: f32 = 0.58;
 pub const VIEW_PITCH: f32 = -0.48;
 
+
+const CAM_DIST: f32 = 3.4;
+const SCALP_ZOFF: f32 = -0.10;
+
+/// Far hemisphere of the cage (behind the dummy). Near cage — including the vault —
+/// always sits ON the head, so it is never hidden.
+pub fn occluded_by_scalp(p: [f32; 3], cam: Camera) -> bool {
+    let eye = cam.unrotate([0.0, 0.0, CAM_DIST]);
+    let cx = 0.0;
+    let cy = 0.0;
+    let cz = SCALP_ZOFF;
+    let vx = eye[0] - cx;
+    let vy = eye[1] - cy;
+    let vz = eye[2] - cz;
+    let px = p[0] - cx;
+    let py = p[1] - cy;
+    let pz = p[2] - cz;
+    vx * px + vy * py + vz * pz < 0.0
+}
+
 const BIN: &[u8] = include_bytes!("../../resources/ultracortex_mark_iv/frame.bin");
+const DUMMY_BIN: &[u8] = include_bytes!("../../resources/dummy_head.bin");
 
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
@@ -51,6 +74,16 @@ impl Camera {
         let y2 = y1 * cp - z1 * sp;
         let z2 = y1 * sp + z1 * cp;
         [x1, y2, z2]
+    }
+
+    pub fn unrotate(self, p: [f32; 3]) -> [f32; 3] {
+        let (cp, sp) = (self.pitch.cos(), self.pitch.sin());
+        let y1 = p[1] * cp + p[2] * sp;
+        let z1 = -p[1] * sp + p[2] * cp;
+        let (cy, sy) = (self.yaw.cos(), self.yaw.sin());
+        let x0 = p[0] * cy + y1 * sy;
+        let y0 = -p[0] * sy + y1 * cy;
+        [x0, y0, z1]
     }
 }
 
@@ -645,98 +678,60 @@ fn project_cam(r: [f32; 3], center: Pos2, scale: f32) -> Pos2 {
     Pos2::new(center.x + r[0] * scale * w, center.y - r[1] * scale * w)
 }
 
-/// Quiet anatomical scalp in the same frame as the Mark IV
+/// Blender male dummy in the same frame as the Mark IV
 /// (+X right, −Y anterior, +Z up, radius 1 is the headset). Head sits *inside*
 /// the lattice so the frame reads as worn, not a floating cage.
 struct SolidMesh {
     verts: Vec<[f32; 3]>,
     fnorms: Vec<[f32; 3]>,
     faces: Vec<[u32; 3]>,
+    /// 0 = skin, 1 unused (no hair cap), 2 = sclera, 3 = iris.
+    fmats: Vec<u8>,
 }
 
-fn lat_long_ellipsoid(rx: f32, ry: f32, rz: f32, nu: usize, nv: usize) -> SolidMesh {
-    let mut verts = Vec::with_capacity((nu + 1) * (nv + 1));
-    for i in 0..=nu {
-        let theta = std::f32::consts::PI * i as f32 / nu as f32;
-        let st = theta.sin();
-        let ct = theta.cos();
-        for j in 0..=nv {
-            let phi = 2.0 * std::f32::consts::PI * j as f32 / nv as f32;
-            // phi=0 → −Y (nose / anterior)
-            let x = rx * st * phi.sin();
-            let y = -ry * st * phi.cos();
-            let z = rz * ct;
-            verts.push([x, y, z]);
-        }
+fn load_dummy(buf: &[u8]) -> Option<SolidMesh> {
+    if buf.len() < 16 || &buf[0..4] != b"MHHD" {
+        return None;
     }
-    // Nose: push the anterior pole slightly forward and down.
-    for v in verts.iter_mut() {
-        let anterior = (-v[1] / ry).clamp(0.0, 1.0);
-        let mid = (1.0 - (v[2] / rz).abs()).clamp(0.0, 1.0);
-        if anterior > 0.72 && v[2] < 0.12 && v[2] > -0.28 {
-            let k = ((anterior - 0.72) / 0.28) * mid;
-            v[1] -= 0.11 * k;
-            v[2] -= 0.03 * k;
-        }
-        // Ear notches near F7/F8: small C-notch in X.
-        let lat = v[0].abs() / rx;
-        if lat > 0.82 && v[1].abs() < 0.22 * ry && v[2].abs() < 0.18 * rz {
-            let k = ((lat - 0.82) / 0.18).clamp(0.0, 1.0);
-            v[0] *= 1.0 - 0.08 * k;
-        }
-        // Neck: flatten the bottom.
-        if v[2] < -0.55 * rz {
-            let k = ((-0.55 * rz - v[2]) / (0.45 * rz)).clamp(0.0, 1.0);
-            v[0] *= 1.0 - 0.35 * k;
-            v[1] *= 1.0 - 0.20 * k;
-            v[2] = -0.55 * rz - 0.18 * k * rz;
-        }
+    let mut off = 4;
+    let ver = u32le(buf, &mut off)?;
+    if ver != 1 {
+        return None;
     }
-    let cols = nv + 1;
-    let mut faces = Vec::new();
-    for i in 0..nu {
-        for j in 0..nv {
-            let a = (i * cols + j) as u32;
-            let b = a + 1;
-            let c = a + cols as u32;
-            let d = c + 1;
-            faces.push([a, c, b]);
-            faces.push([b, c, d]);
-        }
+    let nverts = u32le(buf, &mut off)? as usize;
+    let nfaces = u32le(buf, &mut off)? as usize;
+    let mut verts = Vec::with_capacity(nverts);
+    for _ in 0..nverts {
+        verts.push(vec3(buf, &mut off)?);
     }
-    let mut fnorms = Vec::with_capacity(faces.len());
-    for f in &faces {
-        let a = verts[f[0] as usize];
-        let b = verts[f[1] as usize];
-        let c = verts[f[2] as usize];
-        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-        let n = [
-            u[1] * v[2] - u[2] * v[1],
-            u[2] * v[0] - u[0] * v[2],
-            u[0] * v[1] - u[1] * v[0],
-        ];
-        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-8);
-        fnorms.push([n[0] / len, n[1] / len, n[2] / len]);
+    let mut fnorms = Vec::with_capacity(nfaces);
+    for _ in 0..nfaces {
+        fnorms.push(vec3(buf, &mut off)?);
     }
-    SolidMesh {
+    let mut faces = Vec::with_capacity(nfaces);
+    for _ in 0..nfaces {
+        faces.push([
+            u32le(buf, &mut off)?,
+            u32le(buf, &mut off)?,
+            u32le(buf, &mut off)?,
+        ]);
+    }
+    if off + nfaces > buf.len() {
+        return None;
+    }
+    let fmats = buf[off..off + nfaces].to_vec();
+    Some(SolidMesh {
         verts,
         fnorms,
         faces,
-    }
+        fmats,
+    })
 }
 
 fn head_mesh() -> &'static SolidMesh {
     static M: OnceLock<SolidMesh> = OnceLock::new();
     M.get_or_init(|| {
-        // Smaller than the radius-1 lattice so the scalp fills the helmet cavity
-        // with the cage outside. Drop in Z so the neck hangs below the rim and
-        // the crown sits under the vault (headset ON the head, not through it).
-        let mut m = lat_long_ellipsoid(0.58, 0.68, 0.60, 18, 28);
-        for v in m.verts.iter_mut() {
-            v[2] -= 0.10;
-        }
-        m
+        load_dummy(DUMMY_BIN).expect("resources/dummy_head.bin (DummyHead + DummyEyes, bald)")
     })
 }
 
@@ -749,12 +744,32 @@ fn shade_solid(n_cam: [f32; 3], lo: [u8; 3], hi: [u8; 3], alpha: u8) -> Color32 
     let r = (lo[0] as f32 + (hi[0] as f32 - lo[0] as f32) * k) as u8;
     let g = (lo[1] as f32 + (hi[1] as f32 - lo[1] as f32) * k) as u8;
     let b = (lo[2] as f32 + (hi[2] as f32 - lo[2] as f32) * k) as u8;
-    Color32::from_rgba_unmultiplied(r, g, b, alpha)
+    if alpha >= 255 { Color32::from_rgb(r, g, b) } else { Color32::from_rgba_unmultiplied(r, g, b, alpha) }
 }
 
-/// Opaque dummy scalp under the Mark IV. Not glass, not photoreal.
+/// Opaque dummy under the Mark IV. Not glass, not photoreal.
 /// Translucent debug only: drop below 255.
 const SCALP_ALPHA: u8 = 255;
+
+/// Caucasian skin from dummy_head/shots/hero.png (lit) and DummySkin (shadow).
+const SKIN_LO: [u8; 3] = [0xc4, 0x96, 0x7e];
+const SKIN_HI: [u8; 3] = [0xf4, 0xe4, 0xd6];
+/// Unused: dummy is bald; mat 1 has no faces. Slot stays wired.
+const HAIR_LO: [u8; 3] = [0x2c, 0x24, 0x20];
+const HAIR_HI: [u8; 3] = [0x68, 0x5a, 0x50];
+const SCLERA_LO: [u8; 3] = [0xd8, 0xd4, 0xce];
+const SCLERA_HI: [u8; 3] = [0xf2, 0xf0, 0xec];
+const IRIS_LO: [u8; 3] = [0x28, 0x22, 0x1c];
+const IRIS_HI: [u8; 3] = [0x4a, 0x42, 0x38];
+
+fn mat_lo_hi(mat: u8) -> ([u8; 3], [u8; 3]) {
+    match mat {
+        1 => (HAIR_LO, HAIR_HI),
+        2 => (SCLERA_LO, SCLERA_HI),
+        3 => (IRIS_LO, IRIS_HI),
+        _ => (SKIN_LO, SKIN_HI),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HemiTint {
@@ -785,8 +800,6 @@ fn paint_solid(
     rect: Rect,
     cam: Camera,
     mesh: &SolidMesh,
-    lo: [u8; 3],
-    hi: [u8; 3],
     alpha: u8,
     hemi: HemiTint,
     wave: WaveTint,
@@ -816,13 +829,15 @@ fn paint_solid(
     for &(_, i) in &order {
         let face = mesh.faces[i];
         let n = cam.rotate(mesh.fnorms[i]);
-        if n[2] < -0.12 {
+        if n[2] < -0.82 {
             continue;
         }
         let a = mesh.verts[face[0] as usize];
         let b = mesh.verts[face[1] as usize];
         let c = mesh.verts[face[2] as usize];
         let cx = (a[0] + b[0] + c[0]) * (1.0 / 3.0);
+        let mat = mesh.fmats.get(i).copied().unwrap_or(0);
+        let (lo, hi) = mat_lo_hi(mat);
         let mut col = shade_solid(n, lo, hi, alpha);
         col = match wave {
             WaveTint::Cool => blend_rgb(col, Color32::from_rgb(0x4a, 0x6a, 0x88), 0.22),
@@ -852,7 +867,7 @@ fn paint_solid(
     painter.add(egui::Shape::mesh(gpu));
 }
 
-/// Opaque anatomical scalp; the caller paints the Mark IV lattice on top.
+/// Opaque Blender dummy; the caller paints the Mark IV lattice on top.
 pub fn paint_head(painter: &egui::Painter, rect: Rect, cam: Camera) {
     paint_head_tinted(painter, rect, cam, HemiTint::None, WaveTint::None);
 }
@@ -870,8 +885,6 @@ pub fn paint_head_tinted(
         rect,
         cam,
         head_mesh(),
-        [0x2a, 0x28, 0x26],
-        [0x6a, 0x5e, 0x56],
         SCALP_ALPHA,
         hemi,
         wave,
@@ -1088,6 +1101,17 @@ fn paint_frame_ex(
             continue;
         }
         let face = mesh.faces[i];
+        let ca = mesh.verts[face[0] as usize];
+        let cb = mesh.verts[face[1] as usize];
+        let cc = mesh.verts[face[2] as usize];
+        let mid = [
+            (ca[0] + cb[0] + cc[0]) / 3.0,
+            (ca[1] + cb[1] + cc[1]) / 3.0,
+            (ca[2] + cb[2] + cc[2]) / 3.0,
+        ];
+        if occluded_by_scalp(mid, cam) {
+            continue;
+        }
         let n = cam.rotate(mesh.fnorms[i]);
         if n[2] < -0.08 {
             continue;
@@ -1303,11 +1327,12 @@ mod tests {
         let rmax = h
             .verts
             .iter()
+            .filter(|p| p[2] > 0.0)
             .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
             .fold(0.0_f32, f32::max);
         assert!(
             rmax < 0.85 && rmax > 0.5,
-            "head must sit clearly inside the radius-1 lattice, r={rmax}"
+            "scalp (z>0) must sit inside the radius-1 lattice; jaw may hang below the rim, r={rmax}"
         );
         let hymin = h.verts.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
         let hzmin = h.verts.iter().map(|p| p[2]).fold(f32::MAX, f32::min);
@@ -1508,12 +1533,141 @@ mod tests {
     }
 
     #[test]
+    fn far_lattice_is_occluded_near_is_not() {
+        let cam = Camera::THREE_QUARTER;
+        let far = cam.unrotate([0.0, 0.0, -1.2]);
+        let near = cam.unrotate([0.0, 0.0, 1.2]);
+        assert!(occluded_by_scalp(far, cam), "far side of helmet must hide behind scalp");
+        assert!(!occluded_by_scalp(near, cam), "near lattice must stay");
+    }
+
+    #[test]
     fn scalp_is_opaque_dummy_not_glass() {
         let src = include_str!("mark_iv.rs");
         assert!(src.contains("SCALP_ALPHA"));
         assert!(src.contains("const SCALP_ALPHA: u8 = 255"));
-        assert!(src.contains("Opaque dummy scalp"));
         assert!(src.contains("paint_head_tinted"));
+    }
+
+    #[test]
+    fn dummy_is_blender_male_not_lat_long_ellipsoid() {
+        let src = include_str!("mark_iv.rs");
+        let start = src
+            .find("fn head_mesh()")
+            .expect("head_mesh must exist");
+        let body = &src[start..start + 900.min(src.len() - start)];
+        assert!(
+            body.contains("dummy.bin") || body.contains("DUMMY_BIN") || body.contains("dummy_head.bin"),
+            "head_mesh must include_bytes the Blender dummy, not synthesize an ellipsoid"
+        );
+        assert!(
+            !body.contains("lat_long_ellipsoid"),
+            "head_mesh must not fill SCALP with lat_long_ellipsoid"
+        );
+        let h = head_mesh();
+        // 18×28 lat-long: (18+1)*(28+1)=551 verts, 18*28*2=1008 faces.
+        assert_ne!(h.verts.len(), 19 * 29, "must not be the 18×28 ellipsoid");
+        assert_ne!(h.faces.len(), 18 * 28 * 2, "must not be the 18×28 ellipsoid");
+        assert!(
+            h.verts.len() > 800 && h.faces.len() > 800,
+            "compact Blender dummy, verts={} faces={}",
+            h.verts.len(),
+            h.faces.len()
+        );
+        assert_eq!(h.fmats.len(), h.faces.len());
+    }
+
+    #[test]
+    fn dummy_is_bald_no_hair() {
+        let h = head_mesh();
+        let hair_n = h.fmats.iter().filter(|&&m| m == 1).count();
+        assert_eq!(
+            hair_n, 0,
+            "bald dummy: hair faces (mat==1) must be 0, got {hair_n}"
+        );
+        let skin_n = h.fmats.iter().filter(|&&m| m == 0).count();
+        let sclera_n = h.fmats.iter().filter(|&&m| m == 2).count();
+        let iris_n = h.fmats.iter().filter(|&&m| m == 3).count();
+        assert!(
+            skin_n > 800,
+            "Caucasian skin (mat 0) must remain, skin faces={skin_n}"
+        );
+        assert!(
+            sclera_n > 20 && iris_n > 20,
+            "eyes (mat 2/3) must remain, sclera={sclera_n} iris={iris_n}"
+        );
+    }
+
+    #[test]
+    fn dummy_crown_does_not_eat_the_vault() {
+        let h = head_mesh();
+        let zmax = h
+            .verts
+            .iter()
+            .map(|p| p[2])
+            .fold(f32::MIN, f32::max);
+        let cz = mesh()
+            .holes
+            .iter()
+            .find(|hole| hole.name == "Cz")
+            .unwrap()
+            .p;
+        assert!(
+            zmax < cz[2] + 0.08,
+            "dummy crown must stay under the vault (Cz z={}), dummy zmax={zmax}",
+            cz[2]
+        );
+        assert!(
+            zmax > cz[2] - 0.18,
+            "crown should sit just under Cz, dummy zmax={zmax} Cz z={}",
+            cz[2]
+        );
+        let cam = Camera::THREE_QUARTER;
+        assert!(
+            !occluded_by_scalp(cz, cam),
+            "Cz vault is near-side; dummy must not hide it via occluded_by_scalp"
+        );
+    }
+
+    #[test]
+    fn dummy_skin_is_caucasian_from_blend() {
+        let src = include_str!("mark_iv.rs");
+        assert!(
+            src.contains("SKIN_LO") && src.contains("SKIN_HI"),
+            "paint the Blender Caucasian skin + eyes, not the brown balloon"
+        );
+        assert!(
+            !src.contains(concat!("[0x2a, ", "0x28, 0x26]")),
+            "old ellipsoid fill must not remain as dummy skin"
+        );
+    }
+
+    #[test]
+    fn occluded_by_scalp_is_lattice_only() {
+        let src = include_str!("mark_iv.rs");
+        let frame = src
+            .find("fn paint_frame_ex")
+            .expect("paint_frame_ex");
+        let labeled = src
+            .find("pub fn paint_labeled_inserts")
+            .expect("paint_labeled_inserts");
+        let solid = src.find("fn paint_solid").expect("paint_solid");
+        let tests = src.find("#[cfg(test)]").unwrap_or(src.len());
+        let frame_fn = &src[frame..labeled];
+        let solid_fn = &src[solid..frame];
+        let labeled_fn = &src[labeled..tests];
+        assert!(
+            frame_fn.contains("occluded_by_scalp"),
+            "far lattice still dies behind the dummy"
+        );
+        assert!(
+            !solid_fn.contains("occluded_by_scalp"),
+            "dummy mesh must not use occluded_by_scalp"
+        );
+        assert!(
+            !labeled_fn.contains("occluded_by_scalp"),
+            "electrode discs must stay visible"
+        );
     }
 
     #[test]

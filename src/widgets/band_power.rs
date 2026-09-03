@@ -21,6 +21,7 @@ pub struct WBandPower {
     smoothed_powers: [f64; 5],
     selected_channel: Option<usize>, // None = average selected (all) channels
     smoothing_index: usize,
+    window_sec: f32,
     railed: [bool; 8],
 }
 
@@ -30,7 +31,8 @@ impl WBandPower {
             title: "Band Power".to_string(),
             smoothed_powers: [0.0; 5],
             selected_channel: None,
-            smoothing_index: 5, // 0.98 — per-frame refresh; Neuro lock
+            smoothing_index: 2, // 0.75 — same display Smooth as FFT
+            window_sec: 5.0,
             railed: [false; 8],
         }
     }
@@ -42,6 +44,10 @@ impl WBandPower {
 
     pub fn smoothing_index(&self) -> usize {
         self.smoothing_index
+    }
+
+    pub fn set_window_sec(&mut self, seconds: f32) {
+        self.window_sec = seconds.max(1.0);
     }
 }
 
@@ -57,7 +63,10 @@ impl Widget for WBandPower {
     }
 
     fn update(&mut self, source: &dyn DataSource) {
-        let window_size = crate::fft::nfft_safe(source.sample_rate());
+        let sr = source.sample_rate();
+        let window_size = ((self.window_sec as f64) * sr as f64)
+            .round()
+            .max(crate::fft::nfft_safe(sr) as f64) as usize;
         let data = source.get_data(window_size);
         if data.is_empty() {
             return;
@@ -159,21 +168,6 @@ impl Widget for WBandPower {
                     }
                 });
 
-            let labels = ["0.0", "0.5", "0.75", "0.9", "0.95", "0.98", "0.99", "0.999"];
-            let current_label = labels.get(self.smoothing_index).copied().unwrap_or("0.75");
-            ui.label("Smooth");
-            egui::ComboBox::from_id_salt("bp_smooth")
-                .selected_text(current_label)
-                .show_ui(ui, |ui| {
-                    for (i, &lab) in labels.iter().enumerate() {
-                        if ui
-                            .selectable_label(self.smoothing_index == i, lab)
-                            .clicked()
-                        {
-                            self.smoothing_index = i;
-                        }
-                    }
-                });
         });
 
         let log_ymax = log_y_max(&self.smoothed_powers);
@@ -260,8 +254,8 @@ mod tests {
     }
 
     #[test]
-    fn default_smoothing_is_0_98() {
-        assert_eq!(WBandPower::new().smoothing_index(), 5);
-        assert!((crate::widgets::SMOOTH_FACTORS[5] - 0.98).abs() < 1e-6);
+    fn default_smoothing_follows_top_bar_075() {
+        assert_eq!(WBandPower::new().smoothing_index(), 2);
+        assert!((crate::widgets::SMOOTH_FACTORS[2] - 0.75).abs() < 1e-6);
     }
 }

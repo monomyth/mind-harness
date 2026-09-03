@@ -2,7 +2,7 @@
 //!
 //! This is the critical foundation for Phase 4 (and future interactive widgets like Console).
 //! Widgets receive a mutable context during their `show()` call and can:
-//! - Send markers (which flow to NetworkingManager + DataLogger annotations + status bar)
+//! - Send markers (which flow to NetworkingManager + RecordPump annotations + status bar)
 //! - Update Networking targets / enabled state and apply changes
 //! - Log to the central EventLog (powers WConsole — Phase 7)
 //!
@@ -10,14 +10,14 @@
 //!
 //! plan.md Phase 7 step 1 — EventLog integration
 
-use crate::data_logger::DataLogger;
+use crate::data_logger::RecordPump;
 use crate::emg::EmgProcessor;
 use crate::event_log::{EventLog, LogLevel};
 use crate::networking::{NetworkingManager, Protocol};
 
 pub struct WidgetContext<'a> {
     pub networking: &'a mut NetworkingManager,
-    pub data_logger: &'a mut DataLogger,
+    pub data_logger: &'a mut RecordPump,
     pub last_marker: &'a mut String,
     /// Central event log (WConsole reads from this). Never None in a live session.
     pub event_log: &'a mut EventLog,
@@ -28,7 +28,7 @@ pub struct WidgetContext<'a> {
 impl<'a> WidgetContext<'a> {
     pub fn new(
         networking: &'a mut NetworkingManager,
-        data_logger: &'a mut DataLogger,
+        data_logger: &'a mut RecordPump,
         last_marker: &'a mut String,
         event_log: &'a mut EventLog,
         emg: &'a mut EmgProcessor,

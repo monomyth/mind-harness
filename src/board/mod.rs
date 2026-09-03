@@ -14,6 +14,7 @@ pub mod ads_settings;
 pub mod ble_scan;
 pub mod brainflow_board;
 pub mod impedance;
+pub mod ingest;
 pub mod playback;
 pub mod sd_card;
 pub mod synthetic;
@@ -50,6 +51,11 @@ pub trait DataSource: Send + Sync {
 
     /// Which indices are the accelerometer channels (usually 3 axes).
     fn accel_channels(&self) -> &[usize];
+
+    /// BrainFlow package/sample index column, if the board exposes one.
+    fn package_num_channel(&self) -> Option<usize> {
+        None
+    }
 
     /// Sample rate in Hz
     fn sample_rate(&self) -> i32;
@@ -95,6 +101,11 @@ pub trait DataSource: Send + Sync {
     /// Samples missing between indices in the most recent `update()` (Java PacketLossTracker).
     fn recent_samples_lost(&self) -> usize {
         0
+    }
+
+    /// Last BrainFlow get_board_data error this tick (swallowed as empty before 2.0.8).
+    fn last_ingest_error(&self) -> Option<String> {
+        None
     }
 
     // === Filtering controls (Option B foundation) ===

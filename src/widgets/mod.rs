@@ -47,6 +47,24 @@ use crate::board::DataSource;
 /// Smoothing factors for temporal exponential averaging (FFT, BandPower, etc.).
 /// Matches the original Java GUI "Smooth" dropdown values exactly (0.0 = no smoothing, 0.999 = very heavy).
 pub const SMOOTH_FACTORS: &[f32] = &[0.0, 0.5, 0.75, 0.9, 0.95, 0.98, 0.99, 0.999];
+pub const SMOOTH_LABELS: &[&str] = &["0.0", "0.5", "0.75", "0.9", "0.95", "0.98", "0.99", "0.999"];
+
+/// Display time window (seconds) driven from the top bar.
+pub const WINDOW_SECS: &[f32] = &[1.0, 3.0, 5.0, 10.0, 20.0];
+pub const WINDOW_LABELS: &[&str] = &["1 sec", "3 sec", "5 sec", "10 sec", "20 sec"];
+
+pub fn window_label(seconds: f32) -> &'static str {
+    for (i, &s) in WINDOW_SECS.iter().enumerate() {
+        if (seconds - s).abs() < 0.1 {
+            return WINDOW_LABELS[i];
+        }
+    }
+    WINDOW_LABELS[2]
+}
+
+pub fn smooth_label(index: usize) -> &'static str {
+    SMOOTH_LABELS.get(index).copied().unwrap_or("0.75")
+}
 
 /// Disable pan / zoom / boxed-zoom / scroll. EEG plots are read-only views.
 pub fn lock_plot_interaction(plot: egui_plot::Plot<'_>) -> egui_plot::Plot<'_> {

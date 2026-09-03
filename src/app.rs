@@ -4,9 +4,10 @@
 
 use crate::board::ads_settings::{default_bank, AdsChannel};
 use crate::board::brainflow_board::BrainFlowBoard;
-use crate::board::{extract_exg, recent_raw_rows, DataSource};
+use crate::board::{recent_raw_rows, DataSource};
 use crate::control_panel::{ControlPanel, DataSourceType};
-use crate::data_logger::DataLogger;
+use crate::data_logger::{RecordPump, RecordingSample};
+use crate::experiment::ProtocolKind;
 use crate::event_log::EventLog;
 use crate::filter_settings::NotchMode;
 use crate::montage::MontageStore;
@@ -184,7 +185,7 @@ pub struct OpenBciGuiApp {
 
     pending_layout_rebuild: bool,
     pub control_panel: ControlPanel,
-    pub data_logger: DataLogger,
+    pub data_logger: RecordPump,
     pub networking: NetworkingManager,
     pub connection_status: String,
     pub recording_format: crate::data_logger::LogFormat,
@@ -199,6 +200,9 @@ pub struct OpenBciGuiApp {
     /// within the current measurement window. Enables correct packet loss % for the SidePanel visual.
     window_samples: u64,
     window_lost: u64,
+    window_empty: u64,
+    starve: crate::starve::StarveLog,
+    live_autostart_used: bool,
 
     // Last marker for status bar
     last_marker: String,
@@ -253,6 +257,8 @@ pub struct OpenBciGuiApp {
     head_show_hemispheres: bool,
 
     experiment: crate::experiment::ExperimentRun,
+    experiment_protocol: ProtocolKind,
+    last_spike_t: f64,
     contact: crate::contact::ContactLog,
     montage: MontageStore,
 }
@@ -301,7 +307,7 @@ impl OpenBciGuiApp {
             },
             pending_layout_rebuild: false,
             control_panel: ControlPanel::new(),
-            data_logger: DataLogger::new(),
+            data_logger: RecordPump::spawn(),
             networking: NetworkingManager::new(),
             connection_status: String::new(),
             recording_format: crate::data_logger::LogFormat::BDF,
@@ -312,6 +318,9 @@ impl OpenBciGuiApp {
             packet_loss_percent: 0.0,
             window_samples: 0,
             window_lost: 0,
+            window_empty: 0,
+            starve: crate::starve::StarveLog::default(),
+            live_autostart_used: false,
 
             last_marker: String::new(),
 
@@ -367,6 +376,8 @@ impl OpenBciGuiApp {
             head_show_waves: true,
             head_show_hemispheres: true,
             experiment: crate::experiment::ExperimentRun::new(),
+            experiment_protocol: ProtocolKind::Guided,
+            last_spike_t: f64::NEG_INFINITY,
             contact: crate::contact::ContactLog::new(),
             montage: MontageStore::load(),
         };
@@ -841,7 +852,9 @@ impl OpenBciGuiApp {
         self.packet_loss_history.clear();
         self.window_samples = 0;
         self.window_lost = 0;
+        self.window_empty = 0;
         self.last_sample_time = None;
+        self.starve.reset();
 
         // Fresh viz + tools for next session (Phase 7 hybrid layout).
         self.populate_widgets_for_new_session();
@@ -857,6 +870,7 @@ impl OpenBciGuiApp {
         tracing::info!("Session ended — returned to Control Panel");
     }
 
+    /// Open the recording file on the writer thread. Never BoardShim / ingest RPC.
     fn start_recording_like_session(&mut self) -> bool {
         let chans = self
             .board
@@ -897,7 +911,7 @@ impl OpenBciGuiApp {
     }
 
     fn tick_contact_sidecar(&mut self) {
-        let (chs, sample, t_s, sr_hz, loss_pct, markers, path) = {
+        let (chs, sample, t_s, sr_hz, loss_pct, markers, path, accel, packet_index) = {
             let Some(board) = self.board.as_deref() else {
                 return;
             };
@@ -928,6 +942,18 @@ impl OpenBciGuiApp {
                     self.samples_received as usize
                 }
             });
+            let last = raw_rows.last();
+            let accel_ch = board.accel_channels();
+            let mut accel = [0.0_f64; 3];
+            if let Some(row) = last {
+                for (i, &c) in accel_ch.iter().take(3).enumerate() {
+                    accel[i] = row.get(c).copied().unwrap_or(0.0);
+                }
+            }
+            let packet_index = board
+                .package_num_channel()
+                .and_then(|i| last.and_then(|row| row.get(i).copied()))
+                .unwrap_or(sample as f64) as u64;
             let t_s = sample as f64 / sr.max(1.0);
             let sr_hz = if is_playback {
                 sr
@@ -962,7 +988,7 @@ impl OpenBciGuiApp {
             } else {
                 None
             };
-            (chs, sample, t_s, sr_hz, loss_pct, markers, path)
+            (chs, sample, t_s, sr_hz, loss_pct, markers, path, accel, packet_index)
         };
         self.contact.observe(
             &chs,
@@ -973,8 +999,22 @@ impl OpenBciGuiApp {
             &markers,
             path.as_deref(),
         );
-        if let Some(line) = self.contact.take_common_mode_notice() {
-            self.event_log.log_system(&line);
+        // Sidecar / console only — not the footer (All sites jumped is the plate).
+        let _ = self.contact.take_common_mode_notice();
+        if let Some((n_jump, mag)) = crate::laterality::common_mode_jump(&chs) {
+            if n_jump >= 8 && t_s - self.last_spike_t > 1.0 {
+                self.last_spike_t = t_s;
+                if let Some(ref rec) = path {
+                    let ev = crate::spikes::SpikeEvent {
+                        t: t_s,
+                        dv: crate::laterality::channel_max_steps(&chs),
+                        mag,
+                        accel,
+                        packet_index,
+                    };
+                    let _ = crate::spikes::append(rec, &ev);
+                }
+            }
         }
     }
 
@@ -995,11 +1035,15 @@ impl OpenBciGuiApp {
 
     fn apply_experiment_event(&mut self, ev: crate::experiment::ExperimentEvent) {
         match ev {
-            crate::experiment::ExperimentEvent::EnteredStep { index, label } => {
-                crate::experiment::speak_detached(crate::experiment::STEPS[index].spoken);
-                self.write_experiment_marker(&label);
-                if index + 1 == crate::experiment::STEPS.len() {
-                    self.stop_recording_like_session();
+            crate::experiment::ExperimentEvent::EnteredStep { index: _, label } => {
+                if let Some(step) = self.experiment.current_step() {
+                    crate::experiment::play_step_cue(step);
+                    if step.hold.is_none() {
+                        self.stop_recording_like_session();
+                    }
+                }
+                if !label.is_empty() {
+                    self.write_experiment_marker(&label);
                 }
             }
             crate::experiment::ExperimentEvent::Finished => {
@@ -1017,22 +1061,18 @@ impl OpenBciGuiApp {
             self.connection_status = "Start a session first".to_string();
             return;
         }
+        // Record/experiment start must not call BoardShim. Ingest stays on its
+        // 4 ms pull; a Start RPC here hitching the worker is the Hertz cliff.
         if !self.streaming {
-            if let Some(ref mut b) = self.board {
-                if let Err(e) = b.start_streaming() {
-                    tracing::error!("Start failed: {:?}", e);
-                    self.event_log
-                        .log_error(&format!("Failed to start streaming: {}", e));
-                    return;
-                }
-                self.streaming = true;
-                self.event_log.log_system("Streaming started");
-            }
+            self.connection_status = "Start streaming first".to_string();
+            return;
         }
         if !self.data_logger.is_logging() && !self.start_recording_like_session() {
             return;
         }
-        let ev = self.experiment.start(std::time::Instant::now());
+        let ev = self
+            .experiment
+            .start_protocol(self.experiment_protocol, std::time::Instant::now());
         self.apply_experiment_event(ev);
     }
 
@@ -1612,6 +1652,83 @@ impl OpenBciGuiApp {
             *exclusive_open = None;
         }
     }
+
+    fn apply_display_controls(&mut self) {
+        let window = self.persisted_ts_time_window_sec;
+        let smooth = self.persisted_fft_smoothing_index;
+        for w in self
+            .widget_manager
+            .widgets
+            .iter_mut()
+            .chain(self.tool_widgets.iter_mut())
+        {
+            if let Some(ts) = w.as_any_mut().downcast_mut::<WTimeSeries>() {
+                ts.set_time_window(window);
+            }
+            if let Some(fft) = w.as_any_mut().downcast_mut::<WFFT>() {
+                fft.set_window_sec(window);
+                fft.set_smoothing_index(smooth);
+            }
+            if let Some(bp) = w.as_any_mut().downcast_mut::<WBandPower>() {
+                bp.set_window_sec(window);
+                bp.set_smoothing_index(smooth);
+            }
+            if let Some(sp) = w.as_any_mut().downcast_mut::<WSpectrogram>() {
+                sp.set_window_sec(window);
+                sp.set_smoothing_index(smooth);
+            }
+            if let Some(ac) = w.as_any_mut().downcast_mut::<WAccelerometer>() {
+                ac.set_window_sec(window);
+                ac.set_smoothing_index(smooth);
+            }
+        }
+    }
+
+    fn draw_display_controls(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Window").color(theme::TEXT));
+        let mut win = self.persisted_ts_time_window_sec;
+        egui::ComboBox::from_id_salt("top_window")
+            .selected_text(crate::widgets::window_label(win))
+            .show_ui(ui, |ui| {
+                for &secs in crate::widgets::WINDOW_SECS {
+                    if ui
+                        .selectable_label(
+                            (win - secs).abs() < 0.1,
+                            crate::widgets::window_label(secs),
+                        )
+                        .clicked()
+                    {
+                        win = secs;
+                    }
+                }
+            });
+        if (win - self.persisted_ts_time_window_sec).abs() > 0.05 {
+            self.persisted_ts_time_window_sec = win;
+            self.apply_display_controls();
+            self.save_current_persisted_settings();
+        }
+
+        ui.label(egui::RichText::new("Smooth").color(theme::TEXT));
+        let mut sm = self.persisted_fft_smoothing_index;
+        egui::ComboBox::from_id_salt("top_smooth")
+            .selected_text(crate::widgets::smooth_label(sm))
+            .show_ui(ui, |ui| {
+                for i in 0..crate::widgets::SMOOTH_FACTORS.len() {
+                    if ui
+                        .selectable_label(sm == i, crate::widgets::smooth_label(i))
+                        .clicked()
+                    {
+                        sm = i;
+                    }
+                }
+            });
+        if sm != self.persisted_fft_smoothing_index {
+            self.persisted_fft_smoothing_index = sm;
+            self.persisted_bp_smoothing_index = sm;
+            self.apply_display_controls();
+            self.save_current_persisted_settings();
+        }
+    }
 }
 
 impl eframe::App for OpenBciGuiApp {
@@ -1727,7 +1844,29 @@ impl eframe::App for OpenBciGuiApp {
         if setup_panel_active(self.system_mode) {
             // === Control Panel (PreInit) ===
             egui::CentralPanel::default().show(ctx, |ui| {
-                if let Some((source, chans, serial_port)) = self.control_panel.draw(ui) {
+                let live_auto = if !self.live_autostart_used {
+                    if let Ok(port) = std::env::var("OPENBCI_LIVE_SERIAL") {
+                        let port = port.trim().to_string();
+                        if !port.is_empty() {
+                            self.live_autostart_used = true;
+                            tracing::info!("OPENBCI_LIVE_SERIAL start on {port}");
+                            Some((
+                                crate::control_panel::DataSourceType::CytonSerial,
+                                8usize,
+                                Some(port),
+                            ))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((source, chans, serial_port)) =
+                    live_auto.or_else(|| self.control_panel.draw(ui))
+                {
                     // User clicked "Start Session" — clear any previous Failed state (plan.md Phase 7 Reconnect)
                     if matches!(self.connection_state, ConnectionState::Failed(_)) {
                         self.connection_state = ConnectionState::Idle;
@@ -2012,10 +2151,13 @@ impl eframe::App for OpenBciGuiApp {
                 // essentially 0% because advance exactly matches elapsed * sr * speed.
                 let delivered_this_tick = b.recent_samples_delivered() as u64;
                 let lost_this_tick = b.recent_samples_lost() as u64;
+                let nominal_hz = b.sample_rate() as f64;
                 if delivered_this_tick > 0 {
                     self.samples_received += delivered_this_tick;
                     self.window_samples += delivered_this_tick;
                     self.window_lost += lost_this_tick;
+                } else {
+                    self.window_empty += 1;
                 }
 
                 let now = std::time::Instant::now();
@@ -2045,9 +2187,25 @@ impl eframe::App for OpenBciGuiApp {
                                 )
                             };
                         }
+                        let is_playback = matches!(
+                            self.control_panel.selected_source,
+                            crate::control_panel::DataSourceType::Playback
+                        );
+                        if !is_playback {
+                            self.starve.tick(
+                                received_in_window,
+                                lost_in_window,
+                                elapsed,
+                                self.window_empty,
+                                nominal_hz,
+                                self.data_logger.current_file().map(|p| p.as_path()),
+                                b.last_ingest_error(),
+                            );
+                        }
                         self.last_sample_time = Some(now);
                         self.window_samples = 0;
                         self.window_lost = 0;
+                        self.window_empty = 0;
                         self.packet_loss_history
                             .push(self.packet_loss_percent as f32);
                         if self.packet_loss_history.len() > 60 {
@@ -2058,15 +2216,26 @@ impl eframe::App for OpenBciGuiApp {
                     self.last_sample_time = Some(now);
                     self.window_samples = 0;
                     self.window_lost = 0;
+                    self.window_empty = 0;
+                    self.starve.note_window_start();
                 }
 
-                // Recording: raw EXG (Java ODF/BDF), never the display-filtered buffer.
+                // Recording: raw EXG + Accel + packet index. Enqueue only — writer thread
+                // waits on disk. Never the display-filtered buffer.
                 if self.data_logger.is_logging() {
                     let exg = b.exg_channels().to_vec();
+                    let accel = b.accel_channels().to_vec();
+                    let pkg = b.package_num_channel();
                     let latest = recent_raw_rows(b);
                     for row in latest {
-                        let eeg = extract_exg(&row, &exg);
-                        self.data_logger.log_sample(&eeg, 0.0);
+                        let rec = RecordingSample::from_board_row(
+                            &row,
+                            &exg,
+                            &accel,
+                            pkg,
+                            self.data_logger.samples_logged(),
+                        );
+                        self.data_logger.log_recording(&rec);
                     }
                 }
 
@@ -2188,18 +2357,15 @@ impl eframe::App for OpenBciGuiApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let stream_label = if self.streaming { "Stop" } else { "Start" };
-                    let stream_fill = if self.streaming {
-                        theme::STOP
+                    let mut stream_btn = egui::Button::new(egui::RichText::new(stream_label).color(theme::TEXT))
+                        .min_size(egui::vec2(56.0, 22.0));
+                    if self.streaming {
+                        // Green means you're in it (Ableton Play while rolling).
+                        stream_btn = stream_btn.fill(theme::START);
                     } else {
-                        theme::START
-                    };
-                    if ui
-                        .add(
-                            egui::Button::new(egui::RichText::new(stream_label).color(theme::TEXT))
-                                .fill(stream_fill)
-                                .min_size(egui::vec2(56.0, 22.0)),
-                        )
-                        .clicked()
+                        stream_btn = stream_btn.fill(theme::PANEL).stroke(theme::hairline());
+                    }
+                    if ui.add(stream_btn).clicked()
                     {
                         if let Some(ref mut b) = self.board {
                             if self.streaming {
@@ -2230,6 +2396,7 @@ impl eframe::App for OpenBciGuiApp {
                     }
 
                     self.draw_record_export(ui);
+                    self.draw_display_controls(ui);
 
                     let exp_running = self.experiment.is_running();
                     let exp_label = if exp_running {
@@ -2372,9 +2539,27 @@ impl eframe::App for OpenBciGuiApp {
                                     self.draw_session_rack(ui, &mut open);
                                 });
                                 draw_exclusive_section(ui, &mut open, "Experiments", |ui| {
-                                    ui.label(
-                                        egui::RichText::new("Guided recording").color(theme::TEXT),
-                                    );
+                                    if !self.experiment.is_running() {
+                                        egui::ComboBox::from_id_salt("exp_protocol")
+                                            .selected_text(self.experiment_protocol.label())
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(
+                                                    &mut self.experiment_protocol,
+                                                    ProtocolKind::Guided,
+                                                    ProtocolKind::Guided.label(),
+                                                );
+                                                ui.selectable_value(
+                                                    &mut self.experiment_protocol,
+                                                    ProtocolKind::EyesClosed,
+                                                    ProtocolKind::EyesClosed.label(),
+                                                );
+                                            });
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new(self.experiment.protocol().label())
+                                                .color(theme::TEXT),
+                                        );
+                                    }
                                     let exp_running = self.experiment.is_running();
                                     let exp_label = if exp_running {
                                         "Stop"
@@ -2835,6 +3020,7 @@ impl eframe::App for OpenBciGuiApp {
             .frame(egui::Frame::NONE.fill(theme::CANVAS))
             .show(ctx, |ui| {
                 // Phase 7: as_deref() yields Option<&dyn DataSource> — uniform for Playback + live boards
+                self.apply_display_controls();
                 if let Some(board) = self.board.as_deref() {
                     self.widget_manager.update(board);
 
@@ -3477,5 +3663,57 @@ mod properties_rack_tests {
             src.contains("if setup_panel_active(self.system_mode)"),
             "setup panel early return must be conditional on still being PreInit"
         );
+    }
+
+    #[test]
+    fn version_is_semver_2_1_2() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "2.1.2");
+    }
+
+    #[test]
+    fn window_and_smooth_live_on_top_bar_not_session_cutoff() {
+        let src = include_str!("app.rs");
+        let top = src
+            .split("top_nav")
+            .nth(1)
+            .unwrap_or("")
+            .split("tool_panel")
+            .next()
+            .unwrap_or("");
+        assert!(top.contains("draw_display_controls"), "{top}");
+        assert!(src.contains("from_id_salt(\"top_window\")"));
+        assert!(src.contains("from_id_salt(\"top_smooth\")"));
+        let session = src
+            .split("fn draw_session_rack")
+            .nth(1)
+            .unwrap_or("")
+            .split("fn apply_display_controls")
+            .next()
+            .unwrap_or("");
+        assert!(session.contains("Smooth cutoff"), "{session}");
+        assert!(!session.contains("from_id_salt(\"top_window\")"));
+        let ts = include_str!("widgets/time_series.rs");
+        assert!(!ts.contains("from_id_salt(\"ts_window\")"));
+        let fft = include_str!("widgets/fft.rs");
+        assert!(!fft.contains("from_id_salt(\"fft_smooth\")"));
+        let bp = include_str!("widgets/band_power.rs");
+        assert!(!bp.contains("from_id_salt(\"bp_smooth\")"));
+    }
+
+    #[test]
+    fn experiments_picker_does_not_dump_both_scripts() {
+        let src = include_str!("app.rs");
+        let exp = src
+            .split("\"Experiments\"")
+            .nth(1)
+            .unwrap_or("")
+            .split("\"Networking\"")
+            .next()
+            .unwrap_or("");
+        assert!(exp.contains("Guided recording") || exp.contains("ProtocolKind::Guided"), "{exp}");
+        assert!(exp.contains("Eyes closed") || exp.contains("ProtocolKind::EyesClosed"), "{exp}");
+        assert!(exp.contains("exp_protocol"));
+        assert!(!exp.contains("Blink ten times"), "{exp}");
+        assert!(!exp.contains("ten-minute meditation"), "{exp}");
     }
 }

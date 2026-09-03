@@ -7,14 +7,14 @@
 use crate::board::DataSource;
 use crate::fft::band_powers_psd;
 use crate::laterality::{
-    latch_rails, laterality_index, occupied_band_fill, Rhythm, WINDOW_SEC, IDX_FP1, IDX_FP2,
-    IDX_O1, IDX_O2, LI_THRESHOLD, POWER_FLOOR,
+    common_mode_jump, latch_rails, laterality_index, posterior_pair_has_rest,
+    rest_fill_o1_o2, Rhythm, WINDOW_SEC, IDX_FP1, IDX_FP2, IDX_O1, IDX_O2, LI_THRESHOLD,
+    POWER_FLOOR,
 };
 use crate::theme;
 use crate::widgets::mark_iv::{
     self, channel_at, default_map, hit_hole, is_hole, paint_frame, paint_frame_hiding_pair,
     paint_head, paint_head_tinted, project_holes, Camera, HemiTint, WaveTint, DEFAULT_SITES,
-    HEADSET_NAME,
 };
 use crate::widgets::Widget;
 use eframe::egui;
@@ -44,6 +44,7 @@ pub const LABELS: [&str; 8] = ["Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2"]
 pub struct OverlaySite {
     pub idx: usize,
     pub fill: f32,
+    pub hz: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -83,6 +84,8 @@ pub struct WHeadPlot {
     pub show_hemispheres: bool,
     /// Head Plot chrome tag — slow/fast word + cool/warm tone.
     pub show_waves: bool,
+    all_sites_jump: bool,
+    rest_hz: [Option<f32>; 8],
 }
 
 /// Recapture-only: OPENBCI_ASSIGN_HOLE=C3 (crop scripts cannot click).
@@ -115,6 +118,8 @@ impl WHeadPlot {
             orbit: Camera::default(),
             show_hemispheres: true,
             show_waves: true,
+            all_sites_jump: false,
+            rest_hz: [None; 8],
         }
     }
 
@@ -125,20 +130,20 @@ impl WHeadPlot {
     /// Head Plot only: all occupied inserts, per-channel fill. Pair views
     /// (Left / right, Which first) use two holes. No pair caption, no band letter.
     pub fn overlay_frame(&self) -> HeadOverlayFrame {
-        let band = Rhythm::Alpha.psd_index();
-        let mut psd = [0.0_f64; 8];
-        for i in 0..8 {
-            if self.map[i].is_empty() || self.railed[i] {
-                continue;
-            }
-            psd[i] = self.channel_psd[i][band];
-        }
-        let fill = occupied_band_fill(&psd);
+        let rest = posterior_pair_has_rest(&self.channel_psd, &self.railed);
+        let fill = rest_fill_o1_o2(&self.channel_psd, &self.railed);
         let sites = (0..8)
             .filter(|&i| !self.map[i].is_empty())
             .map(|idx| OverlaySite {
                 idx,
-                fill: fill[idx],
+                fill: if self.all_sites_jump { 0.0 } else { fill[idx] },
+                hz: if self.all_sites_jump || !rest {
+                    None
+                } else if idx == IDX_O1 || idx == IDX_O2 {
+                    self.rest_hz[idx]
+                } else {
+                    None
+                },
             })
             .collect();
         HeadOverlayFrame {
@@ -152,6 +157,9 @@ impl WHeadPlot {
     /// Separate laterality + slow/fast words — never one glued sentence.
     /// Do not stamp "active" on 8–13 Hz rest.
     fn plate_captions(&self) -> String {
+        if self.all_sites_jump {
+            return "All sites jumped".into();
+        }
         if self
             .railed
             .iter()
@@ -196,7 +204,7 @@ impl WHeadPlot {
     }
 
     fn hemi_tint(&self) -> HemiTint {
-        if !self.show_hemispheres {
+        if self.all_sites_jump || !self.show_hemispheres {
             return HemiTint::None;
         }
         let band = Rhythm::Alpha.psd_index();
@@ -236,7 +244,7 @@ impl WHeadPlot {
     }
 
     fn wave_tint(&self) -> WaveTint {
-        if !self.show_waves {
+        if self.all_sites_jump || !self.show_waves {
             return WaveTint::None;
         }
         match self.waves_caption() {
@@ -539,6 +547,7 @@ impl Widget for WHeadPlot {
             );
         }
         latch_rails(&mut self.railed, &chs);
+        self.all_sites_jump = common_mode_jump(&chs).is_some();
         self.channel_psd = [[0.0; 5]; 8];
         let data = source.get_data(n.max(32));
         if exg.len() < 8 || data.is_empty() {
@@ -557,6 +566,18 @@ impl Widget for WHeadPlot {
             }
             self.channel_psd[ch] = band_powers_psd(&samples, sr);
         }
+        self.rest_hz = [None; 8];
+        if posterior_pair_has_rest(&self.channel_psd, &self.railed) {
+            for idx in [IDX_O1, IDX_O2] {
+                if idx < exg.len() {
+                    let samples: Vec<f64> = data
+                        .iter()
+                        .map(|row| row.get(exg[idx]).copied().unwrap_or(0.0))
+                        .collect();
+                    self.rest_hz[idx] = crate::fft::alpha_peak_hz(&samples, sr);
+                }
+            }
+        }
     }
 
     fn show(
@@ -566,20 +587,25 @@ impl Widget for WHeadPlot {
         _ctx: &mut crate::widget_context::WidgetContext,
     ) {
         // Waves + Hemispheres tags on Head Plot only (no extra panes).
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            let fonts = theme::font_sizes();
-            ui.toggle_value(
-                &mut self.show_waves,
-                egui::RichText::new("Waves").size(fonts.caption),
-            );
-            ui.toggle_value(
-                &mut self.show_hemispheres,
-                egui::RichText::new("Hemispheres").size(fonts.caption),
-            );
-        });
+        if !self.all_sites_jump {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let fonts = theme::font_sizes();
+                ui.toggle_value(
+                    &mut self.show_waves,
+                    egui::RichText::new("Waves").size(fonts.caption),
+                );
+                ui.toggle_value(
+                    &mut self.show_hemispheres,
+                    egui::RichText::new("Hemispheres").size(fonts.caption),
+                );
+            });
+        }
         // Quiet activity color key — dark → site hue → hot. Not a dashboard.
-        paint_activity_ramp_key(ui);
+        // Mute on all-sites jump: do not read Waves/Hemispheres off a starving stream.
+        if !self.all_sites_jump {
+            paint_activity_ramp_key(ui);
+        }
         // Own overlay captions only (laterality + slow/fast as separate lines).
         // Never stamp "active" on 8–13 Hz rest.
         let plate_caption = self.overlay_frame().caption;
@@ -723,6 +749,15 @@ impl Widget for WHeadPlot {
                         egui::FontId::proportional(fonts.hole_label),
                         theme::TEXT,
                     );
+                    if let Some(hz) = plate.sites.iter().find(|s| s.idx == ch).and_then(|s| s.hz) {
+                        painter.text(
+                            pr.pos + egui::vec2(0.0, disc_r + 2.0),
+                            egui::Align2::CENTER_TOP,
+                            format!("{hz:.0} Hz"),
+                            egui::FontId::proportional(fonts.small),
+                            theme::TEXT,
+                        );
+                    }
                 }
             } else {
                 painter.text(
@@ -795,7 +830,7 @@ mod tests {
         assert_eq!(w.occupied("F7"), None);
         assert_eq!(w.occupied("P3"), None);
         assert_eq!(w.occupied("P4"), None);
-        assert_eq!(HEADSET_NAME, "Ultracortex Mark IV");
+        assert_eq!(mark_iv::HEADSET_NAME, "Ultracortex Mark IV");
         assert!(mark_iv::mesh().holes.iter().any(|h| h.name == "O1"));
         assert!(mark_iv::mesh().holes.iter().any(|h| h.name == "P3"));
     }
@@ -891,6 +926,15 @@ mod tests {
         assert!(src.contains("Unoccupied: mesh opening is empty"));
         assert!(src.contains("continue;"));
         assert!(src.contains("fill_at[ch]"));
+        assert!(src.contains("Hz"));
+        let show = src
+            .split("impl Widget for WHeadPlot")
+            .nth(1)
+            .unwrap_or("");
+        assert!(
+            !show.contains("paint_frame_hiding_pair"),
+            "no pair strut / bead on Head Plot unless a chain is real"
+        );
     }
 
     #[test]
@@ -921,17 +965,26 @@ mod tests {
     }
 
     #[test]
-    fn overlay_frame_fills_eight_occupied() {
+    fn overlay_frame_keeps_eight_inserts_rest_only_o1_o2() {
         let mut w = WHeadPlot::new();
         let i = Rhythm::Alpha.psd_index();
         for ch in 0..8 {
             w.channel_psd[ch][i] = 1.0 + ch as f64 * 0.1;
         }
+        w.rest_hz[IDX_O1] = Some(10.0);
+        w.rest_hz[IDX_O2] = Some(11.0);
+        w.rest_hz[IDX_FP1] = Some(10.0);
         let frame = w.overlay_frame();
-        assert_eq!(frame.sites.len(), 8);
-        for s in &frame.sites {
-            assert!(s.fill > 0.3, "ch {} fill {}", s.idx, s.fill);
-        }
+        assert_eq!(frame.sites.len(), 8, "do not shrink the plot to two sites");
+        let o1 = frame.sites.iter().find(|s| s.idx == IDX_O1).unwrap();
+        let o2 = frame.sites.iter().find(|s| s.idx == IDX_O2).unwrap();
+        let fp1 = frame.sites.iter().find(|s| s.idx == IDX_FP1).unwrap();
+        assert!(o1.fill > 0.3, "O1 rest fill {}", o1.fill);
+        assert!(o2.fill > 0.3, "O2 rest fill {}", o2.fill);
+        assert_eq!(fp1.fill, 0.0, "Fp1 must not get rest fill");
+        assert_eq!(o1.hz, Some(10.0));
+        assert_eq!(o2.hz, Some(11.0));
+        assert_eq!(fp1.hz, None, "Hz only on O1/O2");
         assert!(!frame.caption.contains('α'), "{}", frame.caption);
         assert!(!frame.caption.contains("P3/P4"), "{}", frame.caption);
         assert!(
@@ -942,11 +995,14 @@ mod tests {
         assert!(!frame.caption.to_lowercase().contains("active"), "{}", frame.caption);
         w.railed[2] = true;
         let frame = w.overlay_frame();
-        assert_eq!(frame.sites.iter().find(|s| s.idx == 2).unwrap().fill, 0.0);
         assert_eq!(frame.sites.len(), 8);
         assert_eq!(frame.caption, "Contact lost");
-        assert!(!frame.caption.contains('α'));
-        assert!(!frame.caption.contains("P3/P4"));
+        w.all_sites_jump = true;
+        let jumped = w.overlay_frame();
+        assert_eq!(jumped.caption, "All sites jumped");
+        assert!(!jumped.caption.contains("Contact lost"));
+        assert!(jumped.sites.iter().all(|s| s.fill == 0.0 && s.hz.is_none()));
+        w.all_sites_jump = false;
     }
 
     #[test]

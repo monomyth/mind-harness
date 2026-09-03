@@ -6,18 +6,20 @@
 use crate::board::ads_settings::{self, default_bank, zero_unpowered_exg, AdsChannel};
 use crate::board::impedance::{
     column_window, cyton_impedance_on_cmd, ganglion_kohm, kohm_from_lead_off_std_uv,
-    population_std, split_cyton_config_cmds,
+    population_std,
 };
+use crate::board::ingest::ShimIngest;
 use crate::board::{BoardError, DataSource};
-use brainflow::board_shim::BoardShim;
-use brainflow::brainflow_input_params::BrainFlowInputParamsBuilder;
 use brainflow::{BoardIds, BrainFlowPresets, NoiseTypes};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Mutex;
+#[cfg(test)]
+use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 pub struct BrainFlowBoard {
-    board: Option<BoardShim>,
+    ingest: Option<ShimIngest>,
+    prepared: bool,
     board_id: BoardIds,
     serial_port: Option<String>,
     device_id: Option<String>, // for BLE / Ganglion
@@ -39,6 +41,7 @@ pub struct BrainFlowBoard {
     /// (used by app for accurate packet loss % in the WPacketLoss SidePanel visual)
     last_delivered: usize,
     last_lost: usize,
+    last_ingest_error: Option<String>,
     package_num_channel: Option<usize>,
     index_tracker: Option<crate::stream_stats::SampleIndexTracker>,
 
@@ -103,27 +106,10 @@ const CYTON_IMP_DWELL: Duration = Duration::from_millis(2000);
 const CYTON_IMP_OFF_GAP: Duration = Duration::from_millis(150);
 const BRAINFLOW_STREAM_CAP: usize = 45000;
 
-/// `config_board` on the LIVE `BoardShim` only — never stop/start the stream.
-/// Hardware Settings already works this way; Time Series must keep filling the
-/// 1 s impedance std window. Concatenated `x…Xz…Z` is one command per call
-/// (Cyton cannot parse both in a single `config_board`).
-fn cyton_config_on_live(
-    shim: &BoardShim,
-    cmd: Option<&str>,
-    currently_streaming: bool,
-) -> (bool, bool, Option<String>) {
-    let sent = if let Some(cmd) = cmd {
-        for piece in split_cyton_config_cmds(cmd) {
-            if let Err(e) = shim.config_board(piece) {
-                return (false, currently_streaming, Some(e.to_string()));
-            }
-        }
-        true
-    } else {
-        true
-    };
-    (sent, currently_streaming, None)
-}
+/// `config_board` on the ingest thread's live `BoardShim` only — never stop/start
+/// the stream. Hardware Settings already works this way; Time Series must keep
+/// filling the 1 s impedance std window. Concatenated `x…Xz…Z` is split inside
+/// the worker (Cyton cannot parse both in a single `config_board`).
 
 impl BrainFlowBoard {
     pub fn new(board_id: BoardIds, serial_port: Option<String>, device_id: Option<String>) -> Self {
@@ -183,7 +169,8 @@ impl BrainFlowBoard {
         };
 
         Self {
-            board: None,
+            ingest: None,
+            prepared: false,
             board_id,
             serial_port,
             device_id,
@@ -201,6 +188,7 @@ impl BrainFlowBoard {
 
             last_delivered: 0,
             last_lost: 0,
+            last_ingest_error: None,
             package_num_channel,
             index_tracker,
             impedance_active: false,
@@ -277,34 +265,21 @@ impl BrainFlowBoard {
 
 impl DataSource for BrainFlowBoard {
     fn initialize(&mut self) -> Result<(), BoardError> {
-        if self.board.is_some() {
+        if self.prepared {
             return Ok(());
         }
-
-        let mut builder = BrainFlowInputParamsBuilder::default();
-
-        if let Some(ref port) = self.serial_port {
-            builder = builder.serial_port(port.clone());
+        if self.ingest.is_none() {
+            self.ingest = Some(ShimIngest::spawn());
         }
-        if let Some(ref dev) = self.device_id {
-            builder = builder.serial_number(dev.clone());
-        }
-        if let Some(ref ip) = self.ip_address {
-            builder = builder.ip_address(ip.clone());
-        }
-        if let Some(port) = self.ip_port {
-            builder = builder.ip_port(port);
-        }
-
-        let params = builder.build();
-
-        let shim = BoardShim::new(self.board_id, params)
-            .map_err(|e| BoardError::BrainFlow(e.to_string()))?;
-
-        shim.prepare_session()
-            .map_err(|e| BoardError::BrainFlow(e.to_string()))?;
-
-        self.board = Some(shim);
+        let ingest = self.ingest.as_ref().expect("ingest spawned");
+        ingest.prepare(
+            self.board_id,
+            self.serial_port.clone(),
+            self.device_id.clone(),
+            self.ip_address.clone(),
+            self.ip_port,
+        )?;
+        self.prepared = true;
         self.last_delivered = 0;
         self.clear_buffers();
         Ok(())
@@ -314,20 +289,18 @@ impl DataSource for BrainFlowBoard {
         self.drain_cyton_imp_io();
         if self.impedance_active && self.is_ads1299() {
             // Session teardown can hitch; restore ADS before releasing the port.
-            if let Some(shim) = self.board.as_ref() {
-                if let Some(ch) = self.impedance_scan_off_channel() {
-                    if let Some(cmd) = self.ads_restore_imp_cmd(ch) {
-                        let _ = cyton_config_on_live(shim, Some(&cmd), self.is_streaming);
+            if let Some(ch) = self.impedance_scan_off_channel() {
+                if let Some(cmd) = self.ads_restore_imp_cmd(ch) {
+                    if let Some(ingest) = self.ingest.as_ref() {
+                        let _ = ingest.config(&cmd);
                     }
                 }
             }
         }
-        if let Some(shim) = self.board.take() {
-            if self.is_streaming && shim.stop_stream().is_ok() {
-                self.is_streaming = false;
-            }
-            let _ = shim.release_session();
+        if let Some(ingest) = self.ingest.take() {
+            ingest.shutdown();
         }
+        self.prepared = false;
         self.is_streaming = false;
         self.last_delivered = 0;
         self.last_lost = 0;
@@ -356,38 +329,21 @@ impl DataSource for BrainFlowBoard {
             self.tick_cyton_impedance();
             return;
         }
-        let arr = match self.board.as_ref() {
-            Some(shim) if self.is_streaming => shim
-                .get_board_data(None, BrainFlowPresets::DefaultPreset)
-                .ok(),
-            _ => None,
+        self.last_ingest_error = None;
+        let (mut new_samples, err) = match self.ingest.as_ref() {
+            Some(ingest) if self.is_streaming => ingest.take_rows(),
+            _ => (Vec::new(), None),
         };
-        let Some(arr) = arr else {
-            if self.impedance_active && self.is_ads1299() {
-                self.tick_cyton_impedance();
-            }
-            return;
-        };
-        let n_chans = arr.nrows();
-        let n_samples = arr.ncols();
-        if n_samples == 0 {
+        self.last_ingest_error = err;
+        if new_samples.is_empty() {
             if self.impedance_active && self.is_ads1299() {
                 self.tick_cyton_impedance();
             }
             return;
         }
 
-        // Convert 2D array to row-major samples. Do **not** IIR here:
-        // BrainFlow typically returns ~4–8 columns per 60 fps frame, and a
-        // cold Butterworth on that length destroys blinks / slow EEG.
-        let mut new_samples = Vec::with_capacity(n_samples);
-        for s in 0..n_samples {
-            let mut row = Vec::with_capacity(n_chans);
-            for c in 0..n_chans {
-                row.push(arr[[c, s]]);
-            }
-            new_samples.push(row);
-        }
+        // Rows are already sample-major from the ingest thread. Do **not** IIR
+        // on a short BrainFlow slice: a cold Butterworth destroys blinks / slow EEG.
         for row in &mut new_samples {
             zero_unpowered_exg(row, &self.exg_channels, &self.ads_bank);
         }
@@ -432,32 +388,29 @@ impl DataSource for BrainFlowBoard {
         if self.imp_io_busy {
             return Err(BoardError::Io("board busy with impedance command".into()));
         }
-        if let Some(ref mut shim) = self.board {
-            if !self.is_streaming {
-                shim.start_stream(BRAINFLOW_STREAM_CAP, "")
-                    .map_err(|e| BoardError::BrainFlow(e.to_string()))?;
-                self.is_streaming = true;
-                self.last_delivered = 0;
-                self.last_lost = 0;
-                if let Some(t) = self.index_tracker.as_mut() {
-                    t.reset();
-                }
-                self.clear_buffers();
+        let Some(ingest) = self.ingest.as_ref() else {
+            return Err(BoardError::NotInitialized);
+        };
+        if !self.is_streaming {
+            ingest.start_stream(BRAINFLOW_STREAM_CAP)?;
+            self.is_streaming = true;
+            self.last_delivered = 0;
+            self.last_lost = 0;
+            if let Some(t) = self.index_tracker.as_mut() {
+                t.reset();
             }
-            Ok(())
-        } else {
-            Err(BoardError::NotInitialized)
+            self.clear_buffers();
         }
+        Ok(())
     }
 
     fn stop_streaming(&mut self) -> Result<(), BoardError> {
         if self.imp_io_busy {
             return Err(BoardError::Io("board busy with impedance command".into()));
         }
-        if let Some(ref mut shim) = self.board {
+        if let Some(ingest) = self.ingest.as_ref() {
             if self.is_streaming {
-                shim.stop_stream()
-                    .map_err(|e| BoardError::BrainFlow(e.to_string()))?;
+                ingest.stop_stream()?;
                 self.is_streaming = false;
             }
         }
@@ -479,6 +432,10 @@ impl DataSource for BrainFlowBoard {
 
     fn accel_channels(&self) -> &[usize] {
         &self.accel_channels
+    }
+
+    fn package_num_channel(&self) -> Option<usize> {
+        self.package_num_channel
     }
 
     fn sample_rate(&self) -> i32 {
@@ -540,6 +497,10 @@ impl DataSource for BrainFlowBoard {
         self.last_lost
     }
 
+    fn last_ingest_error(&self) -> Option<String> {
+        self.last_ingest_error.clone()
+    }
+
     fn supports_impedance(&self) -> bool {
         self.is_ads1299() || self.is_ganglion() || self.board_id == BoardIds::SyntheticBoard
     }
@@ -557,7 +518,7 @@ impl DataSource for BrainFlowBoard {
             return Ok(());
         }
 
-        if self.board.is_none() {
+        if !self.prepared {
             return Err(BoardError::NotInitialized);
         }
 
@@ -674,7 +635,7 @@ impl DataSource for BrainFlowBoard {
         }
         let cmd = ads_settings::ads_commit_cmd(channel, settings)
             .ok_or_else(|| BoardError::Io("no ADS letter for channel".into()))?;
-        if self.board_id == BoardIds::SyntheticBoard || self.board.is_none() {
+        if self.board_id == BoardIds::SyntheticBoard || !self.prepared {
             self.ads_bank[channel] = settings;
             return Ok(());
         }
@@ -720,7 +681,7 @@ impl DataSource for BrainFlowBoard {
         if !self.supports_aux_widgets() {
             return Err(BoardError::Io("aux mode is Cyton-only".into()));
         }
-        if self.board.is_some() {
+        if self.prepared {
             self.config_board_str(&format!("/{mode}"))?;
         }
         self.cyton_board_mode = mode;
@@ -771,10 +732,8 @@ impl BrainFlowBoard {
     }
 
     fn config_board_str(&self, cmd: &str) -> Result<(), BoardError> {
-        let shim = self.board.as_ref().ok_or(BoardError::NotInitialized)?;
-        shim.config_board(cmd)
-            .map_err(|e| BoardError::BrainFlow(e.to_string()))?;
-        Ok(())
+        let ingest = self.ingest.as_ref().ok_or(BoardError::NotInitialized)?;
+        ingest.config(cmd)
     }
 
     fn impedance_scan_off_channel(&self) -> Option<usize> {
@@ -795,10 +754,16 @@ impl BrainFlowBoard {
                 "impedance command already in progress".into(),
             ));
         }
-        let Some(shim) = self.board.as_ref() else {
+        if self.ingest.is_none() {
             return Err(BoardError::NotInitialized);
         };
-        let (sent, streaming, err) = cyton_config_on_live(shim, cmd.as_deref(), self.is_streaming);
+        let (sent, streaming, err) = match cmd.as_deref() {
+            None => (true, self.is_streaming, None),
+            Some(cmd) => match self.config_board_str(cmd) {
+                Ok(()) => (true, self.is_streaming, None),
+                Err(e) => (false, self.is_streaming, Some(e.to_string())),
+            },
+        };
         let io_err = err.clone();
         self.apply_cyton_imp_io_result(CytonImpIoResult {
             kind,
@@ -1056,6 +1021,16 @@ impl BrainFlowBoard {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn last_shim_pull_thread(&self) -> Option<ThreadId> {
+        self.ingest.as_ref().and_then(|i| i.last_pull_thread())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ingest_cmds_sent(&self) -> u64 {
+        self.ingest.as_ref().map(|i| i.cmds_sent()).unwrap_or(0)
+    }
+
     fn rebuild_filtered(&mut self) {
         let filtered = if let Ok(guard) = self.latest_data.lock() {
             crate::filter_settings::rebuild_filtered_display(
@@ -1083,6 +1058,14 @@ impl BrainFlowBoard {
     #[allow(dead_code)]
     pub fn get_filter_settings_mut(&mut self) -> &mut crate::filter_settings::FilterSettings {
         &mut self.filter_settings
+    }
+}
+
+impl Drop for BrainFlowBoard {
+    fn drop(&mut self) {
+        if self.ingest.is_some() {
+            let _ = self.uninitialize();
+        }
     }
 }
 
@@ -1120,7 +1103,7 @@ mod tests {
         assert!(!b.impedance_is_simulated());
         assert_eq!(b.impedance_quality_kohm(), (750.0, 2500.0));
         assert_eq!(b.get_impedance(), vec![None; 8]);
-        assert!(b.board.is_none());
+        assert!(!b.prepared);
         let err = b.start_impedance_test(&[0]).unwrap_err();
         assert!(
             matches!(err, BoardError::NotInitialized),
@@ -1220,6 +1203,32 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_shim_pull_is_not_on_update_thread() {
+        let mut b = BrainFlowBoard::synthetic(8);
+        b.initialize().expect("synthetic initialize");
+        b.start_streaming().expect("synthetic start");
+        std::thread::sleep(Duration::from_millis(80));
+        b.update();
+        let pull_tid = b.last_shim_pull_thread();
+        let delivered = b.recent_samples_delivered();
+        let _ = b.stop_streaming();
+        let _ = b.uninitialize();
+        assert!(
+            pull_tid.is_some(),
+            "ingest thread must have called get_board_data"
+        );
+        assert_ne!(
+            pull_tid,
+            Some(std::thread::current().id()),
+            "get_board_data must not run on the UI/update thread (live Cyton dies after the first burst when it does)"
+        );
+        assert!(
+            delivered > 0,
+            "80ms of synthetic ingest must deliver samples to update(), got {delivered}"
+        );
+    }
+
+    #[test]
     fn synthetic_power_off_channel_8_zeros_exg() {
         let mut b = BrainFlowBoard::synthetic(8);
         let off = AdsChannel {
@@ -1248,5 +1257,39 @@ mod tests {
         let b = BrainFlowBoard::synthetic(8);
         assert!(!b.supports_aux_widgets());
         assert!(b.ads_channels().is_some());
+    }
+
+    #[test]
+    fn record_start_does_not_call_board_shim_or_stop_ingest() {
+        let mut b = BrainFlowBoard::synthetic(8);
+        b.initialize().expect("init");
+        b.start_streaming().expect("start");
+        std::thread::sleep(Duration::from_millis(50));
+        b.update();
+        assert!(
+            b.recent_samples_delivered() > 0,
+            "synthetic ingest must be alive before Record"
+        );
+        let cmds = b.ingest_cmds_sent();
+        let mut pump = crate::data_logger::RecordPump::spawn();
+        let path = pump
+            .start(crate::data_logger::LogFormat::BDF, 8, 250)
+            .expect("record");
+        assert_eq!(
+            b.ingest_cmds_sent(),
+            cmds,
+            "Record start must not call BoardShim"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        b.update();
+        assert!(
+            b.recent_samples_delivered() > 0,
+            "ingest must keep delivering after Record start"
+        );
+        pump.stop();
+        let _ = b.stop_streaming();
+        let _ = b.uninitialize();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::markers::sidecar_path(&path));
     }
 }

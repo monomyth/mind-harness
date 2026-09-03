@@ -10,7 +10,9 @@ use egui_plot::{Line, Plot, PlotPoints};
 pub struct WAccelerometer {
     title: String,
     history: Vec<(f64, f64, f64)>, // (x, y, z)
-    max_points: usize,
+    window_sec: f32,
+    smoothing_index: usize,
+    last: Option<(f64, f64, f64)>,
 }
 
 impl WAccelerometer {
@@ -18,8 +20,18 @@ impl WAccelerometer {
         Self {
             title: "Accelerometer".to_string(),
             history: Vec::new(),
-            max_points: 500,
+            window_sec: 5.0,
+            smoothing_index: 2,
+            last: None,
         }
+    }
+
+    pub fn set_window_sec(&mut self, seconds: f32) {
+        self.window_sec = seconds.max(1.0);
+    }
+
+    pub fn set_smoothing_index(&mut self, index: usize) {
+        self.smoothing_index = index.min(crate::widgets::SMOOTH_FACTORS.len() - 1);
     }
 }
 
@@ -45,14 +57,29 @@ impl Widget for WAccelerometer {
             return;
         }
         let latest = source.get_data(n);
+        let factor = crate::widgets::SMOOTH_FACTORS
+            .get(self.smoothing_index)
+            .copied()
+            .unwrap_or(0.0) as f64;
         for row in latest {
-            let x = row.get(accel_chans[0]).copied().unwrap_or(0.0);
-            let y = row.get(accel_chans[1]).copied().unwrap_or(0.0);
-            let z = row.get(accel_chans[2]).copied().unwrap_or(0.0);
+            let mut x = row.get(accel_chans[0]).copied().unwrap_or(0.0);
+            let mut y = row.get(accel_chans[1]).copied().unwrap_or(0.0);
+            let mut z = row.get(accel_chans[2]).copied().unwrap_or(0.0);
+            if factor > 0.0 {
+                if let Some((px, py, pz)) = self.last {
+                    x = px * factor + x * (1.0 - factor);
+                    y = py * factor + y * (1.0 - factor);
+                    z = pz * factor + z * (1.0 - factor);
+                }
+            }
+            self.last = Some((x, y, z));
             self.history.push((x, y, z));
         }
-        if self.history.len() > self.max_points {
-            let extra = self.history.len() - self.max_points;
+        let keep = ((self.window_sec as f64) * source.sample_rate() as f64)
+            .round()
+            .max(10.0) as usize;
+        if self.history.len() > keep {
+            let extra = self.history.len() - keep;
             self.history.drain(0..extra);
         }
     }

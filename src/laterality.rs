@@ -386,6 +386,49 @@ pub fn channels_railed(channels: &[Vec<f64>]) -> [bool; 8] {
 }
 
 
+pub fn channel_max_steps(channels: &[Vec<f64>]) -> [f64; 8] {
+    let mut out = [0.0; 8];
+    let n = channels.len().min(8);
+    for i in 0..n {
+        out[i] = max_abs_step(&channels[i]);
+    }
+    out
+}
+
+/// Rest (8–13 Hz) on one occiput: alpha above floor and at least as loud as δ/θ/β.
+pub fn site_has_rest(psd: &[f64; 5]) -> bool {
+    let a = psd[Rhythm::Alpha.psd_index()];
+    if a <= POWER_FLOOR {
+        return false;
+    }
+    a + 1e-12 >= psd[Rhythm::Delta.psd_index()]
+        && a + 1e-12 >= psd[Rhythm::Theta.psd_index()]
+        && a + 1e-12 >= psd[Rhythm::Beta.psd_index()]
+}
+
+/// Both O1 and O2 actually have rest. Railed occiputs do not count.
+pub fn posterior_pair_has_rest(psd: &[[f64; 5]; 8], railed: &[bool; 8]) -> bool {
+    if railed[IDX_O1] || railed[IDX_O2] {
+        return false;
+    }
+    site_has_rest(&psd[IDX_O1]) && site_has_rest(&psd[IDX_O2])
+}
+
+/// Rest fill (0..1) only on O1/O2 when the back pair has rest. Other sites stay 0.
+pub fn rest_fill_o1_o2(psd: &[[f64; 5]; 8], railed: &[bool; 8]) -> [f32; 8] {
+    let mut fill = [0.0_f32; 8];
+    if !posterior_pair_has_rest(psd, railed) {
+        return fill;
+    }
+    let a = Rhythm::Alpha.psd_index();
+    let o1 = psd[IDX_O1][a];
+    let o2 = psd[IDX_O2][a];
+    let maxp = o1.max(o2).max(1e-12);
+    fill[IDX_O1] = (o1 / maxp).clamp(0.0, 1.0) as f32;
+    fill[IDX_O2] = (o2 / maxp).clamp(0.0, 1.0) as f32;
+    fill
+}
+
 /// Every used hole jumps together (ear clip, bias, cable). Not one insert lifting.
 pub fn common_mode_jump(channels: &[Vec<f64>]) -> Option<(usize, f64)> {
     let n = channels.len().min(8);
@@ -1427,5 +1470,27 @@ mod tests {
         );
         let silent = occupied_band_fill(&[0.0; 8]);
         assert!(silent.iter().all(|&t| t == 0.0));
+    }
+
+    #[test]
+    fn rest_fill_lights_only_o1_o2_when_the_back_pair_has_rest() {
+        let mut psd = [[0.0_f64; 5]; 8];
+        let a = Rhythm::Alpha.psd_index();
+        psd[IDX_O1][a] = 2.0;
+        psd[IDX_O2][a] = 1.0;
+        psd[IDX_FP1][a] = 4.0;
+        psd[IDX_C3][a] = 3.0;
+        let railed = [false; 8];
+        let fill = rest_fill_o1_o2(&psd, &railed);
+        assert!(fill[IDX_O1] > 0.9, "{fill:?}");
+        assert!(fill[IDX_O2] > 0.4, "{fill:?}");
+        assert_eq!(fill[IDX_FP1], 0.0);
+        assert_eq!(fill[IDX_C3], 0.0);
+        psd[IDX_O2][a] = 0.0;
+        let fill = rest_fill_o1_o2(&psd, &railed);
+        assert!(
+            fill.iter().all(|&t| t == 0.0),
+            "one occiput is not the back pair: {fill:?}"
+        );
     }
 }

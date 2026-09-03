@@ -45,6 +45,7 @@ pub struct PlaybackBoard {
     filter_dirty: bool,
     impedance_active: bool,
     markers: Vec<MarkerEvent>,
+    package_num_channel: Option<usize>,
 }
 
 impl PlaybackBoard {
@@ -109,10 +110,16 @@ impl PlaybackBoard {
         let row_len = samples.first().map(|r| r.len()).unwrap_or(n_exg);
         let n_exg = n_exg.min(row_len).max(1);
         let exg_channels: Vec<usize> = (0..n_exg).collect();
+        let accel_end = (n_exg + 3).min(row_len);
         let accel_channels: Vec<usize> = if row_len > n_exg {
-            (n_exg..(n_exg + 3).min(row_len)).collect()
+            (n_exg..accel_end).collect()
         } else {
             vec![]
+        };
+        let package_num_channel = if row_len > accel_end {
+            Some(accel_end)
+        } else {
+            None
         };
         let total_duration_sec = samples.len() as f64 / sample_rate.max(1) as f64;
         let mut board = Self {
@@ -132,6 +139,7 @@ impl PlaybackBoard {
             filter_dirty: true,
             impedance_active: false,
             markers,
+            package_num_channel,
         };
         board.apply_pending_filters();
         board
@@ -377,6 +385,10 @@ impl DataSource for PlaybackBoard {
 
     fn accel_channels(&self) -> &[usize] {
         &self.accel_channels
+    }
+
+    fn package_num_channel(&self) -> Option<usize> {
+        self.package_num_channel
     }
 
     fn sample_rate(&self) -> i32 {

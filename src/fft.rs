@@ -9,6 +9,24 @@ use std::f64::consts::PI;
 /// Matches Java `W_FFT.pde` `fft_plot.setXLim(0.1, xLim)` so the DC bin is not drawn.
 pub const FFT_DISPLAY_MIN_HZ: f64 = 0.1;
 
+/// Peak frequency inside the 8–13 Hz rest band, if that band has energy.
+pub fn alpha_peak_hz(samples: &[f64], sample_rate: f64) -> Option<f32> {
+    let (freqs, mags) = fft_single_sided_uv(samples, sample_rate);
+    let mut best_f = 0.0;
+    let mut best_m = 0.0;
+    for (f, m) in freqs.iter().zip(mags.iter()) {
+        if *f >= 8.0 && *f <= 13.0 && *m > best_m {
+            best_m = *m;
+            best_f = *f;
+        }
+    }
+    if best_m > 0.0 {
+        Some(best_f as f32)
+    } else {
+        None
+    }
+}
+
 /// Java `getNfftSafe()` in OpenBCI_GUI.pde.
 pub fn nfft_safe(sample_rate: i32) -> usize {
     match sample_rate {
