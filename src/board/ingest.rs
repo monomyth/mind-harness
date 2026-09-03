@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle, ThreadId};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static INGEST_SESSION: AtomicU64 = AtomicU64::new(1);
 
@@ -65,11 +65,15 @@ where
 {
     let tid = thread::current().id();
     loop {
+        let wait_t0 = Instant::now();
         match cmds.recv_timeout(INGEST_PERIOD) {
             Ok(PullCmd::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
+        let wait = wait_t0.elapsed();
+        let busy_t0 = Instant::now();
         apply_pull_result(tid, &mailbox, pull());
+        crate::starve::SPLIT.add_ingest(wait + busy_t0.elapsed(), busy_t0.elapsed());
     }
 }
 
@@ -294,6 +298,8 @@ fn shim_worker(cmds: Receiver<ShimCmd>, mailbox: Arc<Mutex<IngestMailbox>>) {
             continue;
         };
         // Skip the rust binding's 0-column get_board_data (dangling Vec ptr).
+        let wait = INGEST_PERIOD;
+        let busy_t0 = Instant::now();
         let result = match s.get_board_data_count(BrainFlowPresets::DefaultPreset) {
             Ok(0) => Ok(Vec::new()),
             Ok(_) => match s.get_board_data(None, BrainFlowPresets::DefaultPreset) {
@@ -303,6 +309,7 @@ fn shim_worker(cmds: Receiver<ShimCmd>, mailbox: Arc<Mutex<IngestMailbox>>) {
             Err(e) => Err(format!("{e:?}")),
         };
         apply_pull_result(tid, &mailbox, result);
+        crate::starve::SPLIT.add_ingest(wait + busy_t0.elapsed(), busy_t0.elapsed());
     }
     if let Some(s) = shim.take() {
         if streaming {

@@ -1733,6 +1733,7 @@ impl OpenBciGuiApp {
 
 impl eframe::App for OpenBciGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let _starve_ui = crate::starve::begin_ui_tick(ctx.input(|i| i.unstable_dt));
         self.frame_count += 1;
         if let Ok(crop) = std::env::var("OPENBCI_CROP") {
             if self.frame_count == 90 || self.frame_count == 140 || self.frame_count == 220 {

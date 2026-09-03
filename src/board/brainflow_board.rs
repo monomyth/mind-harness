@@ -354,10 +354,15 @@ impl DataSource for BrainFlowBoard {
             let mut lost = 0u64;
             for row in &new_samples {
                 if let Some(&v) = row.get(pkg) {
-                    lost += tracker.observe(v as i32);
+                    let gap = tracker.observe(v as i32);
+                    lost += gap;
+                    crate::starve::SPLIT.note_packet(v as u64, gap);
                 }
             }
             self.last_lost = lost as usize;
+        }
+        if crate::starve::accel_any_from_rows(&new_samples, &self.accel_channels) {
+            crate::starve::SPLIT.note_accel_nonzero();
         }
         if self.impedance_active && self.is_ganglion() {
             self.ingest_ganglion_resistance(&new_samples);

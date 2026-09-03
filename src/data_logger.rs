@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One recorded sample: packet/sample index, up to 8 EXG, last-3 Accel.
 #[derive(Clone, Debug, Default)]
@@ -523,6 +523,7 @@ impl Drop for RecordPump {
 
 fn record_writer_loop(rx: Receiver<RecordCmd>, mut logger: DataLogger, write_delay: Duration) {
     loop {
+        let wait_t0 = Instant::now();
         let cmd = match rx.recv() {
             Ok(c) => c,
             Err(_) => {
@@ -530,6 +531,8 @@ fn record_writer_loop(rx: Receiver<RecordCmd>, mut logger: DataLogger, write_del
                 break;
             }
         };
+        let wait = wait_t0.elapsed();
+        let busy_t0 = Instant::now();
         match cmd {
             RecordCmd::Start {
                 format,
@@ -556,9 +559,11 @@ fn record_writer_loop(rx: Receiver<RecordCmd>, mut logger: DataLogger, write_del
             }
             RecordCmd::Shutdown => {
                 logger.stop();
+                crate::starve::SPLIT.add_file(wait + busy_t0.elapsed(), busy_t0.elapsed());
                 break;
             }
         }
+        crate::starve::SPLIT.add_file(wait + busy_t0.elapsed(), busy_t0.elapsed());
     }
 }
 
