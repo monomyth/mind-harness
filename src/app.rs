@@ -193,8 +193,6 @@ pub struct OpenBciGuiApp {
     export_prompt_open: bool,
     /// Cyton on-board SD logging armed / active (SDK file on the card).
     cyton_sd_active: bool,
-    /// Fail-closed warn when SD destination requested but board did not confirm.
-    cyton_sd_warn: Option<String>,
     cyton_sd_duration: crate::board::cyton_sd_write::CytonSdDuration,
     record_destination: crate::board::cyton_sd_write::RecordDestination,
     scrubbing: bool,
@@ -324,7 +322,6 @@ impl OpenBciGuiApp {
             export_kind: crate::export::ExportKind::Bdf,
             export_prompt_open: false,
             cyton_sd_active: false,
-            cyton_sd_warn: None,
             cyton_sd_duration: crate::board::cyton_sd_write::CytonSdDuration::Min5,
             record_destination: crate::board::cyton_sd_write::RecordDestination::Local,
             scrubbing: false,
@@ -975,41 +972,39 @@ impl OpenBciGuiApp {
     }
 
     fn start_cyton_sd_write(&mut self) -> bool {
+        // Fail-closed + bottom status only (Eugene lock / Interface).
+        // No Hardware warn, under-control warn, or modal.
+        const SD_STATUS_FAIL: &str = "Couldn't write to the SD card";
         let Some(ref mut b) = self.board else {
-            let msg = "SD write failed — start a Cyton session first".to_string();
-            self.cyton_sd_warn = Some(msg.clone());
             self.cyton_sd_active = false;
-            self.event_log.log_error(&msg);
-            self.connection_status = msg;
+            self.connection_status = SD_STATUS_FAIL.to_string();
+            self.event_log
+                .log_error("Cyton SD write: start a Cyton session first");
             return false;
         };
         if !b.supports_cyton_sd_write() {
-            let msg = "SD write failed — this board cannot log to SD".to_string();
-            self.cyton_sd_warn = Some(msg.clone());
             self.cyton_sd_active = false;
-            self.event_log.log_error(&msg);
-            self.connection_status = msg;
+            self.connection_status = SD_STATUS_FAIL.to_string();
+            self.event_log
+                .log_error("Cyton SD write: this board cannot log to SD");
             return false;
         }
         let dur = self.cyton_sd_duration;
         match b.cyton_sd_write_start(dur) {
             Ok(()) => {
                 self.cyton_sd_active = true;
-                self.cyton_sd_warn = None;
                 self.event_log.log_recording(&format!(
                     "Cyton SD write started ({})",
                     dur.label()
                 ));
-                self.connection_status = format!("Recording · SD · {}", dur.label());
                 true
             }
             Err(e) => {
-                // Fail closed — never pretend SD is recording.
+                // Never pretend SD is recording. Both may still Local-write.
                 self.cyton_sd_active = false;
-                let msg = format!("{e}");
-                self.cyton_sd_warn = Some(msg.clone());
-                self.event_log.log_error(&format!("Cyton SD start failed: {msg}"));
-                self.connection_status = msg;
+                self.connection_status = SD_STATUS_FAIL.to_string();
+                self.event_log
+                    .log_error(&format!("Cyton SD start failed: {e}"));
                 false
             }
         }
@@ -1019,7 +1014,7 @@ impl OpenBciGuiApp {
         self.data_logger.is_logging() || self.cyton_sd_active
     }
 
-    /// One transport Record — uses Session Recording Local|SD|Both.
+    /// One transport Record — uses Session Record to Local|SD|Both.
     fn start_record_session(&mut self) {
         let dest = self.record_destination;
         if dest.wants_sd() {
@@ -1030,8 +1025,6 @@ impl OpenBciGuiApp {
                     return;
                 }
             }
-        } else {
-            self.cyton_sd_warn = None;
         }
         if dest.wants_local() && !self.data_logger.is_logging() {
             let _ = self.start_recording_like_session();
@@ -1043,7 +1036,6 @@ impl OpenBciGuiApp {
             self.stop_recording_like_session();
         }
         self.stop_cyton_sd_write_if_active();
-        // Keep fail-closed warn until destination changes or a later Record confirms.
     }
 
     fn tick_contact_sidecar(&mut self) {
@@ -1923,10 +1915,10 @@ impl OpenBciGuiApp {
                 }
 
 
-                // Eugene: Recording destination lives in Session (not Hardware).
+                // Eugene: Record to destination lives in Session (not Hardware).
                 // One transport Record; Local|SD|Both here. Session Setup "SD Card" stays hex playback.
                 ui.add_space(6.0);
-                ui.small(egui::RichText::new("Recording").color(theme::HAIRLINE));
+                ui.small(egui::RichText::new("Record to").color(theme::HAIRLINE));
                 ui.horizontal(|ui| {
                     for d in crate::board::cyton_sd_write::RecordDestination::ALL {
                         let selected = self.record_destination == d;
@@ -1939,9 +1931,6 @@ impl OpenBciGuiApp {
                         }
                         if ui.add(btn).clicked() {
                             self.record_destination = d;
-                            if !d.wants_sd() {
-                                self.cyton_sd_warn = None;
-                            }
                         }
                     }
                 });
@@ -1980,9 +1969,6 @@ impl OpenBciGuiApp {
                             ))
                             .color(theme::STOP),
                         );
-                    }
-                    if let Some(ref warn) = self.cyton_sd_warn {
-                        ui.small(egui::RichText::new(warn).color(theme::STOP));
                     }
                 }
 
@@ -4173,12 +4159,16 @@ mod properties_rack_tests {
             "one Record drives destination"
         );
         assert!(
-            src.contains("Recording destination lives in Session"),
-            "Recording Local|SD|Both lives in Session"
+            src.contains("Record to destination lives in Session"),
+            "Record to Local|SD|Both lives in Session"
         );
         assert!(
-            src.contains("ui.small(egui::RichText::new(\"Recording\")"),
-            "Recording label on Session control"
+            src.contains("ui.small(egui::RichText::new(\"Record to\")"),
+            "Record to label on Session control"
+        );
+        assert!(
+            src.contains("Couldn't write to the SD card"),
+            "bottom status on SD fail"
         );
 
         assert!(
