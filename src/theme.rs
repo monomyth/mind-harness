@@ -18,6 +18,15 @@ pub const ACCENT: Color32 = Color32::from_rgb(0xb0, 0x8d, 0x57);
 pub const START: Color32 = Color32::from_rgb(0x3d, 0x6b, 0x45);
 pub const STOP: Color32 = Color32::from_rgb(0x6b, 0x3d, 0x3d);
 
+/// Session Setup Imagine — cyan selection rim (not amber studio accent).
+pub const SETUP_CYAN: Color32 = Color32::from_rgb(0x2e, 0xe6, 0xd6);
+/// Neon Start for Session Setup (Cinema Imagine). Not the quiet studio START.
+pub const SETUP_NEON: Color32 = Color32::from_rgb(0x00, 0xe8, 0x6a);
+/// Frosted glass card on the Data Source + Serial stack.
+pub const SETUP_GLASS: Color32 = Color32::from_rgba_premultiplied(0x1e, 0x1e, 0x21, 0xb8);
+/// Cyan rim on the glass card (premul SETUP_CYAN @ ~0x55).
+pub const SETUP_GLASS_EDGE: Color32 = Color32::from_rgba_premultiplied(0x0f, 0x4c, 0x47, 0x55);
+
 pub const TURN_ON_GREEN: Color32 = START;
 pub const BOLD_RED: Color32 = Color32::from_rgb(0xc4, 0x5c, 0x4e);
 pub const ACCEL_X: Color32 = BOLD_RED;
@@ -227,5 +236,14 @@ mod tests {
         assert_ne!(CANVAS, Color32::from_rgb(250, 250, 255));
         assert_ne!(TRANSPORT, Color32::from_rgb(31, 69, 110));
         assert_ne!(TEXT, Color32::from_rgb(1, 18, 41));
+    }
+
+    #[test]
+    fn session_setup_imagine_tokens_are_neon_not_quiet() {
+        assert_eq!(SETUP_CYAN, Color32::from_rgb(0x2e, 0xe6, 0xd6));
+        assert_eq!(SETUP_NEON, Color32::from_rgb(0x00, 0xe8, 0x6a));
+        assert_ne!(SETUP_NEON, START);
+        assert_ne!(SETUP_NEON, TURN_ON_GREEN);
+        assert_ne!(SETUP_CYAN, ACCENT);
     }
 }

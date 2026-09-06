@@ -81,10 +81,8 @@ pub struct ControlPanel {
     pub ble_devices: Vec<crate::board::ble_scan::GanglionDevice>,
     pub ble_scan_status: Option<String>,
     pub last_setup_error: Option<String>,
-    /// Gates Cyton WiFi + Ganglion. Always-on: Synthetic, Cyton Serial, Playback.
+    /// Gates Cyton WiFi + Ganglion. Always-on: Cyton Serial, Synthetic, Playback.
     pub show_advanced: bool,
-    /// Session Setup hero (product icon). Loaded on first draw.
-    icon_texture: Option<egui::TextureHandle>,
 }
 
 impl ControlPanel {
@@ -103,22 +101,9 @@ impl ControlPanel {
             ble_scan_status: None,
             last_setup_error: None,
             show_advanced: false,
-            icon_texture: None,
         };
         panel.refresh_serial_ports();
         panel
-    }
-
-    fn ensure_hero_icon(&mut self, ctx: &egui::Context) -> &egui::TextureHandle {
-        self.icon_texture.get_or_insert_with(|| {
-            let rgba = include_bytes!("../resources/mind-harness-icon.rgba");
-            let image = egui::ColorImage::from_rgba_unmultiplied([256, 256], rgba);
-            ctx.load_texture(
-                "mind_harness_setup_hero",
-                image,
-                egui::TextureOptions::LINEAR,
-            )
-        })
     }
 
     pub fn refresh_serial_ports(&mut self) {
@@ -184,49 +169,34 @@ impl ControlPanel {
             self.show_advanced = true;
         }
 
-        let hero = self.ensure_hero_icon(ui.ctx()).clone();
-
         ui.vertical_centered(|ui| {
-            ui.add(
-                egui::Image::new(&hero).fit_to_exact_size(egui::vec2(128.0, 128.0)),
-            );
-            ui.add_space(8.0);
-            ui.heading(
-                egui::RichText::new("Mind Harness")
-                    .size(28.0)
-                    .color(crate::theme::TEXT),
-            );
-            ui.label(
-                egui::RichText::new(format!(
-                    "Session Setup  ·  v{}",
-                    env!("CARGO_PKG_VERSION")
-                ))
-                .color(crate::theme::TEXT),
-            );
-            ui.add_space(16.0);
+            // Head plate slot: empty until a named resources/ still is blessed. Do not invent.
+            ui.add_space(72.0);
 
-            ui.group(|ui| {
-                ui.label("Data Source");
-                // Always-on: Synthetic, Cyton Serial, Playback. No Cyton board on the bench.
-                ui.radio_value(
-                    &mut self.selected_source,
-                    DataSourceType::Synthetic,
-                    "Synthetic (BrainFlow)",
-                );
-                ui.radio_value(
-                    &mut self.selected_source,
-                    DataSourceType::CytonSerial,
-                    "Cyton (Serial / USB Dongle)",
-                );
-                ui.radio_value(
-                    &mut self.selected_source,
-                    DataSourceType::Playback,
-                    "Playback (recording / Cyton SD)",
-                );
+            let glass = egui::Frame::new()
+                .fill(crate::theme::SETUP_GLASS)
+                .stroke(egui::Stroke::new(1.25, crate::theme::SETUP_CYAN))
+                .corner_radius(14.0)
+                .inner_margin(egui::Margin::symmetric(20, 16));
 
+            glass.show(ui, |ui| {
+                ui.set_min_width(420.0);
+                ui.label(
+                    egui::RichText::new("Data Source")
+                        .strong()
+                        .color(crate::theme::TEXT),
+                );
                 ui.add_space(6.0);
+
+                // Always-on bare radios (not toggles). Order: Cyton Serial / Synthetic / Playback.
+                self.setup_radio(ui, DataSourceType::CytonSerial, "Cyton (Serial / USB Dongle)");
+                self.setup_radio(ui, DataSourceType::Synthetic, "Synthetic (BrainFlow)");
+                self.setup_radio(ui, DataSourceType::Playback, "Playback (recording / Cyton SD)");
+
+                ui.add_space(8.0);
+                // Bare Advanced — no frame, no parenthetical chrome.
                 if ui
-                    .checkbox(&mut self.show_advanced, "Advanced")
+                    .add(egui::Checkbox::new(&mut self.show_advanced, "Advanced"))
                     .changed()
                     && !self.show_advanced
                     && self.selected_source.is_advanced()
@@ -234,206 +204,280 @@ impl ControlPanel {
                     self.selected_source = DataSourceType::Synthetic;
                 }
                 if self.show_advanced {
-                    ui.radio_value(
-                        &mut self.selected_source,
-                        DataSourceType::CytonWifi,
-                        "Cyton (WiFi shield)",
-                    );
-                    ui.radio_value(
-                        &mut self.selected_source,
-                        DataSourceType::GanglionNative,
-                        "Ganglion (Native BLE)",
-                    );
+                    self.setup_radio(ui, DataSourceType::CytonWifi, "Cyton (WiFi shield)");
+                    self.setup_radio(ui, DataSourceType::GanglionNative, "Ganglion (Native BLE)");
                 }
-            });
 
-            ui.add_space(10.0);
-
-            match self.selected_source {
-                DataSourceType::Synthetic => {
-                    ui.horizontal(|ui| {
-                        ui.label("Channels:");
-                        ui.add(egui::DragValue::new(&mut self.synthetic_channels).range(1..=16));
-                    });
-                }
-                DataSourceType::CytonSerial => {
-                    ui.horizontal(|ui| {
-                        ui.label("Serial Port:");
-                        if ui.button("Refresh").clicked() {
-                            self.refresh_serial_ports();
-                        }
-                    });
-
-                    if self.serial_ports.is_empty() {
-                        ui.label("No serial ports found. Plug in your Cyton dongle and click Refresh.");
-                    } else {
-                        // Phase 8: platform-aware guidance (the macOS warning only appears on macOS)
-                        #[cfg(target_os = "macos")]
-                        ui.label(egui::RichText::new("Always prefer ports starting with 'cu.usbserial' (tty. versions usually fail)").italics());
-                        #[cfg(not(target_os = "macos"))]
-                        ui.label(egui::RichText::new("Select the serial port for your Cyton USB dongle.").italics());
-
-                        egui::ComboBox::from_label("")
-                            .selected_text(
-                                self.selected_serial_port
-                                    .and_then(|i| self.serial_ports.get(i))
-                                    .map(|p| format!("{} — {}", p.port_name, p.description))
-                                    .unwrap_or_else(|| "Select port...".to_string()),
-                            )
-                            .show_ui(ui, |ui| {
-                                for (idx, port) in self.serial_ports.iter().enumerate() {
-                                    let text = format!("{} — {}", port.port_name, port.description);
-                                    if ui.selectable_label(self.selected_serial_port == Some(idx), text).clicked() {
-                                        self.selected_serial_port = Some(idx);
-                                    }
-                                }
-                            });
-
-                        // === macOS-specific warning + auto-fix (very important for Cyton) ===
-                        #[cfg(target_os = "macos")]
-                        if let Some(idx) = self.selected_serial_port {
-                            if let Some(port) = self.serial_ports.get(idx) {
-                                if is_macos_tty_port(&port.port_name) {
-                                    ui.add_space(6.0);
-                                    ui.colored_label(
-                                        egui::Color32::from_rgb(220, 60, 60),
-                                        "⚠️  Wrong port type on macOS! Using tty.* almost always fails.",
-                                    );
-                                    ui.label("You should use the cu.* version of this port instead.");
-
-                                    if let Some(cu_port) = find_cu_equivalent(&self.serial_ports, &port.port_name) {
-                                        if ui.button(format!("Use {} instead (recommended)", cu_port)).clicked() {
-                                            if let Some(cu_idx) = self.serial_ports.iter().position(|p| p.port_name == cu_port) {
-                                                self.selected_serial_port = Some(cu_idx);
-                                            }
-                                        }
-                                    } else {
-                                        ui.label(egui::RichText::new("Unplug + replug the dongle, then Refresh.").italics());
-                                    }
-                                }
-                            }
-                        }
-
-                        ui.add_space(8.0);
+                // Serial + channels live under Cyton Serial inside the same glass stack.
+                match self.selected_source {
+                    DataSourceType::Synthetic => {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             ui.label("Channels:");
-                            ui.radio_value(&mut self.cyton_channels, 8, "8 ch (Cyton)");
-                            ui.radio_value(&mut self.cyton_channels, 16, "16 ch (Cyton + Daisy)");
+                            ui.add(egui::DragValue::new(&mut self.synthetic_channels).range(1..=16));
                         });
                     }
-                }
-                DataSourceType::CytonWifi => {
-                    ui.label("Cyton over WiFi shield (BrainFlow CYTON_WIFI_BOARD, port 6677).");
-                    ui.small("Not verified on hardware in this build unless a shield is on the bench.");
-                    ui.horizontal(|ui| {
-                        ui.label("IP address:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.cyton_wifi_ip)
-                                .desired_width(180.0)
-                                .hint_text("192.168.4.1"),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Channels:");
-                        ui.radio_value(&mut self.cyton_channels, 8, "8 ch");
-                        ui.radio_value(&mut self.cyton_channels, 16, "16 ch (Daisy)");
-                    });
-                }
-                DataSourceType::GanglionNative => {
-                    ui.label("Ganglion (4 ch) via BrainFlow native BLE.");
-                    ui.label(
-                        egui::RichText::new(
-                            "Enter the board MAC address or advertised name. Empty field does not connect.",
-                        )
-                        .italics()
-                        .small(),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label("Device ID:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.ganglion_device_id)
-                                .desired_width(260.0)
-                                .hint_text("AA:BB:CC:DD:EE:FF or Ganglion-XXXX"),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Scan BLE").clicked() {
-                            match crate::board::ble_scan::scan_ganglions(std::time::Duration::from_secs(3))
-                            {
-                                Ok(list) => {
-                                    if list.is_empty() {
-                                        self.ble_scan_status = Some("none found".into());
-                                    } else {
-                                        self.ble_scan_status =
-                                            Some(format!("{} device(s)", list.len()));
-                                    }
-                                    self.ble_devices = list;
-                                }
-                                Err(e) => {
-                                    self.ble_scan_status = Some(e);
-                                    self.ble_devices.clear();
-                                }
-                            }
-                        }
-                        if let Some(ref s) = self.ble_scan_status {
-                            ui.small(s);
-                        }
-                    });
-                    if !self.ble_devices.is_empty() {
-                        for d in &self.ble_devices {
-                            let selected = self.ganglion_device_id == d.id
-                                || self.ganglion_device_id == d.name;
+                    DataSourceType::CytonSerial => {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Serial Port:");
                             if ui
-                                .selectable_label(selected, format!("{}  {}", d.name, d.id))
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Refresh")
+                                            .color(crate::theme::SETUP_CYAN),
+                                    )
+                                    .frame(false),
+                                )
                                 .clicked()
                             {
-                                self.ganglion_device_id = d.id.clone();
+                                self.refresh_serial_ports();
                             }
-                        }
-                    }
-                }
-                DataSourceType::Playback => {
-                    // One finished-take path: local Record files and Cyton SD hex (via PlaybackBoard::from_file).
-                    ui.horizontal(|ui| {
-                        if ui.button("📁 Choose Recording File...").clicked() {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .set_title("Select recording or Cyton SD hex")
-                                .add_filter(
-                                    "Recordings",
-                                    &["parquet", "txt", "odf", "csv", "bdf", "log", "hex"],
+                        });
+
+                        if self.serial_ports.is_empty() {
+                            ui.label(
+                                "No serial ports found. Plug in your Cyton dongle and click Refresh.",
+                            );
+                        } else {
+                            #[cfg(target_os = "macos")]
+                            ui.label(
+                                egui::RichText::new("e.g. cu.usbserial-XXXX (prefer cu.* over tty.*)")
+                                    .italics()
+                                    .small(),
+                            );
+                            #[cfg(not(target_os = "macos"))]
+                            ui.label(
+                                egui::RichText::new("Select the serial port for your Cyton USB dongle.")
+                                    .italics()
+                                    .small(),
+                            );
+
+                            egui::ComboBox::from_label("")
+                                .selected_text(
+                                    self.selected_serial_port
+                                        .and_then(|i| self.serial_ports.get(i))
+                                        .map(|p| format!("{} — {}", p.port_name, p.description))
+                                        .unwrap_or_else(|| "Select port...".to_string()),
                                 )
-                                .set_directory(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
-                                .pick_file()
-                            {
-                                self.playback_file = Some(path.display().to_string());
+                                .show_ui(ui, |ui| {
+                                    for (idx, port) in self.serial_ports.iter().enumerate() {
+                                        let text =
+                                            format!("{} — {}", port.port_name, port.description);
+                                        if ui
+                                            .selectable_label(
+                                                self.selected_serial_port == Some(idx),
+                                                text,
+                                            )
+                                            .clicked()
+                                        {
+                                            self.selected_serial_port = Some(idx);
+                                        }
+                                    }
+                                });
+
+                            #[cfg(target_os = "macos")]
+                            if let Some(idx) = self.selected_serial_port {
+                                if let Some(port) = self.serial_ports.get(idx) {
+                                    if is_macos_tty_port(&port.port_name) {
+                                        ui.add_space(6.0);
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(220, 60, 60),
+                                            "⚠️  Wrong port type on macOS! Using tty.* almost always fails.",
+                                        );
+                                        ui.label(
+                                            "You should use the cu.* version of this port instead.",
+                                        );
+
+                                        if let Some(cu_port) =
+                                            find_cu_equivalent(&self.serial_ports, &port.port_name)
+                                        {
+                                            if ui
+                                                .button(format!(
+                                                    "Use {} instead (recommended)",
+                                                    cu_port
+                                                ))
+                                                .clicked()
+                                            {
+                                                if let Some(cu_idx) = self
+                                                    .serial_ports
+                                                    .iter()
+                                                    .position(|p| p.port_name == cu_port)
+                                                {
+                                                    self.selected_serial_port = Some(cu_idx);
+                                                }
+                                            }
+                                        } else {
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Unplug + replug the dongle, then Refresh.",
+                                                )
+                                                .italics(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                ui.label("Channels:");
+                                ui.radio_value(&mut self.cyton_channels, 8, "8 ch");
+                                ui.radio_value(&mut self.cyton_channels, 16, "16 ch");
+                            });
+                        }
+                    }
+                    DataSourceType::CytonWifi => {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        ui.label(
+                            "Cyton over WiFi shield (BrainFlow CYTON_WIFI_BOARD, port 6677).",
+                        );
+                        ui.small(
+                            "Not verified on hardware in this build unless a shield is on the bench.",
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("IP address:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.cyton_wifi_ip)
+                                    .desired_width(180.0)
+                                    .hint_text("192.168.4.1"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Channels:");
+                            ui.radio_value(&mut self.cyton_channels, 8, "8 ch");
+                            ui.radio_value(&mut self.cyton_channels, 16, "16 ch (Daisy)");
+                        });
+                    }
+                    DataSourceType::GanglionNative => {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        ui.label("Ganglion (4 ch) via BrainFlow native BLE.");
+                        ui.label(
+                            egui::RichText::new(
+                                "Enter the board MAC address or advertised name. Empty field does not connect.",
+                            )
+                            .italics()
+                            .small(),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("Device ID:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.ganglion_device_id)
+                                    .desired_width(260.0)
+                                    .hint_text("AA:BB:CC:DD:EE:FF or Ganglion-XXXX"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button("Scan BLE").clicked() {
+                                match crate::board::ble_scan::scan_ganglions(
+                                    std::time::Duration::from_secs(3),
+                                ) {
+                                    Ok(list) => {
+                                        if list.is_empty() {
+                                            self.ble_scan_status = Some("none found".into());
+                                        } else {
+                                            self.ble_scan_status =
+                                                Some(format!("{} device(s)", list.len()));
+                                        }
+                                        self.ble_devices = list;
+                                    }
+                                    Err(e) => {
+                                        self.ble_scan_status = Some(e);
+                                        self.ble_devices.clear();
+                                    }
+                                }
+                            }
+                            if let Some(ref s) = self.ble_scan_status {
+                                ui.small(s);
+                            }
+                        });
+                        if !self.ble_devices.is_empty() {
+                            for d in &self.ble_devices {
+                                let selected = self.ganglion_device_id == d.id
+                                    || self.ganglion_device_id == d.name;
+                                if ui
+                                    .selectable_label(selected, format!("{}  {}", d.name, d.id))
+                                    .clicked()
+                                {
+                                    self.ganglion_device_id = d.id.clone();
+                                }
                             }
                         }
-                        #[allow(clippy::collapsible_if)]
-                        if self.playback_file.is_some() {
-                            if ui.button("Clear").clicked() {
-                                self.playback_file = None;
+                    }
+                    DataSourceType::Playback => {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("📁 Choose Recording File...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .set_title("Select recording or Cyton SD hex")
+                                    .add_filter(
+                                        "Recordings",
+                                        &["parquet", "txt", "odf", "csv", "bdf", "log", "hex"],
+                                    )
+                                    .set_directory(
+                                        std::env::current_dir()
+                                            .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                                    )
+                                    .pick_file()
+                                {
+                                    self.playback_file = Some(path.display().to_string());
+                                }
                             }
+                            #[allow(clippy::collapsible_if)]
+                            if self.playback_file.is_some() {
+                                if ui.button("Clear").clicked() {
+                                    self.playback_file = None;
+                                }
+                            }
+                        });
+                        if let Some(ref f) = self.playback_file {
+                            let short = if f.len() > 60 {
+                                format!("...{}", &f[f.len() - 57..])
+                            } else {
+                                f.clone()
+                            };
+                            ui.label(egui::RichText::new(format!("Selected: {}", short)).small());
+                        } else {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Select a recording (.parquet / .bdf / .txt) or Cyton SD hex dump.",
+                                )
+                                .italics()
+                                .small(),
+                            );
                         }
-                    });
-                    if let Some(ref f) = self.playback_file {
-                        let short = if f.len() > 60 { format!("...{}", &f[f.len()-57..]) } else { f.clone() };
-                        ui.label(egui::RichText::new(format!("Selected: {}", short)).small());
-                    } else {
-                        ui.label(egui::RichText::new("Select a recording (.parquet / .bdf / .txt) or Cyton SD hex dump.").italics().small());
                     }
                 }
-            }
+            });
 
             ui.add_space(24.0);
 
             if let Some(ref err) = self.last_setup_error {
                 ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
+                ui.add_space(8.0);
             }
 
+            // Neon-leaning Start (Cinema Imagine) — not quiet studio START.
             let start = ui.add(
-                egui::Button::new(self.selected_source.go_label())
-                    .fill(crate::theme::TURN_ON_GREEN)
-                    .min_size(egui::vec2(180.0, 28.0)),
+                egui::Button::new(
+                    egui::RichText::new(self.selected_source.go_label())
+                        .color(egui::Color32::WHITE)
+                        .strong(),
+                )
+                .fill(crate::theme::SETUP_NEON)
+                .stroke(egui::Stroke::new(1.5_f32, crate::theme::SETUP_CYAN))
+                .corner_radius(8.0)
+                .min_size(egui::vec2(200.0, 36.0)),
             );
             if start.clicked() {
                 self.last_setup_error = None;
@@ -500,7 +544,26 @@ impl ControlPanel {
 
         result
     }
+
+    /// Radio with cyan selection rim (Imagine). Not a toggle.
+    fn setup_radio(&mut self, ui: &mut egui::Ui, value: DataSourceType, text: &str) {
+        let checked = self.selected_source == value;
+        let response = ui.add(egui::RadioButton::new(checked, text));
+        if checked {
+            let rect = response.rect.expand(3.0);
+            ui.painter().rect_stroke(
+                rect,
+                6.0,
+                egui::Stroke::new(1.5_f32, crate::theme::SETUP_CYAN),
+                egui::StrokeKind::Outside,
+            );
+        }
+        if response.clicked() {
+            self.selected_source = value;
+        }
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -535,29 +598,64 @@ mod tests {
     }
 
     #[test]
-    fn session_setup_drops_tagline_and_shows_icon_hero() {
+    fn session_setup_imagine_look_no_hero_glass_neon() {
         let src = include_str!("control_panel.rs");
-        let draw_body = src
+        let impl_src = src.split("#[cfg(test)]").next().expect("impl before tests");
+        let draw_body = impl_src
             .split("pub fn draw(")
             .nth(1)
-            .and_then(|s| s.split("#[cfg(test)]").next())
             .expect("draw body");
         assert!(
             !draw_body.contains("Same boards"),
             "tagline must be gone from Session Setup"
         );
         assert!(
-            draw_body.contains("mind_harness_setup_hero")
-                || src.contains("mind_harness_setup_hero"),
-            "Session Setup must load the product icon as hero"
+            !impl_src.contains("ensure_hero_icon")
+                && !impl_src.contains("mind_harness_setup_hero")
+                && !draw_body.contains("Image::new"),
+            "large app-icon hero must be omitted until a named still exists"
+        );
+        assert!(
+            draw_body.contains("SETUP_GLASS"),
+            "Data Source + Serial stack must sit on frosted glass"
+        );
+        assert!(
+            draw_body.contains("SETUP_CYAN"),
+            "glass card and selected radio must use cyan rim"
+        );
+        assert!(
+            draw_body.contains("SETUP_NEON"),
+            "Start Session must use neon Imagine fill, not quiet START"
         );
         assert!(
             draw_body.contains("Advanced"),
-            "Advanced toggle must gate WiFi + Ganglion"
+            "bare Advanced checkbox must gate WiFi + Ganglion"
         );
         assert!(
             draw_body.contains("show_advanced"),
             "Advanced flag must gate WiFi + Ganglion radios"
+        );
+        assert!(
+            draw_body.contains("setup_radio"),
+            "source pickers must be radios, not toggles"
+        );
+        assert!(
+            draw_body.contains("Checkbox::new") || draw_body.contains("checkbox("),
+            "Advanced must stay a bare checkbox"
+        );
+        // Always-on order: Cyton Serial before Synthetic before Playback in draw.
+        let cyton = draw_body
+            .find("DataSourceType::CytonSerial")
+            .expect("Cyton Serial radio");
+        let synth = draw_body
+            .find("DataSourceType::Synthetic")
+            .expect("Synthetic radio");
+        let play = draw_body
+            .find("DataSourceType::Playback")
+            .expect("Playback radio");
+        assert!(
+            cyton < synth && synth < play,
+            "always-on radios must be Cyton Serial / Synthetic / Playback"
         );
     }
 }
