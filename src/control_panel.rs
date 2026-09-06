@@ -187,12 +187,16 @@ impl ControlPanel {
         let hero = self.ensure_hero_icon(ui.ctx()).clone();
 
         ui.vertical_centered(|ui| {
-            const COLUMN: f32 = 440.0;
-            ui.add(egui::Image::new(&hero).fit_to_exact_size(egui::vec2(COLUMN, COLUMN)));
-            ui.add_space(12.0);
+            // Soft vertical middle bias (Ableton quiet) — shrinks before crop.
+            let soft_top = (ui.available_height() * 0.18).clamp(16.0, 72.0);
+            ui.add_space(soft_top);
 
-            // Pin glass to the same centered 440 column as the hero (Frame otherwise
-            // expands to full window width and content looks left-stuck).
+            // Place lock: one HStack unit — hero LEFT | gap 20 | glass RIGHT (~720).
+            const HERO: f32 = 300.0;
+            const GAP: f32 = 20.0;
+            const GLASS_OUTER: f32 = 400.0;
+            const PAIR: f32 = HERO + GAP + GLASS_OUTER; // 720
+
             let glass = egui::Frame::new()
                 .fill(crate::theme::SETUP_GLASS)
                 .stroke(egui::Stroke::new(1.25, crate::theme::SETUP_CYAN))
@@ -200,17 +204,29 @@ impl ControlPanel {
                 .inner_margin(egui::Margin::symmetric(20, 16));
 
             ui.allocate_ui_with_layout(
-                egui::vec2(COLUMN, 0.0),
-                egui::Layout::top_down(egui::Align::Min),
+                egui::vec2(PAIR, 0.0),
+                egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.set_min_width(COLUMN);
-                    ui.set_max_width(COLUMN);
-                    glass.show(ui, |ui| {
-                        // Content 400 + 20 side margins => outer ≈440.
-                        ui.set_max_width(400.0);
-                        ui.set_min_width(400.0);
-                        // Place lock: title + radios + Advanced + details as ONE centered block.
-                        ui.vertical_centered(|ui| {
+                    ui.set_min_width(PAIR);
+                    ui.set_max_width(PAIR);
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::Image::new(&hero).fit_to_exact_size(egui::vec2(HERO, HERO)),
+                        );
+                        ui.add_space(GAP);
+
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(GLASS_OUTER, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_min_width(GLASS_OUTER);
+                                ui.set_max_width(GLASS_OUTER);
+                                glass.show(ui, |ui| {
+                                    // Content ~360 + 20 side margins => outer ≈400.
+                                    ui.set_max_width(360.0);
+                                    ui.set_min_width(360.0);
+                                    // Place lock: title + radios + Advanced + details as ONE centered block.
+                                    ui.vertical_centered(|ui| {
                             ui.label(
                                 egui::RichText::new("Data Source")
                                     .strong()
@@ -488,12 +504,15 @@ impl ControlPanel {
                         }
                     }
                 }
-                        }); // end vertical_centered (title + control stack)
-                    }); // end glass.show
+                                    }); // end vertical_centered (title + control stack)
+                                }); // end glass.show
+                            },
+                        ); // end glass outer width
+                    }); // end horizontal pair
+                },
+            ); // end centered ~720 pair
 
             ui.add_space(24.0);
-
-            }); // end centered 440 column
 
             if let Some(ref err) = self.last_setup_error {
                 ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
@@ -649,8 +668,11 @@ mod tests {
                 && !impl_src.contains("mind-harness-icon-candidate")
                 && !impl_src.contains("icon-candidate-a")
                 && draw_body.contains("Image::new")
-                && draw_body.contains("440.0"),
-            "Setup hero must be 440px Image matching glass card width"
+                && draw_body.contains("300.0")
+                && draw_body.contains("ui.horizontal(|ui| {")
+                && draw_body.contains("GLASS_OUTER")
+                && draw_body.contains("PAIR"),
+            "Setup hero must be 300px Image in side-by-side pair with glass"
         );
         assert!(
             !draw_body.contains("add_space(72.0)"),
@@ -702,7 +724,7 @@ mod tests {
             "always-on radios must be Cyton Serial / Synthetic / Playback"
         );
         // Place lock: whole control stack (title + radios + Advanced + match) in one
-        // vertical_centered inside glass.show (outer hero column has its own).
+        // vertical_centered inside glass.show (pair uses outer horizontal + vertical_centered).
         let glass_at = draw_body.find("glass.show").expect("glass.show");
         let after_glass = &draw_body[glass_at..];
         let stack_vc = after_glass
