@@ -1,7 +1,13 @@
 //! Embed an rpath so the finished binary can load BrainFlow's `@rpath/libBoardController.dylib`.
 //! The brainflow crate copies those dylibs into its OUT_DIR at build time but does not set rpath.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// BrainFlow ships `libBoardController.dylib` on macOS and `libBoardController.so` on Linux.
+/// A lib directory is valid if it contains either flavor.
+fn has_board_controller(dir: &Path) -> bool {
+    dir.join("libBoardController.dylib").exists() || dir.join("libBoardController.so").exists()
+}
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -17,10 +23,11 @@ fn main() {
     let lib = candidates
         .into_iter()
         .flatten()
-        .find(|p| p.join("libBoardController.dylib").exists())
+        .find(|p| has_board_controller(p))
         .expect(
-            "BrainFlow dylibs not found. Set BRAINFLOW_LIB to the directory that contains \
-             libBoardController.dylib (usually brainflow/rust_package/brainflow/lib).",
+            "BrainFlow libraries not found. Set BRAINFLOW_LIB to the directory that contains \
+             libBoardController.dylib (macOS) or libBoardController.so (Linux) \
+             (usually brainflow/rust_package/brainflow/lib).",
         );
 
     let lib = lib.canonicalize().unwrap_or(lib);

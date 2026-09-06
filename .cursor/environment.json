@@ -1,0 +1,4 @@
+{
+  "name": "Mind Harness (Rust EEG)",
+  "install": "bash .cursor/install.sh"
+}
