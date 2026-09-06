@@ -7,7 +7,7 @@
 #     mind-harness/
 #     brainflow/
 #
-# Verified once on Arch (isengard) for Mind Harness 2.2.48 build path.
+# Verified on Arch (isengard) for Mind Harness 2.2.53 / e821617.
 # This script does not SSH or touch remote hosts; run it on the Linux box.
 #
 # Arch packages (see also scripts/install-mh-linux-deps.sh):

@@ -37,7 +37,7 @@ First compile is slow; later ones are not. Optional Homebrew `lsl.framework` ena
 
 ## Run (Linux)
 
-Arch packages (verified once on **isengard**, for the **2.2.48** build path):
+Arch packages (verified on **isengard**, Arch, for **2.2.53** / `e821617`):
 
 ```bash
 sudo bash scripts/install-mh-linux-deps.sh
@@ -45,7 +45,7 @@ sudo bash scripts/install-mh-linux-deps.sh
 cargo build --release --locked --bin mind-harness
 ```
 
-Portable BrainFlow path and OS-aware builds ship in **2.2.53**. A full Linux rebuild of that stamp is still pending on a Linux host. Linux LSL is off. Physical EEG and a full UI pass on Linux were not re-checked for this integration.
+Sibling BrainFlow path and OS-aware `.so` / `.dylib` linking work on Linux. `ldd` finds `libBoardController`, `libDataHandler`, and `libMLModule`. Linux LSL is off. Physical EEG was not part of this smoke.
 
 ## What it talks to
 
