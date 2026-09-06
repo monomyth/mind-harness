@@ -83,8 +83,6 @@ pub struct ControlPanel {
     pub last_setup_error: Option<String>,
     /// Gates Cyton WiFi + Ganglion. Always-on: Cyton Serial, Synthetic, Playback.
     pub show_advanced: bool,
-    /// Session Setup hero (product icon RGBA). Loaded on first draw.
-    icon_texture: Option<egui::TextureHandle>,
 }
 
 impl ControlPanel {
@@ -103,22 +101,9 @@ impl ControlPanel {
             ble_scan_status: None,
             last_setup_error: None,
             show_advanced: false,
-            icon_texture: None,
         };
         panel.refresh_serial_ports();
         panel
-    }
-
-    fn ensure_hero_icon(&mut self, ctx: &egui::Context) -> &egui::TextureHandle {
-        self.icon_texture.get_or_insert_with(|| {
-            let rgba = include_bytes!("../resources/mind-harness-icon.rgba");
-            let image = egui::ColorImage::from_rgba_unmultiplied([256, 256], rgba);
-            ctx.load_texture(
-                "mind_harness_setup_hero",
-                image,
-                egui::TextureOptions::LINEAR,
-            )
-        })
     }
 
     pub fn refresh_serial_ports(&mut self) {
@@ -184,22 +169,12 @@ impl ControlPanel {
             self.show_advanced = true;
         }
 
-        let hero = self.ensure_hero_icon(ui.ctx()).clone();
-
         ui.vertical_centered(|ui| {
             // Soft vertical middle bias (Ableton quiet) — shrinks before crop.
             let soft_top = (ui.available_height() * 0.18).clamp(16.0, 72.0);
             ui.add_space(soft_top);
 
-            // Place lock: one HStack unit — hero LEFT | gap 20 | glass RIGHT (~720).
-            // Place lock top edges: Image/gap/glass are DIRECT children of
-            // left_to_right(Align::Min) so egui top-aligns hero 300 + glass ~400
-            // (not vertical centers). Do not wrap the pair in ui.horizontal — that nests one child
-            // and Align::Min only sees that child.
-            const HERO: f32 = 300.0;
-            const GAP: f32 = 20.0;
             const GLASS_OUTER: f32 = 400.0;
-            const PAIR: f32 = HERO + GAP + GLASS_OUTER; // 720
 
             let glass = egui::Frame::new()
                 .fill(crate::theme::SETUP_GLASS)
@@ -208,23 +183,12 @@ impl ControlPanel {
                 .inner_margin(egui::Margin::symmetric(20, 16));
 
             ui.allocate_ui_with_layout(
-                egui::vec2(PAIR, 0.0),
-                egui::Layout::left_to_right(egui::Align::Min),
+                egui::vec2(GLASS_OUTER, 0.0),
+                egui::Layout::top_down(egui::Align::Center),
                 |ui| {
-                    ui.set_min_width(PAIR);
-                    ui.set_max_width(PAIR);
-                    ui.add(
-                        egui::Image::new(&hero).fit_to_exact_size(egui::vec2(HERO, HERO)),
-                    );
-                    ui.add_space(GAP);
-
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(GLASS_OUTER, 0.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui.set_min_width(GLASS_OUTER);
-                            ui.set_max_width(GLASS_OUTER);
-                            glass.show(ui, |ui| {
+                    ui.set_min_width(GLASS_OUTER);
+                    ui.set_max_width(GLASS_OUTER);
+                    glass.show(ui, |ui| {
                                 // Content ~360 + 20 side margins => outer ≈400.
                                 ui.set_max_width(360.0);
                                 ui.set_min_width(360.0);
@@ -509,10 +473,8 @@ impl ControlPanel {
                 }
                                 }); // end vertical_centered (title + control stack)
                             }); // end glass.show
-                        },
-                    ); // end glass outer width
                 },
-            ); // end centered ~720 pair
+            ); // end centered glass
 
             ui.add_space(24.0);
 
@@ -664,42 +626,17 @@ mod tests {
             "tagline must be gone from Session Setup"
         );
         assert!(
-            impl_src.contains("ensure_hero_icon")
-                && impl_src.contains("mind_harness_setup_hero")
-                && impl_src.contains("mind-harness-icon.rgba")
-                && !impl_src.contains("mind-harness-icon-candidate")
-                && !impl_src.contains("icon-candidate-a")
-                && draw_body.contains("Image::new")
-                && draw_body.contains("300.0")
-                && draw_body.contains("left_to_right(egui::Align::Min)")
-                && draw_body.contains("GLASS_OUTER")
-                && draw_body.contains("PAIR"),
-            "Setup hero must be 300px Image in left_to_right(Align::Min) pair with glass"
-        );
-        // Place lock: Image/gap/glass direct children of left_to_right(Align::Min) —
-        // no nested ui.horizontal wrapping the pair (Align::Min would only see one child).
-        let after_pair_layout = draw_body
-            .split("left_to_right(egui::Align::Min)")
-            .nth(1)
-            .expect("pair left_to_right Align::Min");
-        let pair_inner = after_pair_layout
-            .split("// end centered ~720 pair")
-            .next()
-            .expect("pair block");
-        let between_width_and_image = pair_inner
-            .split("set_max_width(PAIR)")
-            .nth(1)
-            .expect("after set_max_width(PAIR)")
-            .split("Image::new")
-            .next()
-            .expect("before Image::new");
-        assert!(
-            !between_width_and_image.contains("ui.horizontal(|ui| {"),
-            "Image/gap/glass must be direct children of left_to_right(Align::Min), not nested horizontal"
+            !impl_src.contains("ensure_hero_icon")
+                && !impl_src.contains("mind_harness_setup_hero")
+                && !draw_body.contains("Image::new")
+                && !draw_body.contains("300.0")
+                && !draw_body.contains("PAIR")
+                && draw_body.contains("GLASS_OUTER"),
+            "Session Setup must be the glass card only — no hero splash"
         );
         assert!(
             !draw_body.contains("add_space(72.0)"),
-            "empty 72px hero slot must be replaced"
+            "empty 72px hero slot must stay gone"
         );
         assert!(
             draw_body.contains("SETUP_GLASS"),
@@ -747,7 +684,7 @@ mod tests {
             "always-on radios must be Cyton Serial / Synthetic / Playback"
         );
         // Place lock: whole control stack (title + radios + Advanced + match) in one
-        // vertical_centered inside glass.show (pair uses outer horizontal + vertical_centered).
+        // vertical_centered inside glass.show.
         let glass_at = draw_body.find("glass.show").expect("glass.show");
         let after_glass = &draw_body[glass_at..];
         let stack_vc = after_glass

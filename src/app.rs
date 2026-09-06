@@ -4155,7 +4155,7 @@ mod properties_rack_tests {
 
     #[test]
     fn version_is_semver() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.53");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.54");
     }
 
     #[test]
