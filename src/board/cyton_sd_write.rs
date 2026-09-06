@@ -92,9 +92,15 @@ impl CytonSdDuration {
     }
 }
 
-/// Fail-closed: board must confirm SD start. Empty or failure text = not recording.
+/// Fail-closed on explicit board failure text only.
+///
+/// BrainFlow often returns empty from config_board even when Cyton started SD
+/// (especially while streaming). Empty + BrainFlow Ok = started; failure language fails.
 pub fn sd_write_confirmed(response: &str) -> Result<(), String> {
     let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
     let lower = trimmed.to_ascii_lowercase();
     const FAIL: &[&str] = &[
         "fail",
@@ -103,26 +109,15 @@ pub fn sd_write_confirmed(response: &str) -> Result<(), String> {
         "could not",
         "no card",
         "no sd",
-        "init failure",
-        "sd init",
         "card not",
         "not found",
         "missing",
+        "present and properly formatted",
     ];
     for needle in FAIL {
         if lower.contains(needle) {
-            let msg = if trimmed.is_empty() {
-                "SD write failed — check the card".to_string()
-            } else {
-                format!("SD write failed — {trimmed}")
-            };
-            return Err(msg);
+            return Err(format!("SD write failed — {trimmed}"));
         }
-    }
-    if trimmed.is_empty() {
-        return Err(
-            "Couldn't confirm SD write — check the card (best before Start)".into(),
-        );
     }
     Ok(())
 }
@@ -146,9 +141,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_response_is_not_confirmed() {
-        assert!(sd_write_confirmed("").is_err());
-        assert!(sd_write_confirmed("   ").is_err());
+    fn empty_response_is_ok_while_streaming() {
+        // BrainFlow Ok("") common when SD still starts (OBCI_2C.TXT false fail).
+        assert!(sd_write_confirmed("").is_ok());
+        assert!(sd_write_confirmed("   ").is_ok());
     }
 
     #[test]
