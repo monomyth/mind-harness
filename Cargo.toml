@@ -70,14 +70,16 @@ rosc = "0.10"
 
 # --------------------------------------------------------------------
 # BrainFlow Rust binding (official)
-# The binding lives in the BrainFlow clone at ~/github/brainflow
-# (see scripts/build_brainflow_macos.sh; BRAINFLOW_SRC defaults there).
-# We enable "generate_binding" on first build so bindgen creates the FFI.
-# After the first successful build with the feature, the generated files
-# in brainflow/rust_package/brainflow/src/ffi/*.rs can be committed and
-# future builds can drop the feature for faster iteration.
+# Portable layout (sibling checkouts under the same parent):
+#   parent/
+#     mind-harness/
+#     brainflow/rust_package/brainflow/
+# On WayStation that is often code/grok/mind-harness + a symlink
+# code/grok/brainflow -> ~/github/brainflow. Build native libs with
+# scripts/build_brainflow_macos.sh or scripts/build_brainflow_linux.sh;
+# BRAINFLOW_LIB overrides only the native lib search path (not this path=).
 # --------------------------------------------------------------------
-brainflow = { path = "/Users/monomyth/github/brainflow/rust_package/brainflow" }  # pre-generated FFI matches the arm64 dylibs in the binding's lib/ folder
+brainflow = { path = "../brainflow/rust_package/brainflow" }
 
 # Native session archive (2.2.0). No arrow feature — SerializedFileWriter only.
 parquet = { version = "59.3.0", default-features = false }
