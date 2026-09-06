@@ -192,6 +192,10 @@ impl ControlPanel {
             ui.add_space(soft_top);
 
             // Place lock: one HStack unit — hero LEFT | gap 20 | glass RIGHT (~720).
+            // Place lock vertical centers: Image/gap/glass are DIRECT children of
+            // left_to_right(Align::Center) so egui vertical-centers hero 300 + glass ~400
+            // (not top edges). Do not wrap the pair in ui.horizontal — that nests one child
+            // and Align::Center only sees that child.
             const HERO: f32 = 300.0;
             const GAP: f32 = 20.0;
             const GLASS_OUTER: f32 = 400.0;
@@ -209,24 +213,23 @@ impl ControlPanel {
                 |ui| {
                     ui.set_min_width(PAIR);
                     ui.set_max_width(PAIR);
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::Image::new(&hero).fit_to_exact_size(egui::vec2(HERO, HERO)),
-                        );
-                        ui.add_space(GAP);
+                    ui.add(
+                        egui::Image::new(&hero).fit_to_exact_size(egui::vec2(HERO, HERO)),
+                    );
+                    ui.add_space(GAP);
 
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(GLASS_OUTER, 0.0),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                ui.set_min_width(GLASS_OUTER);
-                                ui.set_max_width(GLASS_OUTER);
-                                glass.show(ui, |ui| {
-                                    // Content ~360 + 20 side margins => outer ≈400.
-                                    ui.set_max_width(360.0);
-                                    ui.set_min_width(360.0);
-                                    // Place lock: title + radios + Advanced + details as ONE centered block.
-                                    ui.vertical_centered(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(GLASS_OUTER, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_width(GLASS_OUTER);
+                            ui.set_max_width(GLASS_OUTER);
+                            glass.show(ui, |ui| {
+                                // Content ~360 + 20 side margins => outer ≈400.
+                                ui.set_max_width(360.0);
+                                ui.set_min_width(360.0);
+                                // Place lock: title + radios + Advanced + details as ONE centered block.
+                                ui.vertical_centered(|ui| {
                             ui.label(
                                 egui::RichText::new("Data Source")
                                     .strong()
@@ -504,11 +507,10 @@ impl ControlPanel {
                         }
                     }
                 }
-                                    }); // end vertical_centered (title + control stack)
-                                }); // end glass.show
-                            },
-                        ); // end glass outer width
-                    }); // end horizontal pair
+                                }); // end vertical_centered (title + control stack)
+                            }); // end glass.show
+                        },
+                    ); // end glass outer width
                 },
             ); // end centered ~720 pair
 
@@ -669,10 +671,31 @@ mod tests {
                 && !impl_src.contains("icon-candidate-a")
                 && draw_body.contains("Image::new")
                 && draw_body.contains("300.0")
-                && draw_body.contains("ui.horizontal(|ui| {")
+                && draw_body.contains("left_to_right(egui::Align::Center)")
                 && draw_body.contains("GLASS_OUTER")
                 && draw_body.contains("PAIR"),
-            "Setup hero must be 300px Image in side-by-side pair with glass"
+            "Setup hero must be 300px Image in left_to_right(Align::Center) pair with glass"
+        );
+        // Place lock: Image/gap/glass direct children of left_to_right(Align::Center) —
+        // no nested ui.horizontal wrapping the pair (Align::Center would only see one child).
+        let after_pair_layout = draw_body
+            .split("left_to_right(egui::Align::Center)")
+            .nth(1)
+            .expect("pair left_to_right Align::Center");
+        let pair_inner = after_pair_layout
+            .split("// end centered ~720 pair")
+            .next()
+            .expect("pair block");
+        let between_width_and_image = pair_inner
+            .split("set_max_width(PAIR)")
+            .nth(1)
+            .expect("after set_max_width(PAIR)")
+            .split("Image::new")
+            .next()
+            .expect("before Image::new");
+        assert!(
+            !between_width_and_image.contains("ui.horizontal(|ui| {"),
+            "Image/gap/glass must be direct children of left_to_right(Align::Center), not nested horizontal"
         );
         assert!(
             !draw_body.contains("add_space(72.0)"),
