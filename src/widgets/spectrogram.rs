@@ -1,4 +1,7 @@
 //! WSpectrogram — scrolling frequency-over-time heatmap (port of W_Spectrogram.pde).
+//!
+//! Performance: Implements incremental updates - only computes FFT for new columns
+//! rather than rebuilding the entire spectrogram every frame.
 
 use crate::board::DataSource;
 use crate::fft::compute_fft_magnitude;
@@ -15,6 +18,8 @@ pub struct WSpectrogram {
     columns: VecDeque<Vec<f32>>,
     window_sec: f32,
     smoothing_index: usize,
+    last_sample_count: usize,
+    last_hop: usize,
 }
 
 impl WSpectrogram {
@@ -25,6 +30,8 @@ impl WSpectrogram {
             columns: VecDeque::new(),
             window_sec: 5.0,
             smoothing_index: 2,
+            last_sample_count: 0,
+            last_hop: 0,
         }
     }
 
@@ -94,14 +101,10 @@ impl Widget for WSpectrogram {
         let ch = exg[self.channel];
         let sr = source.sample_rate() as f64;
         let n = ((self.window_sec as f64) * sr).round() as usize;
-        let data = source.get_data(n.max(32));
-        if data.len() < 32 {
+        let samples = source.get_channel_data(ch, n.max(32));
+        if samples.len() < 32 {
             return;
         }
-        let samples: Vec<f64> = data
-            .iter()
-            .map(|row| row.get(ch).copied().unwrap_or(0.0))
-            .collect();
         let nfft = 256.min(samples.len());
         let hop = ((sr / COLS_PER_SEC as f64).round() as usize).max(1);
         let starts = spectrogram_starts(samples.len(), nfft, hop);
@@ -109,36 +112,87 @@ impl Widget for WSpectrogram {
             .get(self.smoothing_index)
             .copied()
             .unwrap_or(0.0) as f64;
-        let mut new_cols: VecDeque<Vec<f32>> = VecDeque::new();
-        for (ci, start) in starts.iter().enumerate() {
-            let slice = &samples[*start..*start + nfft];
-            let (_freqs, mags) = compute_fft_magnitude(slice, sr, 60.0);
-            if mags.is_empty() {
-                continue;
+
+        let current_sample_count = samples.len();
+        let new_samples = current_sample_count.saturating_sub(self.last_sample_count);
+        
+        let can_use_incremental = !self.columns.is_empty()
+            && self.last_hop == hop
+            && new_samples > 0
+            && new_samples < current_sample_count / 2;
+        
+        if can_use_incremental {
+            let new_cols_needed = (new_samples + hop - 1) / hop;
+            let total_cols = starts.len();
+            
+            while self.columns.len() > total_cols.saturating_sub(new_cols_needed) {
+                self.columns.pop_front();
             }
-            let mut col = vec![0.0f32; BINS];
-            let step = (mags.len() as f32 / BINS as f32).max(1.0);
-            for (i, slot) in col.iter_mut().enumerate() {
-                let a = (i as f32 * step) as usize;
-                let b = ((i as f32 + 1.0) * step) as usize;
-                let slice =
-                    &mags[a.min(mags.len())..b.min(mags.len()).max(a + 1).min(mags.len())];
-                if !slice.is_empty() {
-                    *slot = slice.iter().copied().fold(f64::NEG_INFINITY, f64::max) as f32;
+            
+            let start_col = self.columns.len();
+            for (ci, start) in starts.iter().enumerate().skip(start_col) {
+                let slice = &samples[*start..*start + nfft];
+                let (_freqs, mags) = compute_fft_magnitude(slice, sr, 60.0);
+                if mags.is_empty() {
+                    continue;
                 }
-            }
-            if factor > 0.0 {
-                if let Some(prev) = self.columns.get(ci) {
-                    if prev.len() == col.len() {
-                        for (n, o) in col.iter_mut().zip(prev.iter()) {
-                            *n = (*o as f64 * factor + *n as f64 * (1.0 - factor)) as f32;
+                let mut col = vec![0.0f32; BINS];
+                let step = (mags.len() as f32 / BINS as f32).max(1.0);
+                for (i, slot) in col.iter_mut().enumerate() {
+                    let a = (i as f32 * step) as usize;
+                    let b = ((i as f32 + 1.0) * step) as usize;
+                    let slice =
+                        &mags[a.min(mags.len())..b.min(mags.len()).max(a + 1).min(mags.len())];
+                    if !slice.is_empty() {
+                        *slot = slice.iter().copied().fold(f64::NEG_INFINITY, f64::max) as f32;
+                    }
+                }
+                if factor > 0.0 {
+                    if let Some(prev) = self.columns.get(ci) {
+                        if prev.len() == col.len() {
+                            for (n, o) in col.iter_mut().zip(prev.iter()) {
+                                *n = (*o as f64 * factor + *n as f64 * (1.0 - factor)) as f32;
+                            }
                         }
                     }
                 }
+                self.columns.push_back(col);
             }
-            new_cols.push_back(col);
+        } else {
+            let mut new_cols: VecDeque<Vec<f32>> = VecDeque::new();
+            for (ci, start) in starts.iter().enumerate() {
+                let slice = &samples[*start..*start + nfft];
+                let (_freqs, mags) = compute_fft_magnitude(slice, sr, 60.0);
+                if mags.is_empty() {
+                    continue;
+                }
+                let mut col = vec![0.0f32; BINS];
+                let step = (mags.len() as f32 / BINS as f32).max(1.0);
+                for (i, slot) in col.iter_mut().enumerate() {
+                    let a = (i as f32 * step) as usize;
+                    let b = ((i as f32 + 1.0) * step) as usize;
+                    let slice =
+                        &mags[a.min(mags.len())..b.min(mags.len()).max(a + 1).min(mags.len())];
+                    if !slice.is_empty() {
+                        *slot = slice.iter().copied().fold(f64::NEG_INFINITY, f64::max) as f32;
+                    }
+                }
+                if factor > 0.0 {
+                    if let Some(prev) = self.columns.get(ci) {
+                        if prev.len() == col.len() {
+                            for (n, o) in col.iter_mut().zip(prev.iter()) {
+                                *n = (*o as f64 * factor + *n as f64 * (1.0 - factor)) as f32;
+                            }
+                        }
+                    }
+                }
+                new_cols.push_back(col);
+            }
+            self.columns = new_cols;
         }
-        self.columns = new_cols;
+        
+        self.last_sample_count = current_sample_count;
+        self.last_hop = hop;
     }
 
     fn show(
@@ -160,6 +214,7 @@ impl Widget for WSpectrogram {
                         {
                             self.channel = i;
                             self.columns.clear();
+                            self.last_sample_count = 0;
                         }
                     }
                 });
