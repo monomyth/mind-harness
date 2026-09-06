@@ -214,6 +214,9 @@ pub trait DataSource: Send + Sync {
         &[]
     }
 
+    /// Playback: append a mark at `sample_index` and keep it on the sidecar.
+    fn drop_session_mark(&mut self, _sample_index: u64, _label: &str) {}
+
     fn playhead_sample(&self) -> Option<usize> {
         None
     }

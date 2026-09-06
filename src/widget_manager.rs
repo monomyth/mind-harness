@@ -25,6 +25,9 @@ pub struct WidgetManager {
     containers: Vec<Container>,
 }
 
+/// Unused space under each pane so the bottom axis / last label is not clipped by the cell edge.
+const PANE_BOTTOM_CLEARANCE: f32 = 22.0;
+
 fn hide_glass_title(title: &str) -> bool {
     matches!(title, "Head Plot" | "Left / right" | "Which first")
 }
@@ -230,9 +233,16 @@ impl WidgetManager {
             );
 
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                // Clear the pane's own bottom line (plot axis / last row) inside every cell.
                 egui::Frame::NONE
                     .fill(crate::theme::CANVAS)
                     .stroke(crate::theme::hairline())
+                    .inner_margin(egui::Margin {
+                        left: 0,
+                        right: 0,
+                        top: 0,
+                        bottom: PANE_BOTTOM_CLEARANCE as i8,
+                    })
                     .show(ui, |ui| {
                         let title = widget.title().to_string();
                         if !hide_glass_title(&title) {
@@ -275,6 +285,14 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn pane_bottom_clearance_is_on_every_cell() {
+        let src = include_str!("widget_manager.rs");
+        assert!(src.contains("PANE_BOTTOM_CLEARANCE"));
+        assert!(src.contains("inner_margin"));
+        assert!(src.contains("bottom: PANE_BOTTOM_CLEARANCE as i8"));
+    }
+
     fn signed_plates_skip_small_title_on_glass() {
         let src = include_str!("widget_manager.rs");
         assert!(src.contains("fn hide_glass_title"));

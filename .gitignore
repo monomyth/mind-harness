@@ -29,3 +29,18 @@ brainflow/
 **/Settings/
 **/Console_Data/
 *.log
+
+# Agent / local scratch (never ship)
+.cursor-*.md
+.grok-*
+GROK_*.md
+patch_next.py
+cli.json
+dummy_head/
+**/shots/
+
+# Icon iteration leftovers
+resources/*-prev.*
+resources/*-candidate*
+docs/_icon_*
+docs/fail-*

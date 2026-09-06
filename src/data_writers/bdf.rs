@@ -65,6 +65,32 @@ impl BdfSignal {
         }
     }
 
+    pub fn analog(i: usize) -> Self {
+        Self {
+            label: format!("Analog {i}"),
+            transducer: "ADC".into(),
+            dimension: String::new(),
+            phys_min: DIG_MIN,
+            phys_max: DIG_MAX,
+            dig_min: DIG_MIN,
+            dig_max: DIG_MAX,
+            prefilter: String::new(),
+        }
+    }
+
+    pub fn digital(i: usize) -> Self {
+        Self {
+            label: format!("Digital {i}"),
+            transducer: "GPIO".into(),
+            dimension: String::new(),
+            phys_min: 0,
+            phys_max: 1,
+            dig_min: DIG_MIN,
+            dig_max: DIG_MAX,
+            prefilter: String::new(),
+        }
+    }
+
     pub fn is_index(&self) -> bool {
         self.label.trim().eq_ignore_ascii_case("Index")
     }
@@ -89,13 +115,24 @@ impl BdfSignal {
 
 /// 8 (or N) EXG + Accel X/Y/Z + packet/sample index. Annotations are added by the writer.
 pub fn recording_signals(n_exg: usize) -> Vec<BdfSignal> {
-    let mut out = Vec::with_capacity(n_exg + 4);
+    recording_signals_ex(n_exg, 0, 0)
+}
+
+/// 2.1.2 signals plus analog/digital when those modes were on in the Parquet take.
+pub fn recording_signals_ex(n_exg: usize, n_analog: usize, n_digital: usize) -> Vec<BdfSignal> {
+    let mut out = Vec::with_capacity(n_exg + 4 + n_analog + n_digital);
     for i in 0..n_exg {
         out.push(BdfSignal::exg(i));
     }
     out.push(BdfSignal::accel("X"));
     out.push(BdfSignal::accel("Y"));
     out.push(BdfSignal::accel("Z"));
+    for i in 0..n_analog {
+        out.push(BdfSignal::analog(i));
+    }
+    for i in 0..n_digital {
+        out.push(BdfSignal::digital(i));
+    }
     out.push(BdfSignal::index());
     out
 }
@@ -114,6 +151,8 @@ fn pad_field(s: &str, n: usize) -> Vec<u8> {
 enum BdfKind {
     Exg,
     Accel,
+    Analog,
+    Digital,
     Index,
     Annotation,
 }
@@ -125,6 +164,10 @@ fn classify_label(label: &str) -> BdfKind {
         BdfKind::Annotation
     } else if lower.starts_with("accel") {
         BdfKind::Accel
+    } else if lower.starts_with("analog") {
+        BdfKind::Analog
+    } else if lower.starts_with("digital") {
+        BdfKind::Digital
     } else if lower == "index" || lower.contains("package") || lower == "sample index" {
         BdfKind::Index
     } else {
@@ -424,7 +467,8 @@ fn i24_le(b0: u8, b1: u8, b2: u8) -> i32 {
 }
 
 /// Parse a BDF this app writes (24-bit, 1 s records, last signal = Annotations).
-type BdfRecording = (Vec<Vec<f64>>, i32, usize, Vec<MarkerEvent>);
+/// `(samples, fs, n_exg, markers, n_analog, n_digital)`
+type BdfRecording = (Vec<Vec<f64>>, i32, usize, Vec<MarkerEvent>, usize, usize);
 
 pub fn read_bdf(path: &Path) -> std::io::Result<BdfRecording> {
     let mut f = File::open(path)?;
@@ -490,6 +534,8 @@ pub fn read_bdf(path: &Path) -> std::io::Result<BdfRecording> {
 
     let kinds: Vec<BdfKind> = labels.iter().map(|l| classify_label(l)).collect();
     let n_exg = kinds.iter().filter(|k| **k == BdfKind::Exg).count().max(1);
+    let n_analog = kinds.iter().filter(|k| **k == BdfKind::Analog).count();
+    let n_digital = kinds.iter().filter(|k| **k == BdfKind::Digital).count();
     let fs = spr.first().copied().unwrap_or(250) as i32;
     let mut samples: Vec<Vec<f64>> = Vec::new();
     let mut markers = Vec::new();
@@ -545,11 +591,15 @@ pub fn read_bdf(path: &Path) -> std::io::Result<BdfRecording> {
         }
         let mut exg_ch = Vec::new();
         let mut accel_ch = Vec::new();
+        let mut analog_ch = Vec::new();
+        let mut digital_ch = Vec::new();
         let mut index_ch = Vec::new();
         for (kind, col) in rec_all {
             match kind {
                 BdfKind::Exg => exg_ch.push(col),
                 BdfKind::Accel => accel_ch.push(col),
+                BdfKind::Analog => analog_ch.push(col),
+                BdfKind::Digital => digital_ch.push(col),
                 BdfKind::Index => index_ch.push(col),
                 BdfKind::Annotation => {}
             }
@@ -559,11 +609,19 @@ pub fn read_bdf(path: &Path) -> std::io::Result<BdfRecording> {
         }
         let n_samp = exg_ch[0].len();
         for t in 0..n_samp {
-            let mut row = Vec::with_capacity(exg_ch.len() + accel_ch.len() + index_ch.len());
+            let mut row = Vec::with_capacity(
+                exg_ch.len() + accel_ch.len() + analog_ch.len() + digital_ch.len() + index_ch.len(),
+            );
             for ch in &exg_ch {
                 row.push(ch.get(t).copied().unwrap_or(0.0));
             }
             for ch in &accel_ch {
+                row.push(ch.get(t).copied().unwrap_or(0.0));
+            }
+            for ch in &analog_ch {
+                row.push(ch.get(t).copied().unwrap_or(0.0));
+            }
+            for ch in &digital_ch {
                 row.push(ch.get(t).copied().unwrap_or(0.0));
             }
             for ch in &index_ch {
@@ -580,7 +638,7 @@ pub fn read_bdf(path: &Path) -> std::io::Result<BdfRecording> {
         ));
     }
     let _ = (labels, phys_dim);
-    Ok((samples, fs, n_exg, markers))
+    Ok((samples, fs, n_exg, markers, n_analog, n_digital))
 }
 
 #[cfg(test)]

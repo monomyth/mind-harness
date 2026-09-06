@@ -148,7 +148,7 @@ mod item3_markers {
         let path = record_marked_session(LogFormat::BDF);
         let sidecar = markers::load_sidecar(&path);
         assert_marks_within_one_sample(&sidecar);
-        let (_samples, _fs, _n, tal) = crate::data_writers::bdf::read_bdf(&path).expect("read bdf");
+        let (_samples, _fs, _n, tal, _, _) = crate::data_writers::bdf::read_bdf(&path).expect("read bdf");
         assert_marks_within_one_sample(&tal);
         let pb = PlaybackBoard::from_file(&path).expect("playback BDF");
         assert_marks_within_one_sample(pb.session_markers());
@@ -247,5 +247,38 @@ mod item10_feature_export {
         let _ = std::fs::remove_file(markers::sidecar_path(&path));
         let _ = std::fs::remove_file(&csv);
         let _ = std::fs::remove_file(&jsonl);
+    }
+}
+
+#[cfg(test)]
+mod item10_parquet {
+    use super::*;
+    use crate::board::playback::PlaybackBoard;
+    use crate::board::DataSource;
+    use crate::data_logger::LogFormat;
+    use crate::export::{export_recording, ExportKind};
+    use crate::markers;
+
+    #[test]
+    fn parquet_session_plays_and_exports_bdf_text() {
+        let path = record_marked_session(LogFormat::Parquet);
+        assert_eq!(
+            path.extension().and_then(|s| s.to_str()),
+            Some("parquet")
+        );
+        let sidecar = markers::load_sidecar(&path);
+        assert_marks_within_one_sample(&sidecar);
+        let pb = PlaybackBoard::from_file(&path).expect("playback parquet");
+        assert_marks_within_one_sample(pb.session_markers());
+        let (bdf, _) = export_recording(&path, ExportKind::Bdf).expect("export bdf");
+        let (txt, _) = export_recording(&path, ExportKind::OpenBciText).expect("export txt");
+        let pb_bdf = PlaybackBoard::from_file(&bdf).expect("bdf from parquet");
+        assert_eq!(pb_bdf.exg_channels().len(), 8);
+        let body = std::fs::read_to_string(&txt).unwrap();
+        assert!(body.contains("Sample Index, EXG Channel 0"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(markers::sidecar_path(&path));
+        let _ = std::fs::remove_file(&bdf);
+        let _ = std::fs::remove_file(&txt);
     }
 }

@@ -197,7 +197,7 @@ impl Widget for WFFT {
             }
         }
 
-        let plot_height = ui.available_height().max(100.0);
+        let plot_height = (ui.available_height() - 16.0).max(100.0);
         let log_ymax = self.max_uv.max(1.0).log10();
 
         let plot = crate::widgets::lock_plot_interaction(Plot::new("fft"))

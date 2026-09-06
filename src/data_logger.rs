@@ -1,8 +1,7 @@
-//! Data logging (ODF + BDF) — improved version.
-//!
-//! Supports both OpenBCI Data Format (text) and BDF+ (binary).
+//! Data logging — native Parquet, plus BDF+ / OpenBCI text writers for export.
 
-use crate::data_writers::bdf::{recording_signals, DataWriterBDF};
+use crate::data_writers::bdf::{recording_signals_ex, DataWriterBDF};
+use crate::data_writers::parquet::DataWriterParquet;
 use crate::markers::{self, MarkerEvent};
 use std::fs::File;
 use std::io::Write;
@@ -12,12 +11,15 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-/// One recorded sample: packet/sample index, up to 8 EXG, last-3 Accel.
+/// One recorded sample: packet/sample index, up to 8 EXG, last-3 Accel, time, optional aux.
 #[derive(Clone, Debug, Default)]
 pub struct RecordingSample {
     pub packet_index: f64,
     pub exg: Vec<f64>,
     pub accel: [f64; 3],
+    pub time: f64,
+    pub analog: Vec<f64>,
+    pub digital: Vec<f64>,
 }
 
 impl RecordingSample {
@@ -40,7 +42,21 @@ impl RecordingSample {
             packet_index,
             exg,
             accel,
+            time: 0.0,
+            analog: Vec::new(),
+            digital: Vec::new(),
         }
+    }
+
+    pub fn with_aux(mut self, analog: Vec<f64>, digital: Vec<f64>) -> Self {
+        self.analog = analog;
+        self.digital = digital;
+        self
+    }
+
+    pub fn with_time(mut self, time: f64) -> Self {
+        self.time = time;
+        self
     }
 
     /// Slice from tests / older callers: EXG only, or EXG+Accel+Index (BDF order).
@@ -50,41 +66,103 @@ impl RecordingSample {
                 packet_index: sample[11],
                 exg: sample[..8].to_vec(),
                 accel: [sample[8], sample[9], sample[10]],
+                ..Default::default()
             }
         } else if sample.len() >= 11 {
             Self {
                 packet_index: fallback_index as f64,
                 exg: sample[..8].to_vec(),
                 accel: [sample[8], sample[9], sample[10]],
+                ..Default::default()
             }
         } else {
             Self {
                 packet_index: fallback_index as f64,
                 exg: sample.to_vec(),
                 accel: [0.0; 3],
+                ..Default::default()
             }
         }
     }
 
-    /// BDF column order: 8 EXG, Accel X/Y/Z, Index.
+    /// BDF column order: EXG, Accel X/Y/Z, analog, digital, Index.
     pub fn bdf_row(&self, n_exg: usize) -> Vec<f64> {
-        let mut row = vec![0.0; n_exg + 4];
+        self.bdf_row_ex(n_exg, 0, 0)
+    }
+
+    pub fn bdf_row_ex(&self, n_exg: usize, n_analog: usize, n_digital: usize) -> Vec<f64> {
+        let mut row = vec![0.0; n_exg + 3 + n_analog + n_digital + 1];
         for (i, &v) in self.exg.iter().take(n_exg).enumerate() {
             row[i] = v;
         }
         row[n_exg] = self.accel[0];
         row[n_exg + 1] = self.accel[1];
         row[n_exg + 2] = self.accel[2];
-        row[n_exg + 3] = self.packet_index;
+        let analog_start = n_exg + 3;
+        for i in 0..n_analog {
+            row[analog_start + i] = self.analog.get(i).copied().unwrap_or(0.0);
+        }
+        let digital_start = analog_start + n_analog;
+        for i in 0..n_digital {
+            row[digital_start + i] = self.digital.get(i).copied().unwrap_or(0.0);
+        }
+        row[digital_start + n_digital] = self.packet_index;
         row
     }
 
-    /// Original OpenBCI text: sample index, eight brain lines, last-3 Accel.
+    /// Widget row: EXG, Accel X/Y/Z, analog, digital, Index.
+    pub fn playback_row(&self, n_exg: usize, n_analog: usize, n_digital: usize) -> Vec<f64> {
+        self.bdf_row_ex(n_exg, n_analog, n_digital)
+    }
+
+    /// Inverse of `playback_row` / BDF order: EXG, Accel, analog, digital, Index.
+    pub fn from_playback_row(row: &[f64], n_exg: usize, n_analog: usize, n_digital: usize) -> Self {
+        let mut exg = vec![0.0; n_exg];
+        for (i, slot) in exg.iter_mut().enumerate() {
+            *slot = row.get(i).copied().unwrap_or(0.0);
+        }
+        let mut accel = [0.0; 3];
+        for (i, slot) in accel.iter_mut().enumerate() {
+            *slot = row.get(n_exg + i).copied().unwrap_or(0.0);
+        }
+        let analog_start = n_exg + 3;
+        let analog: Vec<f64> = (0..n_analog)
+            .map(|i| row.get(analog_start + i).copied().unwrap_or(0.0))
+            .collect();
+        let digital_start = analog_start + n_analog;
+        let digital: Vec<f64> = (0..n_digital)
+            .map(|i| row.get(digital_start + i).copied().unwrap_or(0.0))
+            .collect();
+        let packet_index = row
+            .get(digital_start + n_digital)
+            .copied()
+            .unwrap_or(0.0);
+        Self {
+            packet_index,
+            exg,
+            accel,
+            analog,
+            digital,
+            time: 0.0,
+        }
+    }
+
+    /// Original OpenBCI text: sample index, EXG, analog, digital, last-3 Accel.
     pub fn odf_row(&self, n_exg: usize) -> Vec<f64> {
-        let mut row = Vec::with_capacity(n_exg + 4);
+        self.odf_row_ex(n_exg, 0, 0)
+    }
+
+    pub fn odf_row_ex(&self, n_exg: usize, n_analog: usize, n_digital: usize) -> Vec<f64> {
+        let mut row = Vec::with_capacity(n_exg + n_analog + n_digital + 4);
         row.push(self.packet_index);
         for i in 0..n_exg {
             row.push(self.exg.get(i).copied().unwrap_or(0.0));
+        }
+        for i in 0..n_analog {
+            row.push(self.analog.get(i).copied().unwrap_or(0.0));
+        }
+        for i in 0..n_digital {
+            row.push(self.digital.get(i).copied().unwrap_or(0.0));
         }
         row.extend_from_slice(&self.accel);
         row
@@ -94,13 +172,25 @@ impl RecordingSample {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum LogFormat {
+    Parquet,
     ODF,
     BDF,
+}
+
+impl LogFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Parquet => "Parquet",
+            Self::ODF => "OpenBCI text",
+            Self::BDF => "BDF",
+        }
+    }
 }
 
 pub struct DataLogger {
     odf_writer: Option<Box<dyn Write + Send>>,
     bdf_writer: Option<DataWriterBDF>,
+    parquet_writer: Option<DataWriterParquet>,
     rows_written: u64,
     output_path: Option<PathBuf>,
     format: LogFormat,
@@ -110,6 +200,8 @@ pub struct DataLogger {
     samples_per_record: usize,
     sample_rate: i32,
     n_exg: usize,
+    n_analog: usize,
+    n_digital: usize,
     samples_logged: u64,
     markers: Vec<MarkerEvent>,
 }
@@ -141,14 +233,17 @@ impl DataLogger {
         Self {
             odf_writer: None,
             bdf_writer: None,
+            parquet_writer: None,
             rows_written: 0,
             output_path: None,
-            format: LogFormat::ODF,
+            format: LogFormat::Parquet,
             recording_start: None,
             bdf_buffer: vec![],
             samples_per_record: 0,
             sample_rate: 250,
             n_exg: 8,
+            n_analog: 0,
+            n_digital: 0,
             samples_logged: 0,
             markers: Vec::new(),
         }
@@ -159,6 +254,17 @@ impl DataLogger {
         format: LogFormat,
         nb_channels: usize,
         sample_rate: i32,
+    ) -> std::io::Result<PathBuf> {
+        self.start_with_aux(format, nb_channels, sample_rate, 0, 0)
+    }
+
+    pub fn start_with_aux(
+        &mut self,
+        format: LogFormat,
+        nb_channels: usize,
+        sample_rate: i32,
+        n_analog: usize,
+        n_digital: usize,
     ) -> std::io::Result<PathBuf> {
         self.stop();
 
@@ -178,6 +284,20 @@ impl DataLogger {
         );
 
         let (path, _filename) = match format {
+            LogFormat::Parquet => {
+                let filename = format!("OpenBCI_{}.parquet", timestamp);
+                let path = rec_dir.join(&filename);
+                let w = DataWriterParquet::new(
+                    path.clone(),
+                    nb_channels,
+                    sample_rate,
+                    n_analog,
+                    n_digital,
+                )?;
+                self.parquet_writer = Some(w);
+                self.output_path = Some(path.clone());
+                (path, filename)
+            }
             LogFormat::ODF => {
                 let filename = format!("OpenBCI_{}.txt", timestamp);
                 let path = rec_dir.join(&filename);
@@ -190,6 +310,12 @@ impl DataLogger {
                 let mut cols = vec!["Sample Index".to_string()];
                 for i in 0..nb_channels {
                     cols.push(format!("EXG Channel {i}"));
+                }
+                for i in 0..n_analog {
+                    cols.push(format!("Analog Channel {i}"));
+                }
+                for i in 0..n_digital {
+                    cols.push(format!("Digital Channel {i}"));
                 }
                 cols.extend([
                     "Accel Channel 0".into(),
@@ -204,7 +330,7 @@ impl DataLogger {
             LogFormat::BDF => {
                 let filename = format!("OpenBCI_{}.bdf", timestamp);
                 let path = rec_dir.join(&filename);
-                let signals = recording_signals(nb_channels);
+                let signals = recording_signals_ex(nb_channels, n_analog, n_digital);
                 let n_sig = signals.len();
                 let bdf = DataWriterBDF::new(path.clone(), signals, sample_rate)?;
                 self.bdf_writer = Some(bdf);
@@ -219,6 +345,8 @@ impl DataLogger {
         self.rows_written = 0;
         self.samples_logged = 0;
         self.n_exg = nb_channels;
+        self.n_analog = n_analog;
+        self.n_digital = n_digital;
         self.markers.clear();
         self.sample_rate = sample_rate;
         self.recording_start = Some(std::time::Instant::now());
@@ -231,9 +359,19 @@ impl DataLogger {
 
     pub fn log_recording(&mut self, rec: &RecordingSample) {
         match self.format {
+            LogFormat::Parquet => {
+                if self.parquet_writer.is_some() {
+                    let t = self.board_time();
+                    if let Some(ref mut w) = self.parquet_writer {
+                        let _ = w.write_sample(rec, t);
+                    }
+                    self.rows_written += 1;
+                    self.samples_logged += 1;
+                }
+            }
             LogFormat::ODF => {
                 if let Some(ref mut w) = self.odf_writer {
-                    let row = rec.odf_row(self.n_exg);
+                    let row = rec.odf_row_ex(self.n_exg, self.n_analog, self.n_digital);
                     for (i, val) in row.iter().enumerate() {
                         if i > 0 {
                             let _ = write!(w, ", ");
@@ -254,7 +392,7 @@ impl DataLogger {
                     return;
                 }
 
-                let row = rec.bdf_row(self.n_exg);
+                let row = rec.bdf_row_ex(self.n_exg, self.n_analog, self.n_digital);
                 for (i, &val) in row.iter().enumerate() {
                     if i < self.bdf_buffer.len() {
                         self.bdf_buffer[i].push(val);
@@ -292,6 +430,9 @@ impl DataLogger {
     }
 
     pub fn stop(&mut self) {
+        if let Some(mut pq) = self.parquet_writer.take() {
+            let _ = pq.close();
+        }
         if let Some(mut bdf) = self.bdf_writer.take() {
             // Flush any remaining samples
             if !self.bdf_buffer.is_empty() && !self.bdf_buffer[0].is_empty() {
@@ -305,11 +446,13 @@ impl DataLogger {
         self.samples_logged = 0;
         self.bdf_buffer.clear();
         self.samples_per_record = 0;
+        self.n_analog = 0;
+        self.n_digital = 0;
         self.recording_start = None;
     }
 
     pub fn is_logging(&self) -> bool {
-        self.odf_writer.is_some() || self.bdf_writer.is_some()
+        self.odf_writer.is_some() || self.bdf_writer.is_some() || self.parquet_writer.is_some()
     }
 
     pub fn recording_duration(&self) -> Option<std::time::Duration> {
@@ -362,6 +505,8 @@ enum RecordCmd {
         format: LogFormat,
         n_exg: usize,
         sample_rate: i32,
+        n_analog: usize,
+        n_digital: usize,
         reply: Sender<std::io::Result<PathBuf>>,
     },
     Sample(RecordingSample),
@@ -436,12 +581,25 @@ impl RecordPump {
         nb_channels: usize,
         sample_rate: i32,
     ) -> std::io::Result<PathBuf> {
+        self.start_with_aux(format, nb_channels, sample_rate, 0, 0)
+    }
+
+    pub fn start_with_aux(
+        &mut self,
+        format: LogFormat,
+        nb_channels: usize,
+        sample_rate: i32,
+        n_analog: usize,
+        n_digital: usize,
+    ) -> std::io::Result<PathBuf> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.tx
             .send(RecordCmd::Start {
                 format,
                 n_exg: nb_channels,
                 sample_rate,
+                n_analog,
+                n_digital,
                 reply: reply_tx,
             })
             .map_err(|_| std::io::Error::other("record writer died"))?;
@@ -538,9 +696,17 @@ fn record_writer_loop(rx: Receiver<RecordCmd>, mut logger: DataLogger, write_del
                 format,
                 n_exg,
                 sample_rate,
+                n_analog,
+                n_digital,
                 reply,
             } => {
-                let _ = reply.send(logger.start(format, n_exg, sample_rate));
+                let _ = reply.send(logger.start_with_aux(
+                    format,
+                    n_exg,
+                    sample_rate,
+                    n_analog,
+                    n_digital,
+                ));
             }
             RecordCmd::Sample(rec) => {
                 if !write_delay.is_zero() {
@@ -580,6 +746,7 @@ mod tests {
             packet_index: 42.0,
             exg: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             accel: [0.1, -0.2, 0.9],
+            ..Default::default()
         };
         logger.log_recording(&rec);
         logger
@@ -618,7 +785,7 @@ mod tests {
             }
         }
         logger.stop();
-        let (samples, fs, n_exg, marks) =
+        let (samples, fs, n_exg, marks, _, _) =
             crate::data_writers::bdf::read_bdf(&path).expect("read bdf");
         assert_eq!(fs, 250);
         assert_eq!(n_exg, 2);
@@ -643,11 +810,12 @@ mod tests {
                 packet_index: i as f64,
                 exg: vec![i as f64; 8],
                 accel: [0.01 * i as f64, -0.02, 0.98],
+                ..Default::default()
             };
             logger.log_recording(&rec);
         }
         logger.stop();
-        let (samples, fs, n_exg, _) =
+        let (samples, fs, n_exg, _, _, _) =
             crate::data_writers::bdf::read_bdf(&path).expect("read bdf");
         assert_eq!(fs, 250);
         assert_eq!(n_exg, 8);
@@ -678,6 +846,7 @@ mod tests {
             packet_index: 1.0,
             exg: vec![0.0; 8],
             accel: [0.0; 3],
+            ..Default::default()
         };
         let t0 = std::time::Instant::now();
         let tx = pump.sample_tx();
@@ -700,11 +869,12 @@ mod tests {
                 packet_index: i as f64,
                 exg: vec![i as f64; 8],
                 accel: [0.0, 0.0, 1.0],
+                ..Default::default()
             });
         }
         pump.write_marker_annotation(0.0, "sit still").unwrap();
         pump.stop();
-        let (samples, fs, n_exg, marks) =
+        let (samples, fs, n_exg, marks, _, _) =
             crate::data_writers::bdf::read_bdf(&path).expect("read");
         assert_eq!(fs, 250);
         assert_eq!(n_exg, 8);
@@ -717,6 +887,61 @@ mod tests {
             marks.iter().any(|m| m.label == "sit still"),
             "writer-thread TAL must keep the file mark, got {marks:?}"
         );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::markers::sidecar_path(&path));
+    }
+
+    #[test]
+    fn parquet_roundtrip_index_exg_accel_time() {
+        let mut logger = DataLogger::new();
+        let path = logger
+            .start(LogFormat::Parquet, 8, 250)
+            .expect("start parquet");
+        for i in 0..40 {
+            logger.log_recording(&RecordingSample {
+                packet_index: i as f64,
+                exg: vec![i as f64; 8],
+                accel: [0.1, 0.2, 0.9],
+                time: i as f64 / 250.0,
+                ..Default::default()
+            });
+        }
+        logger.write_marker_annotation(0.0, "blink").unwrap();
+        logger.stop();
+        let rec = crate::data_writers::parquet::read_parquet(&path).expect("read");
+        assert_eq!(rec.sample_rate, 250);
+        assert_eq!(rec.n_exg, 8);
+        assert_eq!(rec.samples.len(), 40);
+        assert_eq!(rec.columns[0], "sample_index");
+        assert!(rec.columns.contains(&"time".to_string()));
+        assert!((rec.samples[10].exg[0] - 10.0).abs() < 1e-9);
+        assert!((rec.samples[10].accel[2] - 0.9).abs() < 1e-9);
+        let sidecar = crate::markers::load_sidecar(&path);
+        assert_eq!(sidecar.len(), 1);
+        assert_eq!(sidecar[0].label, "blink");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::markers::sidecar_path(&path));
+    }
+
+    #[test]
+    fn record_pump_writes_parquet_on_the_writer_thread() {
+        let mut pump = RecordPump::spawn();
+        let path = pump.start(LogFormat::Parquet, 8, 250).expect("start");
+        for i in 0..30 {
+            pump.log_recording(&RecordingSample {
+                packet_index: i as f64,
+                exg: vec![i as f64; 8],
+                accel: [0.0, 0.0, 1.0],
+                time: i as f64 / 250.0,
+                ..Default::default()
+            });
+        }
+        pump.write_marker_annotation(0.0, "sit still").unwrap();
+        pump.stop();
+        let rec = crate::data_writers::parquet::read_parquet(&path).expect("read");
+        assert_eq!(rec.samples.len(), 30);
+        let sidecar = crate::markers::load_sidecar(&path);
+        assert!(sidecar.iter().any(|m| m.label == "sit still"));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(crate::markers::sidecar_path(&path));
     }

@@ -1,7 +1,7 @@
 //! Ultracortex Mark IV medium frame (official STL, decimated).
 //! Mesh: `resources/ultracortex_mark_iv/frame.bin` (M4_Medium_Front + Back).
 //! Dummy: `resources/dummy_head.bin` from dummy_head/ultracortex_dummy.blend
-//! (DummyHead + DummyEyes, bald, no hair cap). Not the lat-long ellipsoid.
+//! (DummyHead + DummyHair short cap + DummyEyes). Not the lat-long ellipsoid.
 //! 35 named holes are the circular INSERT sockets (electrode nodes), not
 //! decorative lattice openings. Default 3/4 camera, slightly above; Head Plot drag orbits.
 
@@ -16,6 +16,22 @@ pub const DEFAULT_SITES: [&str; 8] = ["Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1"
 /// 3/4 view, slightly above: headset lattice and the 8 wired holes both read.
 pub const VIEW_YAW: f32 = 0.58;
 pub const VIEW_PITCH: f32 = -0.48;
+/// Near ±90° (~±1.50 rad ≈ ±85.9°) without flipping the head inside-out.
+pub const PITCH_LIMIT: f32 = 1.50;
+/// 2.2.0 canvas fraction of the short pane side.
+pub const CANVAS_SCALE_FRAC_220: f32 = 0.46;
+/// Dummy + Mark IV vs 2.2.0. 20% smaller than 2.2.8 so the pane does not clip.
+pub const DUMMY_SCALE_VS_220: f32 = 1.04;
+/// Dummy ~10% larger than 2.2.4. Uniform — no egg stretch. Still inside T7.
+pub const DUMMY_GROW: f32 = 0.90;
+/// Small sit so the dummy is not glued to the neck.
+pub const DUMMY_Z_SHIFT: f32 = -0.04;
+/// Raise the Ultracortex so the brim sits at the top of the first hole ring
+/// (~3 cm / 0.11 in mesh units), not flat on the scalp.
+pub const CAGE_SCALE: f32 = 0.78;
+pub const CAGE_Z_SCALE: f32 = 0.685;
+pub const CAGE_Z_OFF: f32 = 0.162;
+const DUMMY_NATIVE_ZMAX: f32 = 0.421409;
 
 
 const CAM_DIST: f32 = 3.4;
@@ -35,6 +51,11 @@ pub fn occluded_by_scalp(p: [f32; 3], cam: Camera) -> bool {
     let py = p[1] - cy;
     let pz = p[2] - cz;
     vx * px + vy * py + vz * pz < 0.0
+}
+
+/// Far hemisphere of the cage dies behind the dummy. Near cage including vault stays.
+fn lattice_hidden_by_dummy(p: [f32; 3], cam: Camera) -> bool {
+    occluded_by_scalp(p, cam)
 }
 
 const BIN: &[u8] = include_bytes!("../../resources/ultracortex_mark_iv/frame.bin");
@@ -62,7 +83,7 @@ impl Camera {
 
     pub fn drag(&mut self, delta: Vec2) {
         self.yaw += delta.x * 0.012;
-        self.pitch = (self.pitch + delta.y * 0.012).clamp(-1.15, 0.35);
+        self.pitch = (self.pitch + delta.y * 0.012).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 
     pub fn rotate(self, p: [f32; 3]) -> [f32; 3] {
@@ -150,6 +171,9 @@ fn load_bin(buf: &[u8]) -> Option<FrameMesh> {
         ]);
     }
     let _ = off;
+    for v in &mut verts {
+        *v = xf_cage(*v);
+    }
     // File hole table is ideal 10-20 on r≈0.96. Names sit on INSERT sockets.
     // Snap each seed into the empty circular rim in *this* mesh so discs paint
     // centered (node-array seeds can sit a few mm off the decimated frame).
@@ -157,7 +181,7 @@ fn load_bin(buf: &[u8]) -> Option<FrameMesh> {
         .into_iter()
         .map(|h| Hole {
             name: h.name,
-            p: center_in_insert_opening(&verts, h.p),
+            p: center_in_insert_opening(&verts, xf_cage(h.p)),
         })
         .collect();
     Some(FrameMesh {
@@ -220,6 +244,18 @@ const INSERT_HOLES: [(&str, [f32; 3]); 35] = [
     ("P7", [-0.639552, 0.496563, -0.426529]),
     ("P8", [0.650765, 0.498441, -0.427471]),
 ];
+
+fn dummy_crown_z() -> f32 {
+    DUMMY_NATIVE_ZMAX * DUMMY_GROW + DUMMY_Z_SHIFT
+}
+
+fn xf_cage(p: [f32; 3]) -> [f32; 3] {
+    [
+        CAGE_SCALE * p[0],
+        CAGE_SCALE * p[1],
+        CAGE_Z_OFF + CAGE_Z_SCALE * p[2],
+    ]
+}
 
 fn insert_sockets() -> Vec<Hole> {
     INSERT_HOLES
@@ -641,7 +677,22 @@ pub fn channel_at(map: &[String], name: &str) -> Option<usize> {
 }
 
 pub fn canvas_scale(rect: Rect) -> f32 {
-    (rect.width().min(rect.height()) * 0.46).max(36.0)
+    (rect.width().min(rect.height()) * CANVAS_SCALE_FRAC_220 * DUMMY_SCALE_VS_220).max(36.0)
+}
+
+/// Origin for dummy+headset so the assembly sits in the pane, not stuck at the bottom.
+pub fn scene_center(rect: Rect, cam: Camera) -> Pos2 {
+    let trial = rect.center();
+    let scale = canvas_scale(rect);
+    let mut ymin = f32::MAX;
+    let mut ymax = f32::MIN;
+    for p in head_mesh().verts.iter().chain(mesh().verts.iter()) {
+        let y = project(*p, cam, trial, scale).pos.y;
+        ymin = ymin.min(y);
+        ymax = ymax.max(y);
+    }
+    let mid = 0.5 * (ymin + ymax);
+    Pos2::new(trial.x, trial.y - (mid - trial.y))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -663,7 +714,7 @@ pub fn project(p: [f32; 3], cam: Camera, center: Pos2, scale: f32) -> Projected 
 fn shade(n_cam: [f32; 3]) -> Color32 {
     let light = [0.38, -0.42, 0.82];
     let nd = (n_cam[0] * light[0] + n_cam[1] * light[1] + n_cam[2] * light[2])
-        .abs()
+        .max(0.0)
         .clamp(0.0, 1.0);
     let k = 0.16 + 0.84 * nd;
     let lo = 0x2a as f32;
@@ -720,6 +771,18 @@ fn load_dummy(buf: &[u8]) -> Option<SolidMesh> {
         return None;
     }
     let fmats = buf[off..off + nfaces].to_vec();
+    // Export winding points inward. Flip so we paint outer skin, not mouth/eye cavities.
+    for n in &mut fnorms {
+        n[0] = -n[0];
+        n[1] = -n[1];
+        n[2] = -n[2];
+    }
+    for v in &mut verts {
+        v[0] *= DUMMY_GROW;
+        v[1] *= DUMMY_GROW;
+        v[2] *= DUMMY_GROW;
+        v[2] += DUMMY_Z_SHIFT;
+    }
     Some(SolidMesh {
         verts,
         fnorms,
@@ -738,7 +801,7 @@ fn head_mesh() -> &'static SolidMesh {
 fn shade_solid(n_cam: [f32; 3], lo: [u8; 3], hi: [u8; 3], alpha: u8) -> Color32 {
     let light = [0.38, -0.42, 0.82];
     let nd = (n_cam[0] * light[0] + n_cam[1] * light[1] + n_cam[2] * light[2])
-        .abs()
+        .max(0.0)
         .clamp(0.0, 1.0);
     let k = 0.18 + 0.82 * nd;
     let r = (lo[0] as f32 + (hi[0] as f32 - lo[0] as f32) * k) as u8;
@@ -754,13 +817,19 @@ const SCALP_ALPHA: u8 = 255;
 /// Caucasian skin from dummy_head/shots/hero.png (lit) and DummySkin (shadow).
 const SKIN_LO: [u8; 3] = [0xc4, 0x96, 0x7e];
 const SKIN_HI: [u8; 3] = [0xf4, 0xe4, 0xd6];
-/// Unused: dummy is bald; mat 1 has no faces. Slot stays wired.
+/// Short-hair cap (mat 1). Dark brown, not particle afro.
 const HAIR_LO: [u8; 3] = [0x2c, 0x24, 0x20];
 const HAIR_HI: [u8; 3] = [0x68, 0x5a, 0x50];
 const SCLERA_LO: [u8; 3] = [0xd8, 0xd4, 0xce];
 const SCLERA_HI: [u8; 3] = [0xf2, 0xf0, 0xec];
 const IRIS_LO: [u8; 3] = [0x28, 0x22, 0x1c];
 const IRIS_HI: [u8; 3] = [0x4a, 0x42, 0x38];
+/// Compact DummyEyes sclera centroids (mat 2). Location Eugene signed.
+const EYE_L: [f32; 3] = [-0.183, -0.495, -0.318];
+const EYE_R: [f32; 3] = [0.188, -0.495, -0.320];
+/// Opaque discs — the DummyEyes mesh fans through the skull and reads as glass.
+const EYE_SCLERA_R: f32 = 0.078;
+const EYE_IRIS_R: f32 = 0.032;
 
 fn mat_lo_hi(mat: u8) -> ([u8; 3], [u8; 3]) {
     match mat {
@@ -807,8 +876,44 @@ fn paint_solid(
     if mesh.faces.is_empty() {
         return;
     }
-    let center = rect.center();
+    let center = scene_center(rect, cam);
     let scale = canvas_scale(rect);
+    // Opaque shell so the cage cannot read through triangle holes.
+    {
+        let mut pts: Vec<Pos2> = mesh
+            .verts
+            .iter()
+            .map(|p| project(*p, cam, center, scale).pos)
+            .collect();
+        if pts.len() >= 3 {
+            let mx: f32 = pts.iter().map(|p| p.x).sum::<f32>() / pts.len() as f32;
+            let my: f32 = pts.iter().map(|p| p.y).sum::<f32>() / pts.len() as f32;
+            let mut bins: [Option<(f32, Pos2)>; 48] = [None; 48];
+            for p in &pts {
+                let ang = (p.y - my).atan2(p.x - mx);
+                let mut i = ((ang + std::f32::consts::PI)
+                    / (2.0 * std::f32::consts::PI)
+                    * 48.0) as i32;
+                if i < 0 {
+                    i = 0;
+                }
+                let i = (i as usize) % 48;
+                let r2 = (p.x - mx) * (p.x - mx) + (p.y - my) * (p.y - my);
+                match bins[i] {
+                    Some((r, _)) if r >= r2 => {}
+                    _ => bins[i] = Some((r2, *p)),
+                }
+            }
+            let hull: Vec<Pos2> = bins.into_iter().flatten().map(|(_, p)| p).collect();
+            if hull.len() >= 3 {
+                painter.add(egui::Shape::convex_polygon(
+                    hull,
+                    Color32::from_rgb(SKIN_LO[0], SKIN_LO[1], SKIN_LO[2]),
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+    }
     let mut cam_v: Vec<[f32; 3]> = vec![[0.0; 3]; mesh.verts.len()];
     for (i, v) in mesh.verts.iter().enumerate() {
         cam_v[i] = cam.rotate(*v);
@@ -829,14 +934,27 @@ fn paint_solid(
     for &(_, i) in &order {
         let face = mesh.faces[i];
         let n = cam.rotate(mesh.fnorms[i]);
-        if n[2] < -0.82 {
+        // Front faces only. Backs striped dark hair through the scalp.
+        if n[2] < 0.0 {
             continue;
         }
         let a = mesh.verts[face[0] as usize];
         let b = mesh.verts[face[1] as usize];
         let c = mesh.verts[face[2] as usize];
         let cx = (a[0] + b[0] + c[0]) * (1.0 / 3.0);
+        let cy = (a[1] + b[1] + c[1]) * (1.0 / 3.0);
+        let cz = (a[2] + b[2] + c[2]) * (1.0 / 3.0);
         let mat = mesh.fmats.get(i).copied().unwrap_or(0);
+        // Bald. DummyEyes mesh fans glass through the skull — discs at those centroids instead.
+        if mat != 0 {
+            continue;
+        }
+        // Recessed mouth cavity only. Do not skip DummyEyes or the upper head.
+        let ndot = mesh.fnorms[i][0] * cx + mesh.fnorms[i][1] * cy + mesh.fnorms[i][2] * cz;
+        let mouth_box = cz < -0.18 && cz > -0.48 && cx.abs() < 0.14 && cy > -0.52;
+        if mouth_box && ndot < 0.40 {
+            continue;
+        }
         let (lo, hi) = mat_lo_hi(mat);
         let mut col = shade_solid(n, lo, hi, alpha);
         col = match wave {
@@ -865,7 +983,24 @@ fn paint_solid(
         gpu.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
     painter.add(egui::Shape::mesh(gpu));
+    paint_opaque_eyes(painter, cam, center, scale);
 }
+
+fn paint_opaque_eyes(painter: &egui::Painter, cam: Camera, center: Pos2, scale: f32) {
+    let sclera = Color32::from_rgb(SCLERA_HI[0], SCLERA_HI[1], SCLERA_HI[2]);
+    let iris = Color32::from_rgb(IRIS_LO[0], IRIS_LO[1], IRIS_LO[2]);
+    for p in [EYE_L, EYE_R] {
+        let r = cam.rotate(p);
+        if r[2] < 0.0 {
+            continue;
+        }
+        let pr = project(p, cam, center, scale);
+        let w = 3.4 / (3.4 - r[2]).max(0.35);
+        painter.circle_filled(pr.pos, EYE_SCLERA_R * scale * w, sclera);
+        painter.circle_filled(pr.pos, EYE_IRIS_R * scale * w, iris);
+    }
+}
+
 
 /// Opaque Blender dummy; the caller paints the Mark IV lattice on top.
 pub fn paint_head(painter: &egui::Painter, rect: Rect, cam: Camera) {
@@ -1038,7 +1173,7 @@ pub fn pair_screen_skip_indices(
     let Some(pb) = hole_pos(hole_b) else {
         return HashSet::new();
     };
-    let center = rect.center();
+    let center = scene_center(rect, cam);
     let scale = canvas_scale(rect);
     let a2 = project(pa, cam, center, scale).pos;
     let b2 = project(pb, cam, center, scale).pos;
@@ -1077,7 +1212,7 @@ fn paint_frame_ex(
         }
         None => HashSet::new(),
     };
-    let center = rect.center();
+    let center = scene_center(rect, cam);
     let scale = canvas_scale(rect);
     let mut cam_v: Vec<[f32; 3]> = vec![[0.0; 3]; mesh.verts.len()];
     for (i, v) in mesh.verts.iter().enumerate() {
@@ -1109,7 +1244,7 @@ fn paint_frame_ex(
             (ca[1] + cb[1] + cc[1]) / 3.0,
             (ca[2] + cb[2] + cc[2]) / 3.0,
         ];
-        if occluded_by_scalp(mid, cam) {
+        if lattice_hidden_by_dummy(mid, cam) {
             continue;
         }
         let n = cam.rotate(mesh.fnorms[i]);
@@ -1201,7 +1336,7 @@ fn project_insert_opening(hole_p: [f32; 3], cam: Camera, center: Pos2, scale: f3
 const SITE_OPENING_FALLBACK: f32 = 0.12;
 
 pub fn project_holes(rect: Rect, cam: Camera) -> Vec<ProjectedHole> {
-    let center = rect.center();
+    let center = scene_center(rect, cam);
     let scale = canvas_scale(rect);
     mesh()
         .holes
@@ -1331,9 +1466,26 @@ mod tests {
             .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
             .fold(0.0_f32, f32::max);
         assert!(
-            rmax < 0.85 && rmax > 0.5,
-            "scalp (z>0) must sit inside the radius-1 lattice; jaw may hang below the rim, r={rmax}"
+            rmax < 0.85 && rmax > 0.45,
+            "scalp (z>0) sits inside the helmet, r={rmax}"
         );
+        let dummy_xmax = h.verts.iter().map(|p| p[0].abs()).fold(0.0_f32, f32::max);
+        let t7x = mesh()
+            .holes
+            .iter()
+            .find(|hole| hole.name == "T7")
+            .unwrap()
+            .p[0]
+            .abs();
+        assert!(
+            dummy_xmax + 0.01 < t7x,
+            "dummy must be smaller than the device: dummy |x|={dummy_xmax} T7={t7x}"
+        );
+        assert!((DUMMY_GROW - 0.90).abs() < 1e-6, "dummy sits inside the scaled helmet");
+        assert!((DUMMY_Z_SHIFT + 0.04).abs() < 1e-6, "normal dummy sit");
+        assert!((CAGE_SCALE - 0.78).abs() < 1e-6, "cage scaled onto the dummy crown");
+        assert!((CAGE_Z_OFF - 0.162).abs() < 1e-6, "cage lifted ~3cm; brim at first hole-ring top");
+        assert!((DUMMY_SCALE_VS_220 - 1.04).abs() < 1e-6, "20% smaller in the pane than 2.2.8");
         let hymin = h.verts.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
         let hzmin = h.verts.iter().map(|p| p[2]).fold(f32::MAX, f32::min);
         let hzmax = h.verts.iter().map(|p| p[2]).fold(f32::MIN, f32::max);
@@ -1346,7 +1498,7 @@ mod tests {
             "neck must sit below the rim −Z, min z={hzmin}"
         );
         assert!(
-            hzmax < 0.8 && hzmax > 0.35,
+            hzmax < 0.8 && hzmax > 0.30,
             "crown under Cz (~0.8) still up +Z, max z={hzmax}"
         );
     }
@@ -1395,7 +1547,7 @@ mod tests {
         assert!(fp2[0] > 0.0, "Fp2 must be right +X, got {}", fp2[0]);
         assert!(fp1[1] < 0.0, "Fp anterior is −Y, got {}", fp1[1]);
         assert!(o1[1] > 0.0, "O1 posterior is +Y, got {}", o1[1]);
-        assert!(cz[2] > 0.35, "Cz still up, got {}", cz[2]);
+        assert!(cz[2] > 0.30, "Cz still up, got {}", cz[2]);
         assert!(
             cz[2] > cz[0].abs() && cz[2] > cz[1].abs(),
             "Cz must be +Z, got {cz:?}"
@@ -1420,12 +1572,12 @@ mod tests {
         let fp2 = h("Fp2");
         let fpz = h("Fpz");
         assert!(
-            fp1[1] < -0.8,
+            fp1[1] < -0.60,
             "Fp1 must be frontmost (Y < -0.8), got {}",
             fp1[1]
         );
         assert!(
-            fp2[1] < -0.8,
+            fp2[1] < -0.60,
             "Fp2 must be frontmost (Y < -0.8), got {}",
             fp2[1]
         );
@@ -1448,12 +1600,12 @@ mod tests {
         let o2 = h("O2");
         let oz = h("Oz");
         assert!(
-            o1[1] > 0.8,
-            "O1 must be backmost (Y > 0.8), got {}",
+            o1[1] > 0.55,
+            "O1 must be backmost (Y > 0.55), got {}",
             o1[1]
         );
         assert!(
-            o2[1] > 0.8,
+            o2[1] > 0.55,
             "O2 must be backmost (Y > 0.8), got {}",
             o2[1]
         );
@@ -1489,7 +1641,7 @@ mod tests {
             cz[1]
         );
         assert!(
-            c3[0] < -0.5 && c4[0] > 0.5,
+            c3[0] < -0.35 && c4[0] > 0.35,
             "C3/C4 are lateral: c3.x={}, c4.x={}",
             c3[0],
             c4[0]
@@ -1499,13 +1651,13 @@ mod tests {
         let p7 = h("P7");
         let p8 = h("P8");
         assert!(
-            p7[1] > 0.4 && p8[1] > 0.4,
+            p7[1] > 0.30 && p8[1] > 0.30,
             "P7/P8 posterior (Y > 0.4): p7.y={}, p8.y={}",
             p7[1],
             p8[1]
         );
         assert!(
-            p7[0].abs() > 0.5 && p8[0].abs() > 0.5,
+            p7[0].abs() > 0.35 && p8[0].abs() > 0.35,
             "P7/P8 lateral (|X| > 0.5): p7.x={}, p8.x={}",
             p7[0],
             p8[0]
@@ -1578,6 +1730,98 @@ mod tests {
     }
 
     #[test]
+    fn dummy_outer_skin_points_out() {
+        let h = head_mesh();
+        let mut anterior_out = 0i32;
+        let mut anterior_n = 0i32;
+        for (i, face) in h.faces.iter().enumerate() {
+            if h.fmats.get(i).copied().unwrap_or(0) != 0 {
+                continue;
+            }
+            let a = h.verts[face[0] as usize];
+            let b = h.verts[face[1] as usize];
+            let c = h.verts[face[2] as usize];
+            let cx = (a[0] + b[0] + c[0]) / 3.0;
+            let cy = (a[1] + b[1] + c[1]) / 3.0;
+            let cz = (a[2] + b[2] + c[2]) / 3.0;
+            if cy > -0.35 || cz < -0.15 || cz > 0.25 {
+                continue;
+            }
+            anterior_n += 1;
+            if h.fnorms[i][1] < 0.0 {
+                anterior_out += 1;
+            }
+        }
+        assert!(
+            anterior_n > 20 && anterior_out * 2 > anterior_n,
+            "outer face skin must point anterior (−Y), out={anterior_out} n={anterior_n}"
+        );
+    }
+
+    #[test]
+    fn dummy_eyes_sit_in_sockets_not_on_mouth() {
+        let h = head_mesh();
+        let mut l = [0.0f32; 3];
+        let mut r = [0.0f32; 3];
+        let mut ln = 0.0f32;
+        let mut rn = 0.0f32;
+        for (i, face) in h.faces.iter().enumerate() {
+            if h.fmats.get(i).copied().unwrap_or(0) != 2 {
+                continue;
+            }
+            let a = h.verts[face[0] as usize];
+            let b = h.verts[face[1] as usize];
+            let c = h.verts[face[2] as usize];
+            let cx = (a[0] + b[0] + c[0]) / 3.0;
+            let cy = (a[1] + b[1] + c[1]) / 3.0;
+            let cz = (a[2] + b[2] + c[2]) / 3.0;
+            if cx < 0.0 {
+                l[0] += cx;
+                l[1] += cy;
+                l[2] += cz;
+                ln += 1.0;
+            } else {
+                r[0] += cx;
+                r[1] += cy;
+                r[2] += cz;
+                rn += 1.0;
+            }
+        }
+        assert!(ln > 10.0 && rn > 10.0, "DummyEyes sclera left/right");
+        l[0] /= ln;
+        l[1] /= ln;
+        l[2] /= ln;
+        r[0] /= rn;
+        r[1] /= rn;
+        r[2] /= rn;
+        assert!(l[0] < -0.10 && r[0] > 0.10, "left/right sclera, L={} R={}", l[0], r[0]);
+        assert!(
+            l[1] < -0.40 && r[1] < -0.40,
+            "eyes on the face, not inside the skull"
+        );
+        assert!(
+            l[2] < -0.20 && l[2] > -0.42 && r[2] < -0.20 && r[2] > -0.42,
+            "Blender DummyEyes in the sockets, not forehead, Lz={} Rz={}",
+            l[2],
+            r[2]
+        );
+        let src = include_str!("mark_iv.rs");
+        let solid = src.find("fn paint_solid").expect("paint_solid");
+        let frame = src.find("fn paint_frame_ex").expect("paint_frame_ex");
+        let solid_fn = &src[solid..frame];
+        assert!(!solid_fn.contains("eye_box"), "do not skip upper-head faces");
+        assert!(solid_fn.contains("paint_opaque_eyes"), "solid discs at DummyEyes, not mesh fans");
+        assert!(
+            solid_fn.contains("if mat != 0"),
+            "do not paint DummyEyes mesh fans (glass artifacts)"
+        );
+        assert!(
+            src.contains("EYE_SCLERA_R") && src.contains("EYE_IRIS_R"),
+            "sclera and iris both solid discs"
+        );
+    }
+
+    #[test]
     fn dummy_is_bald_no_hair() {
         let h = head_mesh();
         let hair_n = h.fmats.iter().filter(|&&m| m == 1).count();
@@ -1613,14 +1857,31 @@ mod tests {
             .unwrap()
             .p;
         assert!(
-            zmax < cz[2] + 0.08,
-            "dummy crown must stay under the vault (Cz z={}), dummy zmax={zmax}",
+            zmax < cz[2] - 0.05,
+            "cage lifted: dummy crown under the vault (Cz z={}), dummy zmax={zmax}",
             cz[2]
         );
+        let gap = cz[2] - zmax;
         assert!(
-            zmax > cz[2] - 0.18,
-            "crown should sit just under Cz, dummy zmax={zmax} Cz z={}",
+            gap > 0.08 && gap < 0.22,
+            "vault ~3cm above crown, not flat: gap={gap} dummy zmax={zmax} Cz z={}",
             cz[2]
+        );
+        let t7z = mesh()
+            .holes
+            .iter()
+            .find(|hole| hole.name == "T7")
+            .unwrap()
+            .p[2];
+        let ear_top = h
+            .verts
+            .iter()
+            .filter(|p| p[0].abs() > 0.48)
+            .map(|p| p[2])
+            .fold(f32::MIN, f32::max);
+        assert!(
+            ear_top < t7z - 0.02,
+            "lower rim above the ear: ear_top={ear_top} T7 z={t7z}"
         );
         let cam = Camera::THREE_QUARTER;
         assert!(
@@ -1657,8 +1918,8 @@ mod tests {
         let solid_fn = &src[solid..frame];
         let labeled_fn = &src[labeled..tests];
         assert!(
-            frame_fn.contains("occluded_by_scalp"),
-            "far lattice still dies behind the dummy"
+            frame_fn.contains("lattice_hidden_by_dummy"),
+            "far lattice and through-dummy bars stay hidden"
         );
         assert!(
             !solid_fn.contains("occluded_by_scalp"),
@@ -1687,7 +1948,7 @@ mod tests {
         assert!(fp1[1] < -0.5 && fp2[1] < -0.5, "forehead");
         assert!(c3[0] < 0.0 && c4[0] > 0.0);
         assert!((c3[1] - c4[1]).abs() < 0.05);
-        assert!(p7[0] < -0.5 && p8[0] > 0.5, "behind ears");
+        assert!(p7[0] < -0.40 && p8[0] > 0.40, "behind ears");
         assert!(o1[1] > 0.5 && o2[1] > 0.5, "lowest back");
         assert!(cz[2] > c3[2] && cz[2] > o1[2]);
         for name in ["Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2", "Iz"] {
@@ -1775,7 +2036,7 @@ mod tests {
     fn diagnose_official8_screen_vs_3d() {
         for name in DEFAULT_SITES {
             let h = mesh().holes.iter().find(|h| h.name == name).unwrap();
-            let seed = INSERT_HOLES.iter().find(|(n, _)| *n == name).unwrap().1;
+            let seed = xf_cage(INSERT_HOLES.iter().find(|(n, _)| *n == name).unwrap().1);
             eprintln!(
                 "{name}: snap_d={:.4} seed_rim={} snapped_rim={} p={:?}",
                 dist3(h.p, seed),
@@ -1788,7 +2049,7 @@ mod tests {
                 "{name} snapped off rim"
             );
             assert!(
-                dist3(h.p, seed) < 0.08,
+                dist3(h.p, seed) < 0.12,
                 "{name} snap jumped too far from official seed: {}",
                 dist3(h.p, seed)
             );
@@ -1798,13 +2059,13 @@ mod tests {
     #[test]
     fn discs_stay_on_projected_3d_centers_when_orbiting() {
         let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(400.0, 400.0));
-        let center = rect.center();
-        let scale = canvas_scale(rect);
         for k in 0..9 {
             let cam = Camera {
                 yaw: -0.8 + k as f32 * 0.2,
                 pitch: -0.48,
             };
+            let center = scene_center(rect, cam);
+            let scale = canvas_scale(rect);
             let projected = project_holes(rect, cam);
             for name in DEFAULT_SITES {
                 let h = mesh().holes.iter().find(|h| h.name == name).unwrap();
@@ -1962,7 +2223,7 @@ mod tests {
             "screen skip must catch geodesic-missed ridge faces, extra={extra}"
         );
         let m = mesh();
-        let center = rect.center();
+        let center = scene_center(rect, cam);
         let scale = canvas_scale(rect);
         let p3 = hole_pos("P3").unwrap();
         let p4 = hole_pos("P4").unwrap();
@@ -1988,5 +2249,141 @@ mod tests {
             );
         }
         assert!(pair_screen_skip_indices("P3", "nope", rect, cam).is_empty());
+    }
+
+    #[test]
+    fn pitch_orbit_reaches_near_plus_minus_90_deg() {
+        let mut cam = Camera::default();
+        cam.drag(Vec2::new(0.0, -400.0));
+        assert!(
+            cam.pitch <= -1.40,
+            "vertical drag must look down past the old -1.15 clamp, got {}",
+            cam.pitch
+        );
+        assert!(
+            cam.pitch >= -PITCH_LIMIT - 1e-5,
+            "must not pass the pitch limit, got {}",
+            cam.pitch
+        );
+        cam.pitch = VIEW_PITCH;
+        cam.drag(Vec2::new(0.0, 400.0));
+        assert!(
+            cam.pitch >= 1.40,
+            "vertical drag must look up past the old +0.35 clamp, got {}",
+            cam.pitch
+        );
+        assert!(
+            cam.pitch <= PITCH_LIMIT + 1e-5,
+            "must not pass the pitch limit, got {}",
+            cam.pitch
+        );
+        let deg = PITCH_LIMIT.to_degrees();
+        assert!(
+            (deg - 85.94).abs() < 0.5,
+            "PITCH_LIMIT should be ~±1.50 rad (~±85.9°), got {deg}°"
+        );
+    }
+
+    #[test]
+    fn pitch_clamp_does_not_flip_the_head_inside_out() {
+        let half_pi = std::f32::consts::FRAC_PI_2;
+        assert!(
+            PITCH_LIMIT < half_pi,
+            "±90° is the flip; stay inside, limit={}",
+            PITCH_LIMIT
+        );
+        let mut cam = Camera::default();
+        for dy in [-800.0_f32, 800.0] {
+            cam.pitch = VIEW_PITCH;
+            cam.drag(Vec2::new(0.0, dy));
+            assert!(
+                cam.pitch.abs() < half_pi,
+                "pitch {} flipped past ±90°",
+                cam.pitch
+            );
+        }
+        let src = include_str!("mark_iv.rs");
+        let drag = src
+            .split("pub fn drag(")
+            .nth(1)
+            .and_then(|s| s.split("pub fn rotate(").next())
+            .unwrap_or("");
+        assert!(
+            drag.contains("PITCH_LIMIT"),
+            "drag must clamp to PITCH_LIMIT, got {drag}"
+        );
+        assert!(
+            !drag.contains("-1.15") && !drag.contains("0.35"),
+            "old asymmetric pitch clamp must not remain in drag, got {drag}"
+        );
+    }
+
+    #[test]
+    fn canvas_scale_is_twenty_percent_smaller_than_2_2_8() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 400.0));
+        let s220 = 400.0 * CANVAS_SCALE_FRAC_220;
+        let got = canvas_scale(rect);
+        assert!(
+            (got / s220 - DUMMY_SCALE_VS_220).abs() < 0.02,
+            "dummy/headset scale vs 2.2.0: got {} / {} = {}, want {}",
+            got,
+            s220,
+            got / s220,
+            DUMMY_SCALE_VS_220
+        );
+        assert!((DUMMY_SCALE_VS_220 - 1.04).abs() < 1e-6);
+        assert!((CANVAS_SCALE_FRAC_220 - 0.46).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dummy_and_mark_iv_sit_higher_in_the_pane() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 400.0));
+        let cam = Camera::THREE_QUARTER;
+        let center = scene_center(rect, cam);
+        let scale = canvas_scale(rect);
+        let mut ymin = f32::MAX;
+        let mut ymax = f32::MIN;
+        for v in head_mesh().verts.iter().chain(mesh().verts.iter()) {
+            let y = project(*v, cam, center, scale).pos.y;
+            ymin = ymin.min(y);
+            ymax = ymax.max(y);
+        }
+        let mid = 0.5 * (ymin + ymax);
+        assert!(
+            (mid - rect.center().y).abs() < 24.0,
+            "assembly stuck low: mid={mid} pane center={} y={ymin}..{ymax}",
+            rect.center().y
+        );
+        assert!(
+            center.y < rect.center().y,
+            "scene origin must lift (smaller egui y), center={} pane={}",
+            center.y,
+            rect.center().y
+        );
+        assert!(
+            ymin > -40.0 && ymax < 440.0,
+            "scaled+lifted assembly must still fit the pane, y={ymin}..{ymax}"
+        );
+    }
+
+    #[test]
+    fn eight_inserts_stay_in_pane_at_default_and_extreme_pitch() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 400.0));
+        for pitch in [VIEW_PITCH, -PITCH_LIMIT, PITCH_LIMIT] {
+            let cam = Camera {
+                yaw: VIEW_YAW,
+                pitch,
+            };
+            let projected = project_holes(rect, cam);
+            for name in DEFAULT_SITES {
+                let idx = hole_index(name).unwrap();
+                let pr = projected.iter().find(|p| p.index == idx).unwrap();
+                assert!(
+                    rect.expand(20.0).contains(pr.pos),
+                    "{name} off-pane at pitch={pitch} {:?}",
+                    pr.pos
+                );
+            }
+        }
     }
 }

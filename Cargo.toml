@@ -1,6 +1,6 @@
 [package]
 name = "mind-harness"
-version = "2.1.2"
+version = "2.2.29"
 edition = "2021"
 authors = ["Eugene Ray"]
 description = "Mind Harness — native EEG instrument for the Ultracortex Mark IV"
@@ -79,6 +79,9 @@ rosc = "0.10"
 # --------------------------------------------------------------------
 brainflow = { path = "/Users/monomyth/github/brainflow/rust_package/brainflow" }  # pre-generated FFI matches the arm64 dylibs in the binding's lib/ folder
 
+# Native session archive (2.2.0). No arrow feature — SerializedFileWriter only.
+parquet = { version = "59.3.0", default-features = false }
+
 [build-dependencies]
 
 [[bin]]
@@ -91,15 +94,15 @@ identifier = "com.openbci.gui"
 # Product icon (Grok Imagine Mark IV head) — not the Java sketch.icns / eframe e-icon.
 # Window icon: resources/mind-harness-icon.rgba via ViewportBuilder::with_icon in main.rs.
 icon = ["resources/icon.icns"]
-version = "2.1.2"
+version = "2.2.29"
 resources = ["resources/"]
 copyright = "Copyright © 2026 OpenBCI"
 category = "public.app-category.education"
 short_description = "Visualize and record EEG from OpenBCI devices"
 long_description = """
-The OpenBCI GUI provides a stable and powerful interface for any OpenBCI device
-(Cyton, Ganglion). Features real-time visualization, filtering, networking (LSL/OSC/UDP),
-and data logging in BDF/ODF formats.
+Mind Harness records native Parquet (sample index, eight EXG, Accel X/Y/Z, time;
+analog/aux and digital when those modes are on) and can export BDF and original
+OpenBCI text. Real-time visualization, filtering, and networking (LSL/OSC/UDP).
 """
 
 [[bin]]

@@ -658,6 +658,7 @@ mod tests {
                     packet_index: 0.0,
                     exg: vec![0.0; 8],
                     accel: [0.0; 3],
+                    ..Default::default()
                 });
                 Ok(vec![vec![1.0]])
             });

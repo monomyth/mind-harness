@@ -169,7 +169,7 @@ impl Widget for WSpectrogram {
             ));
         });
 
-        let desired = egui::vec2(ui.available_width(), ui.available_height().max(80.0));
+        let desired = egui::vec2(ui.available_width(), (ui.available_height() - 8.0).max(80.0));
         let (resp, painter) = ui.allocate_painter(desired, egui::Sense::hover());
         let rect = resp.rect;
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(10, 16, 28));

@@ -139,7 +139,7 @@ impl Default for PersistedSettings {
             cyton_channels: 8,
             last_serial_port: None,
             playback_file: None,
-            recording_format: crate::data_logger::LogFormat::BDF,
+            recording_format: crate::data_logger::LogFormat::Parquet,
             filter_notch_enabled: true,
             filter_notch_mode: Some(NotchMode::FiftyAndSixty),
             filter_bandpass_enabled: true,
@@ -189,6 +189,10 @@ pub struct OpenBciGuiApp {
     pub networking: NetworkingManager,
     pub connection_status: String,
     pub recording_format: crate::data_logger::LogFormat,
+    export_kind: crate::export::ExportKind,
+    export_prompt_open: bool,
+    scrubbing: bool,
+    scrub_was_playing: bool,
 
     // Packet loss & sample rate tracking
     samples_received: u64,
@@ -310,7 +314,11 @@ impl OpenBciGuiApp {
             data_logger: RecordPump::spawn(),
             networking: NetworkingManager::new(),
             connection_status: String::new(),
-            recording_format: crate::data_logger::LogFormat::BDF,
+            recording_format: crate::data_logger::LogFormat::Parquet,
+            export_kind: crate::export::ExportKind::Bdf,
+            export_prompt_open: false,
+            scrubbing: false,
+            scrub_was_playing: false,
 
             samples_received: 0,
             last_sample_time: None,
@@ -756,6 +764,17 @@ impl OpenBciGuiApp {
     /// Focus (ML + audio) is now finally usable alongside the viz — the killer Phase 6 feature
     /// is no longer hidden. Marker and Networking controls are also always at hand.
     fn open_playback_file(&mut self, path: &str, seek_sec: f32) {
+        // Play opens a recording. It never starts a live session.
+        if self.data_logger.is_logging() {
+            self.stop_recording_like_session();
+        }
+        if let Some(mut board) = self.board.take() {
+            if board.is_streaming() {
+                let _ = board.stop_streaming();
+            }
+            let _ = board.uninitialize();
+        }
+        self.streaming = false;
         match crate::board::playback::PlaybackBoard::from_file(std::path::Path::new(path)) {
             Ok(mut pb) => {
                 let _ = pb.initialize();
@@ -832,8 +851,9 @@ impl OpenBciGuiApp {
             self.cancel_experiment();
         }
 
+        // End session always stops Record if it is running.
         if self.data_logger.is_logging() {
-            self.data_logger.stop();
+            self.stop_recording_like_session();
             self.event_log
                 .log_recording("Recording stopped (End Session)");
         }
@@ -860,9 +880,15 @@ impl OpenBciGuiApp {
         self.populate_widgets_for_new_session();
         self.populate_tool_widgets();
 
-        // Show Control Panel again
+        // Show Control Panel again. A just-finished take is armed as Playback so Play is one click.
         self.control_panel.show = true;
         self.system_mode = SystemMode::PreInit;
+        if let Some(ref p) = self.last_recording_path {
+            if p.exists() {
+                self.control_panel.selected_source = crate::control_panel::DataSourceType::Playback;
+                self.control_panel.playback_file = Some(p.display().to_string());
+            }
+        }
 
         self.event_log
             .log_system("Session ended — returned to Control Panel (all widgets reset)");
@@ -878,13 +904,22 @@ impl OpenBciGuiApp {
             .map(|b| b.exg_channels().len())
             .unwrap_or(8);
         let sr = self.board.as_ref().map(|b| b.sample_rate()).unwrap_or(250);
-        match self.data_logger.start(self.recording_format, chans, sr) {
+        let (n_analog, n_digital) = match self.board.as_deref() {
+            Some(b) if b.cyton_board_mode() == Some(2) => (b.analog_channels().len(), 0usize),
+            Some(b) if b.cyton_board_mode() == Some(3) => (0usize, b.digital_channels().len()),
+            _ => (0, 0),
+        };
+        let fmt = self.recording_format;
+        match self
+            .data_logger
+            .start_with_aux(fmt, chans, sr, n_analog, n_digital)
+        {
             Ok(path) => {
                 self.last_recording_path = Some(path.clone());
                 self.connection_status = format!("Recording to {}", path.display());
                 self.event_log.log_recording(&format!(
-                    "Started {:?} → {}",
-                    self.recording_format,
+                    "Started {} → {}",
+                    fmt.label(),
                     path.display()
                 ));
                 true
@@ -1424,105 +1459,260 @@ impl OpenBciGuiApp {
     }
 
     fn draw_record_export(&mut self, ui: &mut egui::Ui) {
+        let is_take = self
+            .board
+            .as_ref()
+            .and_then(|b| b.playback_progress())
+            .is_some();
         ui.horizontal(|ui| {
-            if !self.data_logger.is_logging() {
-                egui::ComboBox::from_id_salt("rec_fmt")
-                    .selected_text(format!("{:?}", self.recording_format))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.recording_format,
-                            crate::data_logger::LogFormat::BDF,
-                            "BDF",
-                        );
-                        ui.selectable_value(
-                            &mut self.recording_format,
-                            crate::data_logger::LogFormat::ODF,
-                            "ODF",
-                        );
-                    });
-            }
-            let record_label = if self.data_logger.is_logging() {
-                "Stop Rec"
-            } else {
-                "Record"
-            };
-            let live_hw = self.board.as_ref().is_some_and(|b| {
-                let n = b.name();
-                n != "Playback" && !n.contains("Synthetic")
-            });
-            let record_color = if self.data_logger.is_logging() {
-                theme::STOP
-            } else if live_hw {
-                theme::START
-            } else {
-                theme::PANEL
-            };
-            let mut record_btn = egui::Button::new(record_label).fill(record_color);
-            if !live_hw && !self.data_logger.is_logging() {
-                record_btn = record_btn.stroke(theme::hairline());
-            }
-            if ui.add(record_btn).clicked() {
-                if self.data_logger.is_logging() {
-                    self.stop_recording_like_session();
+            // Playback never offers Record — only live sessions do.
+            if !is_take {
+                let record_label = if self.data_logger.is_logging() {
+                    "Stop Rec"
                 } else {
-                    let _ = self.start_recording_like_session();
+                    "Record"
+                };
+                let live_hw = self.board.as_ref().is_some_and(|b| {
+                    let n = b.name();
+                    n != "Playback" && !n.contains("Synthetic")
+                });
+                let record_color = if self.data_logger.is_logging() {
+                    theme::STOP
+                } else if live_hw {
+                    theme::START
+                } else {
+                    theme::PANEL
+                };
+                let mut record_btn = egui::Button::new(record_label).fill(record_color);
+                if !live_hw && !self.data_logger.is_logging() {
+                    record_btn = record_btn.stroke(theme::hairline());
+                }
+                if ui.add(record_btn).clicked() {
+                    if self.data_logger.is_logging() {
+                        self.stop_recording_like_session();
+                    } else {
+                        let _ = self.start_recording_like_session();
+                    }
+                }
+                if !self.data_logger.is_logging() {
+                    egui::ComboBox::from_id_salt("record_format")
+                        .selected_text(self.recording_format.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.recording_format,
+                                crate::data_logger::LogFormat::Parquet,
+                                "Parquet",
+                            );
+                            ui.selectable_value(
+                                &mut self.recording_format,
+                                crate::data_logger::LogFormat::BDF,
+                                "BDF",
+                            );
+                            ui.selectable_value(
+                                &mut self.recording_format,
+                                crate::data_logger::LogFormat::ODF,
+                                "OpenBCI text",
+                            );
+                        });
                 }
             }
-            if !self.data_logger.is_logging() && ui.button("Export").clicked() {
-                let path = self.last_recording_path.clone().or_else(|| {
-                    self.control_panel
-                        .playback_file
-                        .as_ref()
-                        .map(std::path::PathBuf::from)
-                });
-                match path {
-                    Some(p) => match crate::board::playback::PlaybackBoard::from_file(&p) {
-                        Ok(pb) => {
-                            match crate::export::export_next_to(
-                                &p,
-                                pb.export_samples(),
-                                pb.sample_rate(),
-                                pb.exg_channels().len(),
-                                pb.session_markers(),
-                            ) {
-                                Ok((csv, jsonl)) => {
-                                    self.connection_status = format!("Exported {}", csv.display());
-                                    self.event_log.log_recording(&format!(
-                                        "Feature export → {} / {}",
-                                        csv.display(),
-                                        jsonl.display()
-                                    ));
-                                }
-                                Err(e) => {
-                                    self.event_log.log_error(&format!("Export failed: {e}"));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            self.event_log
-                                .log_error(&format!("Export: cannot open recording: {e}"));
-                        }
-                    },
-                    None => {
-                        if let Some(picked) = rfd::FileDialog::new()
-                            .set_title("Export recording")
-                            .add_filter("Recordings", &["bdf", "odf", "txt", "csv"])
-                            .pick_file()
-                        {
-                            self.last_recording_path = Some(picked.clone());
-                            self.control_panel.playback_file = Some(picked.display().to_string());
-                            self.connection_status = format!("Export: chose {}", picked.display());
-                        } else {
-                            self.connection_status =
-                                "Export: record a session or choose a file".into();
-                            self.event_log.log_error(
-                                "Export: record a session or pick a Playback file first",
-                            );
-                        }
-                    }
+            if !self.data_logger.is_logging() {
+                // Format is chosen in a prompt when Export is pressed — not chrome.
+                if ui.button("Export").clicked() {
+                    self.export_prompt_open = true;
                 }
             }
         });
+    }
+
+    fn run_export_kind(&mut self, kind: crate::export::ExportKind) {
+        self.export_kind = kind;
+        self.export_prompt_open = false;
+        let path = self.last_recording_path.clone().or_else(|| {
+            self.control_panel
+                .playback_file
+                .as_ref()
+                .map(std::path::PathBuf::from)
+        });
+        match path {
+            Some(p) => match crate::export::export_recording(&p, kind) {
+                Ok((out, extra)) => {
+                    self.connection_status = format!("Exported {}", out.display());
+                    if let Some(e) = extra {
+                        self.event_log.log_recording(&format!(
+                            "Export → {} / {}",
+                            out.display(),
+                            e.display()
+                        ));
+                    } else {
+                        self.event_log.log_recording(&format!(
+                            "Export {} → {}",
+                            kind.label(),
+                            out.display()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    self.event_log.log_error(&format!("Export failed: {e}"));
+                }
+            },
+            None => {
+                if let Some(picked) = rfd::FileDialog::new()
+                    .set_title("Export recording")
+                    .add_filter(
+                        "Recordings",
+                        &["parquet", "bdf", "odf", "txt", "csv"],
+                    )
+                    .pick_file()
+                {
+                    self.last_recording_path = Some(picked.clone());
+                    self.control_panel.playback_file = Some(picked.display().to_string());
+                    self.connection_status = format!("Export: chose {}", picked.display());
+                    // Re-open prompt so format is chosen after the file pick.
+                    self.export_prompt_open = true;
+                } else {
+                    self.connection_status =
+                        "Export: record a session or choose a file".into();
+                    self.event_log.log_error(
+                        "Export: record a session or pick a Playback file first",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Modal: pick export type when Export is pressed (not a standing combo).
+    fn draw_export_prompt(&mut self, ctx: &egui::Context) {
+        if !self.export_prompt_open {
+            return;
+        }
+        let mut open = self.export_prompt_open;
+        egui::Window::new("Export as")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .order(egui::Order::Foreground)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_min_width(220.0);
+                ui.label("Choose format for this export:");
+                ui.add_space(6.0);
+                ui.vertical_centered(|ui| {
+                    if ui
+                        .add_sized([200.0, 28.0], egui::Button::new("BDF"))
+                        .clicked()
+                    {
+                        self.run_export_kind(crate::export::ExportKind::Bdf);
+                    }
+                    if ui
+                        .add_sized([200.0, 28.0], egui::Button::new("OpenBCI text"))
+                        .clicked()
+                    {
+                        self.run_export_kind(crate::export::ExportKind::OpenBciText);
+                    }
+                    if ui
+                        .add_sized([200.0, 28.0], egui::Button::new("Features"))
+                        .clicked()
+                    {
+                        self.run_export_kind(crate::export::ExportKind::Features);
+                    }
+                    ui.add_space(4.0);
+                    if ui
+                        .add_sized([200.0, 24.0], egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        self.export_prompt_open = false;
+                    }
+                });
+            });
+        if !open {
+            self.export_prompt_open = false;
+        }
+    }
+
+    /// Drag the playhead through the take (not only −10/+10). Pauses while dragging.
+    fn apply_playback_scrub(&mut self, ui: &mut egui::Ui, width: f32) {
+        let Some((pos, total)) = self.board.as_ref().and_then(|b| b.playback_progress()) else {
+            return;
+        };
+        if total == 0 {
+            return;
+        }
+        let frac = pos as f32 / total as f32;
+        let (rect, resp) = ui.allocate_exact_size(
+            egui::vec2(width.max(64.0), 14.0),
+            egui::Sense::click_and_drag(),
+        );
+        let painter = ui.painter();
+        painter.rect_filled(rect, 2.0, theme::PANEL);
+        painter.rect_stroke(rect, 2.0, theme::hairline(), egui::StrokeKind::Inside);
+        let x = rect.left() + frac.clamp(0.0, 1.0) * rect.width();
+        painter.line_segment(
+            [
+                egui::pos2(x, rect.top() + 1.0),
+                egui::pos2(x, rect.bottom() - 1.0),
+            ],
+            egui::Stroke::new(2.0_f32, theme::ACCENT),
+        );
+        let dragging = resp.dragged() || resp.is_pointer_button_down_on();
+        if let Some(pointer) = resp.interact_pointer_pos() {
+            if dragging || resp.clicked() {
+                let t = ((pointer.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
+                if let Some(b) = self.board.as_deref_mut() {
+                    if dragging && !self.scrubbing {
+                        self.scrubbing = true;
+                        self.scrub_was_playing = b.is_streaming();
+                        if b.is_streaming() {
+                            b.toggle_playback_pause();
+                        }
+                    }
+                    b.seek_to_fraction(t);
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            if let Some(b) = self.board.as_deref_mut() {
+                if self.scrub_was_playing && !b.is_streaming() {
+                    b.toggle_playback_pause();
+                }
+            }
+            self.scrubbing = false;
+            self.scrub_was_playing = false;
+        }
+    }
+
+    fn drain_time_series_drop_mark(&mut self) {
+        let pending = self.widget_manager.widgets.iter_mut().find_map(|w| {
+            w.as_any_mut()
+                .downcast_mut::<WTimeSeries>()
+                .and_then(|ts| ts.take_pending_drop_mark())
+        });
+        let Some(idx) = pending else {
+            return;
+        };
+        if let Some(b) = self.board.as_deref_mut() {
+            let label = crate::widgets::time_series::next_drop_mark_label(b.session_markers().len());
+            b.drop_session_mark(idx, &label);
+            self.last_marker = label;
+        }
+    }
+
+    fn drain_time_series_scrub(&mut self) {
+        let delta = self.widget_manager.widgets.iter_mut().find_map(|w| {
+            w.as_any_mut()
+                .downcast_mut::<WTimeSeries>()
+                .and_then(|ts| ts.take_pending_scrub_delta())
+        });
+        let Some(delta) = delta else {
+            return;
+        };
+        if let Some(b) = self.board.as_deref_mut() {
+            if let Some((pos, total)) = b.playback_progress() {
+                if total > 0 {
+                    b.seek_to_fraction(pos as f32 / total as f32 + delta);
+                }
+            }
+        }
     }
 
     fn draw_session_rack(&mut self, ui: &mut egui::Ui, exclusive_open: &mut Option<String>) {
@@ -1859,6 +2049,15 @@ impl eframe::App for OpenBciGuiApp {
                         } else {
                             None
                         }
+                    } else if std::env::var("OPENBCI_CROP").is_ok()
+                        && std::env::var("OPENBCI_SYNTHETIC").is_ok()
+                    {
+                        self.live_autostart_used = true;
+                        Some((
+                            crate::control_panel::DataSourceType::Synthetic,
+                            8usize,
+                            None,
+                        ))
                     } else {
                         None
                     }
@@ -2221,21 +2420,43 @@ impl eframe::App for OpenBciGuiApp {
                     self.starve.note_window_start();
                 }
 
-                // Recording: raw EXG + Accel + packet index. Enqueue only — writer thread
-                // waits on disk. Never the display-filtered buffer.
+                // Recording: raw EXG + Accel + packet index (+ analog/digital when on).
+                // Enqueue only — writer thread waits on disk. Never the display-filtered buffer.
                 if self.data_logger.is_logging() {
                     let exg = b.exg_channels().to_vec();
                     let accel = b.accel_channels().to_vec();
                     let pkg = b.package_num_channel();
+                    let analog_idx = if b.cyton_board_mode() == Some(2) {
+                        b.analog_channels().to_vec()
+                    } else {
+                        vec![]
+                    };
+                    let digital_idx = if b.cyton_board_mode() == Some(3) {
+                        b.digital_channels().to_vec()
+                    } else {
+                        vec![]
+                    };
+                    let sr = b.sample_rate().max(1) as f64;
                     let latest = recent_raw_rows(b);
                     for row in latest {
+                        let analog: Vec<f64> = analog_idx
+                            .iter()
+                            .map(|&c| row.get(c).copied().unwrap_or(0.0))
+                            .collect();
+                        let digital: Vec<f64> = digital_idx
+                            .iter()
+                            .map(|&c| row.get(c).copied().unwrap_or(0.0))
+                            .collect();
+                        let t = self.data_logger.samples_logged() as f64 / sr;
                         let rec = RecordingSample::from_board_row(
                             &row,
                             &exg,
                             &accel,
                             pkg,
                             self.data_logger.samples_logged(),
-                        );
+                        )
+                        .with_aux(analog, digital)
+                        .with_time(t);
                         self.data_logger.log_recording(&rec);
                     }
                 }
@@ -2357,43 +2578,66 @@ impl eframe::App for OpenBciGuiApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let stream_label = if self.streaming { "Stop" } else { "Start" };
-                    let mut stream_btn = egui::Button::new(egui::RichText::new(stream_label).color(theme::TEXT))
-                        .min_size(egui::vec2(56.0, 22.0));
-                    if self.streaming {
-                        // Green means you're in it (Ableton Play while rolling).
-                        stream_btn = stream_btn.fill(theme::START);
-                    } else {
-                        stream_btn = stream_btn.fill(theme::PANEL).stroke(theme::hairline());
-                    }
-                    if ui.add(stream_btn).clicked()
-                    {
-                        if let Some(ref mut b) = self.board {
-                            if self.streaming {
-                                let _ = b.stop_streaming();
-                                self.streaming = false;
-                                self.event_log.log_system("Streaming stopped");
-                            } else if let Err(e) = b.start_streaming() {
-                                tracing::error!("Start failed: {:?}", e);
-                                self.event_log
-                                    .log_error(&format!("Failed to start streaming: {}", e));
-                            } else {
-                                self.streaming = true;
-                                self.event_log.log_system("Streaming started");
+                    let is_take = self
+                        .board
+                        .as_ref()
+                        .and_then(|b| b.playback_progress())
+                        .is_some();
+                    if is_take {
+                        // Finished take: Play / Pause. Never Start Session.
+                        let stream_label = transport_go_label(true, self.streaming);
+                        let mut stream_btn = egui::Button::new(egui::RichText::new(stream_label).color(theme::TEXT))
+                            .min_size(egui::vec2(56.0, 22.0));
+                        if self.streaming {
+                            stream_btn = stream_btn.fill(theme::START);
+                        } else {
+                            stream_btn = stream_btn.fill(theme::PANEL).stroke(theme::hairline());
+                        }
+                        if ui.add(stream_btn).clicked() {
+                            if let Some(ref mut b) = self.board {
+                                if self.streaming {
+                                    let _ = b.stop_streaming();
+                                    self.streaming = false;
+                                    self.event_log.log_system("Playback paused");
+                                } else if let Err(e) = b.start_streaming() {
+                                    tracing::error!("Play failed: {:?}", e);
+                                    self.event_log
+                                        .log_error(&format!("Failed to play take: {}", e));
+                                } else {
+                                    self.streaming = true;
+                                    self.event_log.log_system("Playback resumed");
+                                }
                             }
                         }
-                    }
-
-                    if ui
-                        .add(
-                            egui::Button::new(egui::RichText::new("End").color(theme::TEXT))
-                                .fill(theme::PANEL)
-                                .stroke(theme::hairline())
-                                .min_size(egui::vec2(44.0, 22.0)),
-                        )
-                        .clicked()
-                    {
-                        self.end_session();
+                    } else {
+                        // Live: Start / Stop only.
+                        let stream_label = transport_go_label(false, self.streaming);
+                        let mut stream_btn = egui::Button::new(egui::RichText::new(stream_label).color(theme::TEXT))
+                            .min_size(egui::vec2(56.0, 22.0));
+                        if self.streaming {
+                            stream_btn = stream_btn.fill(theme::START);
+                        } else {
+                            stream_btn = stream_btn.fill(theme::PANEL).stroke(theme::hairline());
+                        }
+                        if ui.add(stream_btn).clicked() {
+                            if let Some(ref mut b) = self.board {
+                                if self.streaming {
+                                    let _ = b.stop_streaming();
+                                    self.streaming = false;
+                                    self.event_log.log_system("Streaming stopped");
+                                    // Stop session stream also stops Record if it is running.
+                                    self.stop_recording_like_session();
+                                } else if let Err(e) = b.start_streaming() {
+                                    tracing::error!("Start failed: {:?}", e);
+                                    self.event_log
+                                        .log_error(&format!("Failed to start streaming: {}", e));
+                                } else {
+                                    self.streaming = true;
+                                    self.event_log.log_system("Streaming started");
+                                }
+                            }
+                        }
+                        // Live has no Play. Open a finished take from Session Setup (Playback).
                     }
 
                     self.draw_record_export(ui);
@@ -2460,21 +2704,14 @@ impl eframe::App for OpenBciGuiApp {
                                 }
                             }
                         }
-                        if ui.button("Play again").clicked() {
-                            if let Some(ref mut b) = self.board {
-                                b.seek_to_fraction(0.0);
-                                if !b.is_streaming() {
-                                    b.toggle_playback_pause();
-                                }
-                                self.streaming = true;
-                            }
-                        }
+                        self.apply_playback_scrub(ui, 180.0);
                     }
 
                     ui.separator();
 
                     if let Some(ref b) = self.board {
-                        let run = if self.streaming { "live" } else { "stop" };
+                        let is_take = b.playback_progress().is_some();
+                        let run = transport_run_chip(is_take, self.streaming);
                         ui.label(
                             egui::RichText::new(format!("{}  {run}", b.name())).color(theme::TEXT),
                         );
@@ -2508,6 +2745,18 @@ impl eframe::App for OpenBciGuiApp {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // End sits at the far right of transport (Ableton/Resolve-style).
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new("End").color(theme::TEXT))
+                                    .fill(theme::PANEL)
+                                    .stroke(theme::hairline())
+                                    .min_size(egui::vec2(44.0, 22.0)),
+                            )
+                            .clicked()
+                        {
+                            self.end_session();
+                        }
                         ui.small(
                             egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                                 .color(theme::HAIRLINE),
@@ -3017,6 +3266,93 @@ impl eframe::App for OpenBciGuiApp {
                 });
         }
 
+        // Status bar BEFORE CentralPanel so panes never draw under it (every-pane bottom clip).
+        egui::TopBottomPanel::bottom("status_bar")
+            .exact_height(32.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::TRANSPORT)
+                    .inner_margin(egui::Margin {
+                        left: 12,
+                        right: 12,
+                        top: 4,
+                        bottom: 8,
+                    }),
+            )
+            .show(ctx, |ui| {
+                // 32px bar − 4 top − 8 bottom = 20px inner; keep Pause/speed on this line.
+                ui.spacing_mut().interact_size.y = 16.0;
+                ui.spacing_mut().button_padding = egui::vec2(6.0, 1.0);
+                ui.horizontal(|ui| {
+                    // Phase 7 Playback polish: compact interactive controls for the magical roundtrip.
+                    // Lets the user pause, change speed, and scrub the exact recording they just made
+                    // while Focus ML+audio, markers (sent during replay), Networking, and Console
+                    // continue to work exactly as in the live session. This makes validation and
+                    // neurofeedback rehearsal trivial without hardware.
+                    if let Some(b) = self.board.as_deref_mut() {
+                        if let Some((pos, total)) = b.playback_progress() {
+                            // Play/Pause is the transport button. Speed stays here.
+                            // Speed presets
+                            for &s in &[0.5, 1.0, 2.0] {
+                                let lbl = format!("{:.1}x", s);
+                                if ui
+                                    .selectable_label(
+                                        b.playback_speed()
+                                            .is_some_and(|cur| (cur - s).abs() < 0.01),
+                                        lbl,
+                                    )
+                                    .clicked()
+                                {
+                                    b.set_playback_speed(s);
+                                    self.event_log
+                                        .log_system(&format!("Playback speed set to {}x", s));
+                                }
+                            }
+
+                            // Progress text + manual seek slider (0..1)
+                            let frac = if total > 0 {
+                                pos as f32 / total as f32
+                            } else {
+                                0.0
+                            };
+                            let secs = pos as f64 / b.sample_rate().max(1) as f64;
+                            let total_secs = total as f64 / b.sample_rate().max(1) as f64;
+                            ui.label(format!("{:.1}/{:.1}s", secs, total_secs));
+                            let _ = frac;
+                        }
+                    }
+                    if self
+                        .board
+                        .as_ref()
+                        .and_then(|b| b.playback_progress())
+                        .is_some()
+                    {
+                        ui.separator();
+                    }
+
+                    if self.networking.has_active_streams() {
+                        ui.colored_label(egui::Color32::from_rgb(100, 180, 255), "📡 Net");
+                    }
+
+                    if !self.last_marker.is_empty() {
+                        ui.colored_label(theme::ACCENT, format!("Last: {}", self.last_marker));
+                    }
+
+                    if ui.button("Console").clicked() {
+                        self.console_show_window = !self.console_show_window;
+                    }
+                    ui.separator();
+                    if let Some(entry) = self.event_log.last_n(1).first() {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&entry.message).color(entry.level.color()),
+                            )
+                            .truncate(),
+                        );
+                    }
+                });
+            });
+
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::CANVAS))
             .show(ctx, |ui| {
@@ -3049,107 +3385,11 @@ impl eframe::App for OpenBciGuiApp {
                     self.sync_head_plot_chrome();
                 }
             });
+        self.drain_time_series_drop_mark();
+        self.drain_time_series_scrub();
 
-        egui::TopBottomPanel::bottom("status_bar")
-            .exact_height(32.0)
-            .frame(
-                egui::Frame::NONE
-                    .fill(theme::TRANSPORT)
-                    .inner_margin(egui::Margin {
-                        left: 12,
-                        right: 12,
-                        top: 4,
-                        bottom: 8,
-                    }),
-            )
-            .show(ctx, |ui| {
-                // 32px bar − 4 top − 8 bottom = 20px inner; keep Pause/speed on this line.
-                ui.spacing_mut().interact_size.y = 16.0;
-                ui.spacing_mut().button_padding = egui::vec2(6.0, 1.0);
-                ui.horizontal(|ui| {
-                    // Phase 7 Playback polish: compact interactive controls for the magical roundtrip.
-                    // Lets the user pause, change speed, and scrub the exact recording they just made
-                    // while Focus ML+audio, markers (sent during replay), Networking, and Console
-                    // continue to work exactly as in the live session. This makes validation and
-                    // neurofeedback rehearsal trivial without hardware.
-                    if let Some(b) = self.board.as_deref_mut() {
-                        if let Some((pos, total)) = b.playback_progress() {
-                            // Pause / Play
-                            let is_paused = !b.is_streaming();
-                            let pause_label = if is_paused { "▶ Play" } else { "⏸ Pause" };
-                            if ui.button(pause_label).clicked() {
-                                b.toggle_playback_pause();
-                                self.event_log.log_system(if is_paused {
-                                    "Playback resumed"
-                                } else {
-                                    "Playback paused"
-                                });
-                            }
 
-                            // Speed presets
-                            for &s in &[0.5, 1.0, 2.0] {
-                                let lbl = format!("{:.1}x", s);
-                                if ui
-                                    .selectable_label(
-                                        b.playback_speed()
-                                            .is_some_and(|cur| (cur - s).abs() < 0.01),
-                                        lbl,
-                                    )
-                                    .clicked()
-                                {
-                                    b.set_playback_speed(s);
-                                    self.event_log
-                                        .log_system(&format!("Playback speed set to {}x", s));
-                                }
-                            }
-
-                            // Progress text + manual seek slider (0..1)
-                            let frac = if total > 0 {
-                                pos as f32 / total as f32
-                            } else {
-                                0.0
-                            };
-                            let secs = pos as f64 / b.sample_rate().max(1) as f64;
-                            let total_secs = total as f64 / b.sample_rate().max(1) as f64;
-                            ui.label(format!("{:.1}/{:.1}s", secs, total_secs));
-
-                            let mut new_frac = frac;
-                            if ui
-                                .add(egui::Slider::new(&mut new_frac, 0.0..=1.0).show_value(false))
-                                .changed()
-                            {
-                                b.seek_to_fraction(new_frac);
-                                self.event_log.log_system(&format!(
-                                    "Playback seeked to {:.0}%",
-                                    new_frac * 100.0
-                                ));
-                            }
-                            ui.separator();
-                        }
-                    }
-
-                    if self.networking.has_active_streams() {
-                        ui.colored_label(egui::Color32::from_rgb(100, 180, 255), "📡 Net");
-                    }
-
-                    if !self.last_marker.is_empty() {
-                        ui.colored_label(theme::ACCENT, format!("Last: {}", self.last_marker));
-                    }
-
-                    if ui.button("Console").clicked() {
-                        self.console_show_window = !self.console_show_window;
-                    }
-                    ui.separator();
-                    if let Some(entry) = self.event_log.last_n(1).first() {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&entry.message).color(entry.level.color()),
-                            )
-                            .truncate(),
-                        );
-                    }
-                });
-            });
+        self.draw_export_prompt(ctx);
 
         // Full Console window (filterable, searchable, live) — opens when user clicks the Console button
         if self.console_show_window {
@@ -3375,11 +3615,30 @@ fn draw_exclusive_section(
     });
 }
 
+
+fn transport_go_label(is_take: bool, streaming: bool) -> &'static str {
+    match (is_take, streaming) {
+        (true, true) => "Pause",
+        (true, false) => "Play",
+        (false, true) => "Stop",
+        (false, false) => "Start",
+    }
+}
+
+fn transport_run_chip(is_take: bool, streaming: bool) -> &'static str {
+    match (is_take, streaming) {
+        (true, true) => "play",
+        (true, false) => "pause",
+        (false, true) => "live",
+        (false, false) => "stop",
+    }
+}
+
 #[cfg(test)]
 mod properties_rack_tests {
     use super::{
         exclusive_section_clicked, exclusive_section_open, pick_holes_for_montage_save,
-        PROPERTIES_SPINE_IDS,
+        transport_go_label, transport_run_chip, PROPERTIES_SPINE_IDS,
     };
     use crate::widgets::head_plot::LABELS;
     use crate::widgets::Widget;
@@ -3545,7 +3804,7 @@ mod properties_rack_tests {
         );
         assert!(
             !head.contains("head_headset"),
-            "Head Plot chrome is Waves/Hemispheres only"
+            "Head Plot has no headset picker"
         );
         let session = app
             .split("fn draw_session_rack")
@@ -3667,8 +3926,34 @@ mod properties_rack_tests {
     }
 
     #[test]
-    fn version_is_semver_2_1_2() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "2.1.2");
+    fn version_is_semver() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.25");
+    }
+
+    #[test]
+    #[test]
+    fn status_bar_is_allocated_before_central_panel() {
+        let src = include_str!("app.rs");
+        let status = src.find("TopBottomPanel::bottom(\"status_bar\")").expect("status");
+        let central = src
+            .find("CentralPanel::default()\n            .frame(egui::Frame::NONE.fill(theme::CANVAS))")
+            .expect("session central");
+        assert!(
+            status < central,
+            "egui panels must be allocated before CentralPanel or every pane clips under the bar"
+        );
+    }
+
+    fn status_bar_does_not_draw_a_second_scrub_bar() {
+        let src = include_str!("app.rs");
+        assert!(
+            !src.contains(concat!("apply_playback_scrub(ui, ", "160.0)")),
+            "bottom status must not host a second scrub bar"
+        );
+        assert!(
+            src.contains("self.apply_playback_scrub(ui, 180.0)"),
+            "top transport still scrubs"
+        );
     }
 
     #[test]
@@ -3699,6 +3984,36 @@ mod properties_rack_tests {
         assert!(!fft.contains("from_id_salt(\"fft_smooth\")"));
         let bp = include_str!("widgets/band_power.rs");
         assert!(!bp.contains("from_id_salt(\"bp_smooth\")"));
+    }
+
+    #[test]
+    fn play_is_finished_take_live_is_start_stop() {
+        assert_eq!(transport_go_label(false, false), "Start");
+        assert_eq!(transport_go_label(false, true), "Stop");
+        assert_eq!(transport_go_label(true, false), "Play");
+        assert_eq!(transport_go_label(true, true), "Pause");
+        assert_eq!(transport_run_chip(false, true), "live");
+        assert_eq!(transport_run_chip(true, true), "play");
+        let src = include_str!("app.rs");
+        assert!(!src.contains(concat!("Play", " again")), "second Play is dead");
+        assert!(!src.contains(concat!("RichText::new(\"Play\")")), "live transport must not offer Play");
+        assert!(src.contains("Playback never offers Record"), "playback hides Record");
+        assert!(src.contains("record_format"), "Parquet must be listed for Record");
+        assert!(src.contains("Export as"), "Export format is a prompt, not chrome");
+        assert!(
+            src.contains("End sits at the far right of transport"),
+            "End must be far right"
+        );
+        assert!(
+            src.contains("Stop session stream also stops Record"),
+            "Stop must stop Record"
+        );
+        assert!(
+            src.contains("End session always stops Record"),
+            "End must stop Record"
+        );
+        assert!(!src.contains("from_id_salt(\"export_kind\")"), "no standing Export format combo");
+        assert!(src.contains("Play opens a recording"), "Play opens take from setup only");
     }
 
     #[test]

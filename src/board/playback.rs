@@ -24,6 +24,7 @@ use crate::filter_settings::FilterSettings;
 use crate::markers::{self, MarkerEvent};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::time::Instant;
 
 pub struct PlaybackBoard {
@@ -46,6 +47,9 @@ pub struct PlaybackBoard {
     impedance_active: bool,
     markers: Vec<MarkerEvent>,
     package_num_channel: Option<usize>,
+    analog_channels: Vec<usize>,
+    digital_channels: Vec<usize>,
+    source_path: Option<PathBuf>,
 }
 
 impl PlaybackBoard {
@@ -59,6 +63,9 @@ impl PlaybackBoard {
         if ext == "bdf" {
             return Self::from_bdf(path);
         }
+        if ext == "parquet" {
+            return Self::from_parquet(path);
+        }
         if looks_like_sd(path) {
             return Self::from_sd(path);
         }
@@ -66,7 +73,7 @@ impl PlaybackBoard {
     }
 
     pub fn from_bdf(path: &std::path::Path) -> Result<Self, BoardError> {
-        let (samples, sample_rate, n_exg, mut markers) =
+        let (samples, sample_rate, n_exg, mut markers, n_analog, n_digital) =
             crate::data_writers::bdf::read_bdf(path).map_err(|e| BoardError::Io(e.to_string()))?;
         let mut extra = markers::load_sidecar(path);
         markers.append(&mut extra);
@@ -76,12 +83,37 @@ impl PlaybackBoard {
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
-        Ok(Self::from_samples(
+        Ok(Self::from_samples_ex(
             filename,
             samples,
             sample_rate,
             n_exg,
+            n_analog,
+            n_digital,
             markers,
+            Some(path.to_path_buf()),
+        ))
+    }
+
+    pub fn from_parquet(path: &std::path::Path) -> Result<Self, BoardError> {
+        let rec = crate::data_writers::parquet::read_parquet(path)
+            .map_err(|e| BoardError::Io(e.to_string()))?;
+        let mut markers = markers::load_sidecar(path);
+        markers.sort_by_key(|m| m.sample_index);
+        markers.dedup_by(|a, b| a.sample_index == b.sample_index && a.label == b.label);
+        let filename = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        Ok(Self::from_samples_ex(
+            filename,
+            rec.playback_rows(),
+            rec.sample_rate,
+            rec.n_exg,
+            rec.n_analog,
+            rec.n_digital,
+            markers,
+            Some(path.to_path_buf()),
         ))
     }
 
@@ -107,6 +139,19 @@ impl PlaybackBoard {
         n_exg: usize,
         markers: Vec<MarkerEvent>,
     ) -> Self {
+        Self::from_samples_ex(filename, samples, sample_rate, n_exg, 0, 0, markers, None)
+    }
+
+    pub fn from_samples_ex(
+        filename: String,
+        samples: Vec<Vec<f64>>,
+        sample_rate: i32,
+        n_exg: usize,
+        n_analog: usize,
+        n_digital: usize,
+        markers: Vec<MarkerEvent>,
+        source_path: Option<PathBuf>,
+    ) -> Self {
         let row_len = samples.first().map(|r| r.len()).unwrap_or(n_exg);
         let n_exg = n_exg.min(row_len).max(1);
         let exg_channels: Vec<usize> = (0..n_exg).collect();
@@ -116,8 +161,21 @@ impl PlaybackBoard {
         } else {
             vec![]
         };
-        let package_num_channel = if row_len > accel_end {
-            Some(accel_end)
+        let analog_end = (accel_end + n_analog).min(row_len);
+        let analog_channels: Vec<usize> = if n_analog > 0 && analog_end > accel_end {
+            (accel_end..analog_end).collect()
+        } else {
+            vec![]
+        };
+        let digital_end = (analog_end + n_digital).min(row_len);
+        let digital_channels: Vec<usize> = if n_digital > 0 && digital_end > analog_end {
+            (analog_end..digital_end).collect()
+        } else {
+            vec![]
+        };
+        let index_col = digital_end;
+        let package_num_channel = if row_len > index_col {
+            Some(index_col)
         } else {
             None
         };
@@ -140,9 +198,26 @@ impl PlaybackBoard {
             impedance_active: false,
             markers,
             package_num_channel,
+            analog_channels,
+            digital_channels,
+            source_path,
         };
         board.apply_pending_filters();
         board
+    }
+
+    /// Drop a mark at `sample_index` and append the experiment sidecar.
+    pub fn drop_mark(&mut self, sample_index: u64, label: &str) {
+        if label.trim().is_empty() {
+            return;
+        }
+        let t = sample_index as f64 / self.sample_rate.max(1) as f64;
+        let event = MarkerEvent::new(sample_index, t, label.trim());
+        if let Some(path) = &self.source_path {
+            let _ = markers::append_sidecar(path, &event);
+        }
+        self.markers.push(event);
+        self.markers.sort_by_key(|m| m.sample_index);
     }
 
     pub fn export_samples(&self) -> &[Vec<f64>] {
@@ -254,12 +329,15 @@ impl PlaybackBoard {
 
         let n_exg = n_channels.min(samples[0].len()).max(1);
         markers.sort_by_key(|m| m.sample_index);
-        Ok(Self::from_samples(
+        Ok(Self::from_samples_ex(
             filename,
             samples,
             sample_rate,
             n_exg,
+            0,
+            0,
             markers,
+            Some(path.to_path_buf()),
         ))
     }
 
@@ -387,6 +465,14 @@ impl DataSource for PlaybackBoard {
         &self.accel_channels
     }
 
+    fn analog_channels(&self) -> &[usize] {
+        &self.analog_channels
+    }
+
+    fn digital_channels(&self) -> &[usize] {
+        &self.digital_channels
+    }
+
     fn package_num_channel(&self) -> Option<usize> {
         self.package_num_channel
     }
@@ -477,6 +563,10 @@ impl DataSource for PlaybackBoard {
 
     fn session_markers(&self) -> &[MarkerEvent] {
         &self.markers
+    }
+
+    fn drop_session_mark(&mut self, sample_index: u64, label: &str) {
+        self.drop_mark(sample_index, label);
     }
 
     fn playhead_sample(&self) -> Option<usize> {
@@ -777,5 +867,42 @@ mod tests {
         pb.update();
         let pos1 = pb.playback_progress().unwrap().0;
         assert!(pos1 > pos0, "BDF playback playhead must advance");
+    }
+
+    #[test]
+    fn parquet_playback_and_drop_mark_sidecar() {
+        use crate::data_logger::{DataLogger, LogFormat, RecordingSample};
+        let mut logger = DataLogger::new();
+        let path = logger.start(LogFormat::Parquet, 8, 250).unwrap();
+        for i in 0..500 {
+            logger.log_recording(&RecordingSample {
+                packet_index: i as f64,
+                exg: vec![i as f64; 8],
+                accel: [0.0, 0.0, 1.0],
+                time: i as f64 / 250.0,
+                ..Default::default()
+            });
+        }
+        logger.stop();
+
+        let mut pb = PlaybackBoard::from_file(&path).unwrap();
+        assert_eq!(pb.sample_rate(), 250);
+        assert_eq!(pb.exg_channels().len(), 8);
+        pb.seek_to_fraction(0.25);
+        let a = pb.playhead_sample().unwrap();
+        pb.seek_to_fraction(0.75);
+        let b = pb.playhead_sample().unwrap();
+        assert!(
+            b > a + 10,
+            "scrubbing the playhead must move more than a +10s hop on a 2s file; a={a} b={b}"
+        );
+        pb.drop_mark(100, "M1");
+        assert_eq!(pb.session_markers().len(), 1);
+        assert_eq!(pb.session_markers()[0].sample_index, 100);
+        let sidecar = crate::markers::load_sidecar(&path);
+        assert_eq!(sidecar.len(), 1);
+        assert_eq!(sidecar[0].label, "M1");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::markers::sidecar_path(&path));
     }
 }

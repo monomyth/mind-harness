@@ -7,9 +7,9 @@
 use crate::board::DataSource;
 use crate::fft::band_powers_psd;
 use crate::laterality::{
-    common_mode_jump, latch_rails, laterality_index, posterior_pair_has_rest,
-    rest_fill_o1_o2, Rhythm, WINDOW_SEC, IDX_FP1, IDX_FP2, IDX_O1, IDX_O2, LI_THRESHOLD,
-    POWER_FLOOR,
+    common_mode_jump, latch_rails, laterality_index, occupied_band_fill,
+    posterior_pair_has_rest, Rhythm, WINDOW_SEC, IDX_FP1, IDX_FP2, IDX_O1, IDX_O2,
+    LI_THRESHOLD, POWER_FLOOR,
 };
 use crate::theme;
 use crate::widgets::mark_iv::{
@@ -100,6 +100,26 @@ fn recapture_assign_hole_from_env() -> Option<String> {
     recapture_assign_hole_from_name(raw.trim())
 }
 
+/// Recapture-only: OPENBCI_HEAD_YAW / OPENBCI_HEAD_PITCH (radians).
+/// Unset in normal sessions — live default stays 3/4.
+fn recapture_orbit_from_env() -> Camera {
+    let mut cam = Camera::default();
+    if std::env::var("OPENBCI_CROP").is_err() {
+        return cam;
+    }
+    if let Ok(s) = std::env::var("OPENBCI_HEAD_YAW") {
+        if let Ok(v) = s.parse::<f32>() {
+            cam.yaw = v;
+        }
+    }
+    if let Ok(s) = std::env::var("OPENBCI_HEAD_PITCH") {
+        if let Ok(v) = s.parse::<f32>() {
+            cam.pitch = v.clamp(-mark_iv::PITCH_LIMIT, mark_iv::PITCH_LIMIT);
+        }
+    }
+    cam
+}
+
 impl WHeadPlot {
     pub fn new() -> Self {
         Self {
@@ -115,9 +135,9 @@ impl WHeadPlot {
             assign_hole: recapture_assign_hole_from_env(),
             save_as_open: false,
             save_as_buf: String::new(),
-            orbit: Camera::default(),
-            show_hemispheres: true,
-            show_waves: true,
+            orbit: recapture_orbit_from_env(),
+            show_hemispheres: false,
+            show_waves: false,
             all_sites_jump: false,
             rest_hz: [None; 8],
         }
@@ -131,7 +151,16 @@ impl WHeadPlot {
     /// (Left / right, Which first) use two holes. No pair caption, no band letter.
     pub fn overlay_frame(&self) -> HeadOverlayFrame {
         let rest = posterior_pair_has_rest(&self.channel_psd, &self.railed);
-        let fill = rest_fill_o1_o2(&self.channel_psd, &self.railed);
+        // Broadband per-channel power (all five bands) so eyes-open live still
+        // paints activity — not eyes-closed O1/O2 rest-only.
+        let mut band_psd = [0.0_f64; 8];
+        for ch in 0..8 {
+            if self.railed[ch] || self.map[ch].is_empty() {
+                continue;
+            }
+            band_psd[ch] = self.channel_psd[ch].iter().sum();
+        }
+        let fill = occupied_band_fill(&band_psd);
         let sites = (0..8)
             .filter(|&i| !self.map[i].is_empty())
             .map(|idx| OverlaySite {
@@ -154,8 +183,8 @@ impl WHeadPlot {
         }
     }
 
-    /// Separate laterality + slow/fast words — never one glued sentence.
-    /// Do not stamp "active" on 8–13 Hz rest.
+    /// Pair language stays off the Head Plot plate.
+    /// Fill still uses insert rest/activity. Wave stays parked.
     fn plate_captions(&self) -> String {
         if self.all_sites_jump {
             return "All sites jumped".into();
@@ -168,18 +197,7 @@ impl WHeadPlot {
         {
             return "Contact lost".into();
         }
-        let mut lines = Vec::new();
-        if self.show_hemispheres {
-            if let Some(c) = self.hemispheres_caption() {
-                lines.push(c);
-            }
-        }
-        if self.show_waves {
-            if let Some(c) = self.waves_caption() {
-                lines.push(c.to_string());
-            }
-        }
-        lines.join("\n")
+        String::new()
     }
 
     /// Louder rest from O1/O2 alpha only (not "active").
@@ -586,28 +604,15 @@ impl Widget for WHeadPlot {
         _source: &dyn DataSource,
         _ctx: &mut crate::widget_context::WidgetContext,
     ) {
-        // Waves + Hemispheres tags on Head Plot only (no extra panes).
-        if !self.all_sites_jump {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                let fonts = theme::font_sizes();
-                ui.toggle_value(
-                    &mut self.show_waves,
-                    egui::RichText::new("Waves").size(fonts.caption),
-                );
-                ui.toggle_value(
-                    &mut self.show_hemispheres,
-                    egui::RichText::new("Hemispheres").size(fonts.caption),
-                );
-            });
-        }
+        // Waves / Hemispheres tags off the glass (Interface 2.2.1 fail).
+        self.show_waves = false;
+        self.show_hemispheres = false;
         // Quiet activity color key — dark → site hue → hot. Not a dashboard.
-        // Mute on all-sites jump: do not read Waves/Hemispheres off a starving stream.
+        // Mute on all-sites jump: do not read pair language off a starving stream.
         if !self.all_sites_jump {
             paint_activity_ramp_key(ui);
         }
-        // Own overlay captions only (laterality + slow/fast as separate lines).
-        // Never stamp "active" on 8–13 Hz rest.
+        // Contact lost / All sites jumped only. No pair words.
         let plate_caption = self.overlay_frame().caption;
         if !plate_caption.is_empty() {
             let fonts = theme::font_sizes();
@@ -965,7 +970,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_frame_keeps_eight_inserts_rest_only_o1_o2() {
+    fn overlay_frame_fills_all_occupied_from_band_power() {
         let mut w = WHeadPlot::new();
         let i = Rhythm::Alpha.psd_index();
         for ch in 0..8 {
@@ -979,24 +984,26 @@ mod tests {
         let o1 = frame.sites.iter().find(|s| s.idx == IDX_O1).unwrap();
         let o2 = frame.sites.iter().find(|s| s.idx == IDX_O2).unwrap();
         let fp1 = frame.sites.iter().find(|s| s.idx == IDX_FP1).unwrap();
-        assert!(o1.fill > 0.3, "O1 rest fill {}", o1.fill);
-        assert!(o2.fill > 0.3, "O2 rest fill {}", o2.fill);
-        assert_eq!(fp1.fill, 0.0, "Fp1 must not get rest fill");
+        assert!(fp1.fill > 0.02, "Fp1 must paint from its own band power {}", fp1.fill);
+        assert!(o1.fill > 0.3, "O1 fill {}", o1.fill);
+        assert!(o2.fill > 0.3, "O2 fill {}", o2.fill);
+        assert!(
+            o1.fill > fp1.fill,
+            "louder O1 alpha outranks quieter Fp1"
+        );
         assert_eq!(o1.hz, Some(10.0));
         assert_eq!(o2.hz, Some(11.0));
         assert_eq!(fp1.hz, None, "Hz only on O1/O2");
         assert!(!frame.caption.contains('α'), "{}", frame.caption);
         assert!(!frame.caption.contains("P3/P4"), "{}", frame.caption);
-        assert!(
-            frame.caption.contains("rest is louder") || frame.caption.contains("Rest is balanced"),
-            "{}",
-            frame.caption
-        );
+        assert!(frame.caption.is_empty(), "pair language off plate, got {}", frame.caption);
         assert!(!frame.caption.to_lowercase().contains("active"), "{}", frame.caption);
         w.railed[2] = true;
         let frame = w.overlay_frame();
         assert_eq!(frame.sites.len(), 8);
         assert_eq!(frame.caption, "Contact lost");
+        let c3 = frame.sites.iter().find(|s| s.idx == 2).unwrap();
+        assert_eq!(c3.fill, 0.0, "railed C3 stays empty of activity");
         w.all_sites_jump = true;
         let jumped = w.overlay_frame();
         assert_eq!(jumped.caption, "All sites jumped");
@@ -1012,8 +1019,8 @@ mod tests {
         assert!(src.contains("paint_head"));
         assert!(src.contains("paint_frame"));
         assert!(src.contains("Unassign"));
-        assert!(src.contains("\"Waves\""));
-        assert!(src.contains("\"Hemispheres\""));
+        assert!(!src.contains("RichText::new(\"Waves\")"));
+        assert!(!src.contains("RichText::new(\"Hemispheres\")"));
         assert!(src.contains("activity_fill_color"));
         assert!(src.contains("paint_activity_ramp_key"));
         assert!(src.contains("\"quiet\""));
@@ -1083,17 +1090,11 @@ mod tests {
             w.channel_psd[i][b] = 0.2;
         }
         let c = w.overlay_frame().caption;
-        assert!(c.contains("Left rest is louder"), "{c}");
-        assert!(c.contains("slow"), "{c}");
-        assert!(!c.to_lowercase().contains("active"), "{c}");
-        assert!(
-            !c.contains("Left rest is louder slow") && c.contains('\n'),
-            "must not glue laterality and slow/fast: {c}"
-        );
-        w.show_hemispheres = false;
-        let c = w.overlay_frame().caption;
-        assert_eq!(c, "slow");
-        w.show_waves = false;
+        assert!(c.is_empty(), "pair language off Head Plot, got {c}");
+        w.show_hemispheres = true;
+        w.show_waves = true;
+        assert_eq!(w.hemispheres_caption().as_deref(), Some("Left rest is louder"));
+        assert_eq!(w.waves_caption(), Some("slow"));
         assert!(w.overlay_frame().caption.is_empty());
     }
 
@@ -1114,7 +1115,8 @@ mod tests {
         w.channel_psd[IDX_FP1][Rhythm::Delta.psd_index()] = 20.0;
         w.channel_psd[IDX_FP2][Rhythm::Theta.psd_index()] = 20.0;
         w.channel_psd[IDX_O1][Rhythm::Beta.psd_index()] = 3.0;
-        assert_eq!(w.overlay_frame().caption, "fast");
+        assert!(w.overlay_frame().caption.is_empty());
+        assert_eq!(w.waves_caption(), Some("fast"));
         // |S−F|/(S+F) < 0.15 → mixed. Mute Fp; use C3..O2.
         for i in 0..8 {
             w.channel_psd[i] = [0.0; 5];
@@ -1123,7 +1125,8 @@ mod tests {
             w.channel_psd[i][Rhythm::Delta.psd_index()] = 1.0;
             w.channel_psd[i][Rhythm::Beta.psd_index()] = 1.0;
         }
-        assert_eq!(w.overlay_frame().caption, "mixed");
+        assert!(w.overlay_frame().caption.is_empty());
+        assert_eq!(w.waves_caption(), Some("mixed"));
         w.railed[2] = true;
         w.railed[3] = true;
         w.railed[4] = true;
@@ -1136,6 +1139,8 @@ mod tests {
     #[test]
     fn half_tint_is_laterality_only() {
         let mut w = WHeadPlot::new();
+        w.show_hemispheres = true;
+        w.show_waves = true;
         w.channel_psd[IDX_O1][Rhythm::Alpha.psd_index()] = 4.0;
         w.channel_psd[IDX_O2][Rhythm::Alpha.psd_index()] = 0.5;
         for i in 2..8 {

@@ -1149,7 +1149,7 @@ mod tests {
         if !path.exists() {
             return;
         }
-        let (rows, sr, n_exg, _) = crate::data_writers::bdf::read_bdf(path).unwrap();
+        let (rows, sr, n_exg, _, _, _) = crate::data_writers::bdf::read_bdf(path).unwrap();
         let sr = sr.max(1) as f64;
         let end = ((148.5 * sr) as usize).min(rows.len());
         let start = end.saturating_sub((2.0 * sr) as usize);

@@ -191,7 +191,7 @@ impl Widget for WBandPower {
             })
             .collect();
 
-        let plot_h = ui.available_height().max(80.0);
+        let plot_h = (ui.available_height() - 16.0).max(80.0);
         crate::widgets::lock_plot_interaction(Plot::new("band_power_plot"))
             .height(plot_h)
             .allow_boxed_zoom(false)

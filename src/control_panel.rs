@@ -40,6 +40,21 @@ pub enum DataSourceType {
     SDCard,
 }
 
+impl DataSourceType {
+    /// Finished take (Playback / SD). Live boards Start a session.
+    pub fn is_finished_take(self) -> bool {
+        matches!(self, Self::Playback | Self::SDCard)
+    }
+
+    pub fn go_label(self) -> &'static str {
+        if self.is_finished_take() {
+            "Play"
+        } else {
+            "Start Session"
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SerialPortInfo {
     pub port_name: String,
@@ -165,7 +180,7 @@ impl ControlPanel {
                 ui.radio_value(&mut self.selected_source, DataSourceType::CytonSerial, "Cyton (Serial / USB Dongle)");
                 ui.radio_value(&mut self.selected_source, DataSourceType::CytonWifi, "Cyton (WiFi shield)");
                 ui.radio_value(&mut self.selected_source, DataSourceType::GanglionNative, "Ganglion (Native BLE)");
-                ui.radio_value(&mut self.selected_source, DataSourceType::Playback, "Playback (.txt / .odf / .bdf)");
+                ui.radio_value(&mut self.selected_source, DataSourceType::Playback, "Playback (.parquet / .bdf / .txt)");
                 ui.radio_value(&mut self.selected_source, DataSourceType::SDCard, "SD Card (Cyton hex dump)");
             });
 
@@ -320,8 +335,11 @@ impl ControlPanel {
                     ui.horizontal(|ui| {
                         if ui.button("📁 Choose Recording File...").clicked() {
                             if let Some(path) = rfd::FileDialog::new()
-                                .set_title("Select OpenBCI recording (.txt / .odf / .bdf)")
-                                .add_filter("OpenBCI Recordings", &["txt", "odf", "csv", "bdf"])
+                                .set_title("Select OpenBCI recording (.parquet / .bdf / .txt)")
+                                .add_filter(
+                                    "OpenBCI Recordings",
+                                    &["parquet", "txt", "odf", "csv", "bdf"],
+                                )
                                 .set_directory(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
                                 .pick_file()
                             {
@@ -340,7 +358,7 @@ impl ControlPanel {
                         let short = if f.len() > 60 { format!("...{}", &f[f.len()-57..]) } else { f.clone() };
                         ui.label(egui::RichText::new(format!("Selected: {}", short)).small());
                     } else {
-                        ui.label(egui::RichText::new("Select a .txt / .odf / .bdf recording from this GUI or Java.").italics().small());
+                        ui.label(egui::RichText::new("Select a .parquet / .bdf / .txt recording from this GUI or Java.").italics().small());
                     }
                 }
                 DataSourceType::SDCard => {
@@ -374,7 +392,7 @@ impl ControlPanel {
             }
 
             let start = ui.add(
-                egui::Button::new("Start Session")
+                egui::Button::new(self.selected_source.go_label())
                     .fill(crate::theme::TURN_ON_GREEN)
                     .min_size(egui::vec2(180.0, 28.0)),
             );
@@ -450,5 +468,31 @@ impl ControlPanel {
         });
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DataSourceType;
+
+    #[test]
+    fn play_is_finished_take_only() {
+        assert_eq!(DataSourceType::Playback.go_label(), "Play");
+        assert_eq!(DataSourceType::SDCard.go_label(), "Play");
+        assert!(DataSourceType::Playback.is_finished_take());
+        assert!(DataSourceType::SDCard.is_finished_take());
+    }
+
+    #[test]
+    fn live_boards_start_a_session() {
+        for src in [
+            DataSourceType::Synthetic,
+            DataSourceType::CytonSerial,
+            DataSourceType::CytonWifi,
+            DataSourceType::GanglionNative,
+        ] {
+            assert_eq!(src.go_label(), "Start Session", "{src:?}");
+            assert!(!src.is_finished_take(), "{src:?}");
+        }
     }
 }

@@ -27,6 +27,8 @@ pub struct WTimeSeries {
     visible_channels: Vec<bool>,
     per_channel_y_scales: Vec<f32>,
     experiment_overlay: Option<ExperimentOverlay>,
+    pending_drop_mark: Option<u64>,
+    pending_scrub_delta: Option<f32>,
 }
 
 impl WTimeSeries {
@@ -39,7 +41,17 @@ impl WTimeSeries {
             visible_channels: vec![true; 16],
             per_channel_y_scales: vec![0.0; 16],
             experiment_overlay: None,
+            pending_drop_mark: None,
+            pending_scrub_delta: None,
         }
+    }
+
+    pub fn take_pending_drop_mark(&mut self) -> Option<u64> {
+        self.pending_drop_mark.take()
+    }
+
+    pub fn take_pending_scrub_delta(&mut self) -> Option<f32> {
+        self.pending_scrub_delta.take()
     }
 
     /// Same 10-20 names as Head Plot holes (active montage).
@@ -127,6 +139,38 @@ fn uv_std_last_second(ys: &[f64], sample_rate: f32) -> f64 {
     } else {
         uv_std(&ys[ys.len() - n..])
     }
+}
+
+/// Map a click on the Time Series plot to a sample index (newest = playhead at the right edge).
+pub fn click_x_to_sample_index(
+    x: f32,
+    plot_left: f32,
+    plot_width: f32,
+    window_sec: f32,
+    playhead: usize,
+    sample_rate: f32,
+) -> u64 {
+    let width = plot_width.max(1.0);
+    let u = ((x - plot_left) / width).clamp(0.0, 1.0) as f64;
+    let t = -(window_sec as f64) * (1.0 - u);
+    let idx = playhead as f64 + t * sample_rate.max(1.0) as f64;
+    idx.round().clamp(0.0, playhead as f64) as u64
+}
+
+pub fn next_drop_mark_label(existing: usize) -> String {
+    format!("M{}", existing + 1)
+}
+
+/// Horizontal drag on the Time Series graph → recording fraction (right = later).
+pub fn drag_dx_to_seek_fraction(
+    dx: f32,
+    plot_width: f32,
+    window_sec: f32,
+    sample_rate: f32,
+    total_samples: usize,
+) -> f32 {
+    let dt = (dx / plot_width.max(1.0)) * window_sec;
+    dt * sample_rate / (total_samples.max(1) as f32)
 }
 
 /// True when a recording mark falls in the visible Time Series window (newest at playhead).
@@ -490,13 +534,40 @@ impl Widget for WTimeSeries {
 
                     // Remaining width after the electrode button — identical on every row.
                     // ± / RMS overlay the trace so RMS digits cannot shift time.
-                    let (plot_rect, _) = ui.allocate_exact_size(
+                    let (plot_rect, plot_resp) = ui.allocate_exact_size(
                         egui::vec2(
                             layout.plot_w.min(ui.available_width()),
                             (row_h - 2.0).max(8.0),
                         ),
-                        egui::Sense::hover(),
+                        egui::Sense::click_and_drag(),
                     );
+                    if let Some((_pos, total)) = source.playback_progress() {
+                        if plot_resp.dragged() {
+                            let d = drag_dx_to_seek_fraction(
+                                plot_resp.drag_delta().x,
+                                plot_rect.width(),
+                                self.time_window_sec,
+                                sample_rate,
+                                total,
+                            );
+                            self.pending_scrub_delta =
+                                Some(self.pending_scrub_delta.unwrap_or(0.0) + d);
+                        } else if plot_resp.clicked() {
+                            if let Some(pos) = plot_resp.interact_pointer_pos() {
+                                let playhead = source
+                                    .playhead_sample()
+                                    .unwrap_or_else(|| data.len().saturating_sub(1));
+                                self.pending_drop_mark = Some(click_x_to_sample_index(
+                                    pos.x,
+                                    plot_rect.left(),
+                                    plot_rect.width(),
+                                    self.time_window_sec,
+                                    playhead,
+                                    sample_rate,
+                                ));
+                            }
+                        }
+                    }
                     paint_channel_trace(
                         ui,
                         plot_rect,
@@ -648,6 +719,26 @@ mod tests {
     }
 
     #[test]
+    fn click_right_edge_is_playhead() {
+        let playhead = 2000usize;
+        let idx = super::click_x_to_sample_index(300.0, 0.0, 300.0, 5.0, playhead, 250.0);
+        assert_eq!(idx, 2000);
+    }
+
+    #[test]
+    fn click_left_edge_is_window_start() {
+        let playhead = 2000usize;
+        let idx = super::click_x_to_sample_index(0.0, 0.0, 300.0, 5.0, playhead, 250.0);
+        assert_eq!(idx, 2000 - 5 * 250);
+    }
+
+    #[test]
+    fn drop_mark_labels_are_quiet_m_numbers() {
+        assert_eq!(super::next_drop_mark_label(0), "M1");
+        assert_eq!(super::next_drop_mark_label(2), "M3");
+    }
+
+    #[test]
     fn channel_bar_plot_width_is_independent_of_rms_digits() {
         let layout = super::channel_bar_layout(400.0);
         assert_eq!(
@@ -723,6 +814,40 @@ mod tests {
         assert_ne!(super::left_channel_label(2, ""), "F7");
         assert_ne!(super::left_channel_label(6, ""), "P3");
         assert_ne!(super::left_channel_label(7, ""), "P4");
+    }
+
+    #[test]
+    fn drag_right_on_graph_seeks_forward() {
+        let d = super::drag_dx_to_seek_fraction(100.0, 200.0, 5.0, 250.0, 2500);
+        assert!(
+            (d - 0.25).abs() < 1e-5,
+            "half-window drag on a 10s file must seek +0.25, got {d}"
+        );
+        let back = super::drag_dx_to_seek_fraction(-100.0, 200.0, 5.0, 250.0, 2500);
+        assert!((back + 0.25).abs() < 1e-5, "drag left seeks back, got {back}");
+    }
+
+    #[test]
+    fn time_series_graph_drag_scrubs_click_still_drops_mark() {
+        let src = include_str!("time_series.rs");
+        let draw = src
+            .split("fn show(")
+            .nth(1)
+            .and_then(|s| s.split("fn as_any(").next())
+            .unwrap_or("");
+        assert!(
+            draw.contains("click_and_drag"),
+            "Time Series plot must drag to scrub"
+        );
+        assert!(
+            draw.contains("take_pending_scrub_delta")
+                || draw.contains("pending_scrub_delta"),
+            "graph drag must queue a playback seek"
+        );
+        assert!(
+            draw.contains("pending_drop_mark"),
+            "click still drops a mark"
+        );
     }
 
     #[test]

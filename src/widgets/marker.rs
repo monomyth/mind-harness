@@ -97,21 +97,7 @@ impl Widget for WMarker {
             ui.small("No markers sent yet. Use this widget to mark events during recording.");
         }
 
-        let file_marks = source.session_markers();
-        if !file_marks.is_empty() {
-            ui.separator();
-            ui.small("Recording / playback marks (sample index):");
-            for m in file_marks.iter().rev().take(8) {
-                let marks = crate::theme::font_sizes().marks;
-                ui.label(
-                    egui::RichText::new(format!(
-                        "#{}  {:.3}s  {}",
-                        m.sample_index, m.board_timestamp, m.label
-                    ))
-                    .size(marks),
-                );
-            }
-        }
+        let _ = source.session_markers();
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

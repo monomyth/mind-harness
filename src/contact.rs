@@ -329,7 +329,7 @@ fn nearest_mark(markers: &[MarkerEvent], t_s: f64) -> Option<String> {
 
 /// Offline pass: walk a BDF and append latch/unlatch/ring lines beside it.
 pub fn write_offline_sidecar(recording: &Path) -> std::io::Result<PathBuf> {
-    let (rows, fs, n_exg, mut marks) = crate::data_writers::bdf::read_bdf(recording)?;
+    let (rows, fs, n_exg, mut marks, _, _) = crate::data_writers::bdf::read_bdf(recording)?;
     marks.extend(crate::markers::load_sidecar(recording));
     marks.sort_by_key(|m| m.sample_index);
     marks.dedup_by(|a, b| a.sample_index == b.sample_index && a.label == b.label);
@@ -438,7 +438,7 @@ mod tests {
         if !path.exists() {
             return;
         }
-        let (rows, sr, n_exg, _) = crate::data_writers::bdf::read_bdf(path).unwrap();
+        let (rows, sr, n_exg, _, _, _) = crate::data_writers::bdf::read_bdf(path).unwrap();
         let sr = sr.max(1) as f64;
         let start = ((146.5 * sr) as usize).min(rows.len());
         let end = ((148.5 * sr) as usize).min(rows.len());
