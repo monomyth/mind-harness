@@ -83,6 +83,8 @@ pub struct ControlPanel {
     pub last_setup_error: Option<String>,
     /// Gates Cyton WiFi + Ganglion. Always-on: Cyton Serial, Synthetic, Playback.
     pub show_advanced: bool,
+    /// Session Setup hero (product icon RGBA). Loaded on first draw.
+    icon_texture: Option<egui::TextureHandle>,
 }
 
 impl ControlPanel {
@@ -101,9 +103,22 @@ impl ControlPanel {
             ble_scan_status: None,
             last_setup_error: None,
             show_advanced: false,
+            icon_texture: None,
         };
         panel.refresh_serial_ports();
         panel
+    }
+
+    fn ensure_hero_icon(&mut self, ctx: &egui::Context) -> &egui::TextureHandle {
+        self.icon_texture.get_or_insert_with(|| {
+            let rgba = include_bytes!("../resources/mind-harness-icon.rgba");
+            let image = egui::ColorImage::from_rgba_unmultiplied([256, 256], rgba);
+            ctx.load_texture(
+                "mind_harness_setup_hero",
+                image,
+                egui::TextureOptions::LINEAR,
+            )
+        })
     }
 
     pub fn refresh_serial_ports(&mut self) {
@@ -169,9 +184,11 @@ impl ControlPanel {
             self.show_advanced = true;
         }
 
+        let hero = self.ensure_hero_icon(ui.ctx()).clone();
+
         ui.vertical_centered(|ui| {
-            // Head plate slot: empty until a named resources/ still is blessed. Do not invent.
-            ui.add_space(72.0);
+            ui.add(egui::Image::new(&hero).fit_to_exact_size(egui::vec2(96.0, 96.0)));
+            ui.add_space(12.0);
 
             let glass = egui::Frame::new()
                 .fill(crate::theme::SETUP_GLASS)
@@ -467,15 +484,15 @@ impl ControlPanel {
                 ui.add_space(8.0);
             }
 
-            // Neon-leaning Start (Cinema Imagine) — not quiet studio START.
+            // Readable Start (Eugene/Interface): solid cyan + near-white label.
             let start = ui.add(
                 egui::Button::new(
                     egui::RichText::new(self.selected_source.go_label())
-                        .color(egui::Color32::WHITE)
+                        .color(egui::Color32::from_rgb(0xf2, 0xf7, 0xf8))
                         .strong(),
                 )
-                .fill(crate::theme::SETUP_NEON)
-                .stroke(egui::Stroke::new(1.5_f32, crate::theme::SETUP_CYAN))
+                .fill(crate::theme::SETUP_CYAN)
+                .stroke(egui::Stroke::new(1.0_f32, crate::theme::SETUP_CYAN))
                 .corner_radius(8.0)
                 .min_size(egui::vec2(200.0, 36.0)),
             );
@@ -598,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn session_setup_imagine_look_no_hero_glass_neon() {
+    fn session_setup_hero_glass_cyan_start() {
         let src = include_str!("control_panel.rs");
         let impl_src = src.split("#[cfg(test)]").next().expect("impl before tests");
         let draw_body = impl_src
@@ -610,10 +627,18 @@ mod tests {
             "tagline must be gone from Session Setup"
         );
         assert!(
-            !impl_src.contains("ensure_hero_icon")
-                && !impl_src.contains("mind_harness_setup_hero")
-                && !draw_body.contains("Image::new"),
-            "large app-icon hero must be omitted until a named still exists"
+            impl_src.contains("ensure_hero_icon")
+                && impl_src.contains("mind_harness_setup_hero")
+                && impl_src.contains("mind-harness-icon.rgba")
+                && !impl_src.contains("mind-harness-icon-candidate")
+                && !impl_src.contains("icon-candidate-a")
+                && draw_body.contains("Image::new")
+                && draw_body.contains("96.0"),
+            "Setup hero must be 96px Image from mind-harness-icon.rgba only"
+        );
+        assert!(
+            !draw_body.contains("add_space(72.0)"),
+            "empty 72px hero slot must be replaced"
         );
         assert!(
             draw_body.contains("SETUP_GLASS"),
@@ -624,8 +649,10 @@ mod tests {
             "glass card and selected radio must use cyan rim"
         );
         assert!(
-            draw_body.contains("SETUP_NEON"),
-            "Start Session must use neon Imagine fill, not quiet START"
+            draw_body.contains(".fill(crate::theme::SETUP_CYAN)")
+                && draw_body.contains("0xf2, 0xf7, 0xf8")
+                && !draw_body.contains("SETUP_NEON"),
+            "Start Session must use solid SETUP_CYAN + near-white label, not SETUP_NEON"
         );
         assert!(
             draw_body.contains("Advanced"),
