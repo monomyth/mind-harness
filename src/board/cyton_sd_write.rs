@@ -3,6 +3,35 @@
 //! Starts a file on the card in the Cyton, independent of local Record.
 //! Stop with `j`. Prefer starting before stream for a clear board reply.
 
+/// Where transport Record writes. Hardware segmented control; Local default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RecordDestination {
+    #[default]
+    Local,
+    Sd,
+    Both,
+}
+
+impl RecordDestination {
+    pub const ALL: [Self; 3] = [Self::Local, Self::Sd, Self::Both];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Local => "Local",
+            Self::Sd => "SD",
+            Self::Both => "Both",
+        }
+    }
+
+    pub fn wants_local(self) -> bool {
+        matches!(self, Self::Local | Self::Both)
+    }
+
+    pub fn wants_sd(self) -> bool {
+        matches!(self, Self::Sd | Self::Both)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CytonSdDuration {
     Sec14,

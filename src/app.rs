@@ -194,6 +194,7 @@ pub struct OpenBciGuiApp {
     /// Cyton on-board SD logging armed / active (SDK file on the card).
     cyton_sd_active: bool,
     cyton_sd_duration: crate::board::cyton_sd_write::CytonSdDuration,
+    record_destination: crate::board::cyton_sd_write::RecordDestination,
     scrubbing: bool,
     scrub_was_playing: bool,
 
@@ -322,6 +323,7 @@ impl OpenBciGuiApp {
             export_prompt_open: false,
             cyton_sd_active: false,
             cyton_sd_duration: crate::board::cyton_sd_write::CytonSdDuration::Min5,
+            record_destination: crate::board::cyton_sd_write::RecordDestination::Local,
             scrubbing: false,
             scrub_was_playing: false,
 
@@ -998,6 +1000,41 @@ impl OpenBciGuiApp {
         }
     }
 
+    fn record_session_active(&self) -> bool {
+        self.data_logger.is_logging() || self.cyton_sd_active
+    }
+
+    /// One transport Record — uses Hardware Local|SD|Both.
+    fn start_record_session(&mut self) {
+        let dest = self.record_destination;
+        if dest.wants_sd() {
+            let can = self
+                .board
+                .as_ref()
+                .is_some_and(|b| b.supports_cyton_sd_write());
+            if !can {
+                self.event_log.log_error(
+                    "Record destination includes SD, but this board cannot write SD",
+                );
+                if !dest.wants_local() {
+                    return;
+                }
+            } else if !self.cyton_sd_active {
+                self.start_cyton_sd_write();
+            }
+        }
+        if dest.wants_local() && !self.data_logger.is_logging() {
+            let _ = self.start_recording_like_session();
+        }
+    }
+
+    fn stop_record_session(&mut self) {
+        if self.data_logger.is_logging() {
+            self.stop_recording_like_session();
+        }
+        self.stop_cyton_sd_write_if_active();
+    }
+
     fn tick_contact_sidecar(&mut self) {
         let (chs, sample, t_s, sr_hz, loss_pct, markers, path, accel, packet_index) = {
             let Some(board) = self.board.as_deref() else {
@@ -1520,16 +1557,14 @@ impl OpenBciGuiApp {
         ui.horizontal(|ui| {
             // Playback never offers Record — only live sessions do.
             if !is_take {
-                let record_label = if self.data_logger.is_logging() {
-                    "Stop Rec"
-                } else {
-                    "Record"
-                };
+                // One Record only — destination is Hardware Local|SD|Both.
+                let recording = self.record_session_active();
+                let record_label = if recording { "Stop Rec" } else { "Record" };
                 let live_hw = self.board.as_ref().is_some_and(|b| {
                     let n = b.name();
                     n != "Playback" && !n.contains("Synthetic")
                 });
-                let record_color = if self.data_logger.is_logging() {
+                let record_color = if recording {
                     theme::STOP
                 } else if live_hw {
                     theme::START
@@ -1537,17 +1572,17 @@ impl OpenBciGuiApp {
                     theme::PANEL
                 };
                 let mut record_btn = egui::Button::new(record_label).fill(record_color);
-                if !live_hw && !self.data_logger.is_logging() {
+                if !live_hw && !recording {
                     record_btn = record_btn.stroke(theme::hairline());
                 }
                 if ui.add(record_btn).clicked() {
-                    if self.data_logger.is_logging() {
-                        self.stop_recording_like_session();
+                    if recording {
+                        self.stop_record_session();
                     } else {
-                        let _ = self.start_recording_like_session();
+                        self.start_record_session();
                     }
                 }
-                if !self.data_logger.is_logging() {
+                if !recording && self.record_destination.wants_local() {
                     egui::ComboBox::from_id_salt("record_format")
                         .selected_text(self.recording_format.label())
                         .show_ui(ui, |ui| {
@@ -1568,7 +1603,6 @@ impl OpenBciGuiApp {
                             );
                         });
                 }
-                // Cyton SD Write chrome lives in Hardware (Interface), not transport.
             }
             if !self.data_logger.is_logging() {
                 // Format is chosen in a prompt when Export is pressed — not chrome.
@@ -3161,72 +3195,61 @@ impl eframe::App for OpenBciGuiApp {
                                     }
                                     ui.add_space(8.0);
 
-                                    // Interface placement: Cyton on-board SD Write in Hardware
-                                    // (not transport). Session Setup "SD Card" stays hex playback.
+                                    // Interface: one Record; Hardware destination Local|SD|Both.
+                                    // Session Setup "SD Card" stays hex playback only.
                                     ui.small(
-                                        egui::RichText::new("SD card").color(theme::HAIRLINE),
+                                        egui::RichText::new("Record to").color(theme::HAIRLINE),
                                     );
-                                    let can_sd = self
-                                        .board
-                                        .as_ref()
-                                        .is_some_and(|b| b.supports_cyton_sd_write());
-                                    if can_sd {
-                                        ui.horizontal(|ui| {
-                                            if self.cyton_sd_active {
-                                                if ui
-                                                    .add(
-                                                        egui::Button::new("Stop SD")
-                                                            .fill(theme::STOP)
-                                                            .min_size(egui::vec2(72.0, 22.0)),
-                                                    )
-                                                    .on_hover_text(
-                                                        "Close the file on the Cyton SD card (j)",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    self.stop_cyton_sd_write_if_active();
-                                                }
+                                    ui.horizontal(|ui| {
+                                        for d in crate::board::cyton_sd_write::RecordDestination::ALL {
+                                            let selected = self.record_destination == d;
+                                            let mut btn = egui::Button::new(d.label())
+                                                .min_size(egui::vec2(52.0, 22.0));
+                                            if selected {
+                                                btn = btn.fill(theme::START);
                                             } else {
-                                                egui::ComboBox::from_id_salt("hw_cyton_sd_duration")
-                                                    .selected_text(self.cyton_sd_duration.label())
-                                                    .width(80.0)
-                                                    .show_ui(ui, |ui| {
-                                                        for d in crate::board::cyton_sd_write::CytonSdDuration::ALL
-                                                        {
-                                                            ui.selectable_value(
-                                                                &mut self.cyton_sd_duration,
-                                                                d,
-                                                                d.label(),
-                                                            );
-                                                        }
-                                                    });
-                                                if ui
-                                                    .add(
-                                                        egui::Button::new("SD Write")
-                                                            .fill(theme::PANEL)
-                                                            .stroke(theme::hairline())
-                                                            .min_size(egui::vec2(72.0, 22.0)),
-                                                    )
-                                                    .on_hover_text(
-                                                        "Board logs to its own SD card for this length. Not local Record. Best before Start. Needs a compatible card.",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    self.start_cyton_sd_write();
-                                                }
+                                                btn = btn.fill(theme::PANEL).stroke(theme::hairline());
                                             }
+                                            if ui.add(btn).clicked() {
+                                                self.record_destination = d;
+                                            }
+                                        }
+                                    });
+                                    if self.record_destination.wants_sd() {
+                                        ui.horizontal(|ui| {
+                                            ui.small(
+                                                egui::RichText::new("SD length")
+                                                    .color(theme::HAIRLINE),
+                                            );
+                                            egui::ComboBox::from_id_salt("hw_cyton_sd_duration")
+                                                .selected_text(self.cyton_sd_duration.label())
+                                                .width(80.0)
+                                                .show_ui(ui, |ui| {
+                                                    for d in crate::board::cyton_sd_write::CytonSdDuration::ALL
+                                                    {
+                                                        ui.selectable_value(
+                                                            &mut self.cyton_sd_duration,
+                                                            d,
+                                                            d.label(),
+                                                        );
+                                                    }
+                                                });
                                         });
-                                        if self.cyton_sd_active {
+                                        let can_sd = self
+                                            .board
+                                            .as_ref()
+                                            .is_some_and(|b| b.supports_cyton_sd_write());
+                                        if !can_sd {
+                                            ui.small("Cyton session required for SD destination.");
+                                        } else if self.cyton_sd_active {
                                             ui.small(
                                                 egui::RichText::new(format!(
-                                                    "Writing · {}",
+                                                    "SD writing · {}",
                                                     self.cyton_sd_duration.label()
                                                 ))
                                                 .color(theme::STOP),
                                             );
                                         }
-                                    } else {
-                                        ui.small("Cyton session required for on-board SD write.");
                                     }
                                     ui.add_space(8.0);
 
@@ -4129,16 +4152,16 @@ mod properties_rack_tests {
             "End must be far right"
         );
         assert!(
-            src.contains("start_cyton_sd_write"),
-            "Cyton SD write board helpers must exist"
+            src.contains("start_record_session"),
+            "one Record drives destination"
         );
         assert!(
-            src.contains("Interface placement: Cyton on-board SD Write in Hardware"),
-            "SD Write chrome lives in Hardware"
+            src.contains("Interface: one Record; Hardware destination Local|SD|Both"),
+            "Hardware destination segmented control"
         );
         assert!(
-            !src.contains("from_id_salt(\"cyton_sd_duration\")"),
-            "no transport SD duration combo"
+            src.contains("RecordDestination::ALL"),
+            "segmented Local SD Both destinations"
         );
         assert!(
             src.contains("Stop session stream also stops Record"),
