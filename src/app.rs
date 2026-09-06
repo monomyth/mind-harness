@@ -992,7 +992,14 @@ impl OpenBciGuiApp {
                 .log_error("Cyton SD write: this board cannot log to SD");
             return false;
         }
-        let dur = self.cyton_sd_duration;
+        // Both: no SD length UI — arm 24h silently. Sd: use Session combo.
+        let dur = if self.record_destination
+            == crate::board::cyton_sd_write::RecordDestination::Both
+        {
+            crate::board::cyton_sd_write::CytonSdDuration::Hour24
+        } else {
+            self.cyton_sd_duration
+        };
         match b.cyton_sd_write_start(dur) {
             Ok(()) => {
                 self.cyton_sd_active = true;
@@ -1015,18 +1022,31 @@ impl OpenBciGuiApp {
         }
     }
 
-    fn record_session_active(&self) -> bool {
-        self.data_logger.is_logging() || self.cyton_sd_active
-    }
-
-    /// REC mm:ss — local disk duration, else SD-only Instant since arm.
+    /// Rec elapsed — local disk duration, else SD-only Instant since arm.
+    /// Both Rec follows local logging only (not SD-arm-from-Start).
     fn record_session_elapsed(&self) -> Option<std::time::Duration> {
         if self.data_logger.is_logging() {
             self.data_logger.recording_duration()
-        } else if self.cyton_sd_active {
+        } else if self.record_destination
+            == crate::board::cyton_sd_write::RecordDestination::Sd
+            && self.cyton_sd_active
+        {
             self.cyton_sd_started_at.map(|t| t.elapsed())
         } else {
             None
+        }
+    }
+
+    /// Rec 1:23 under an hour; H:MM:SS past hour.
+    fn format_record_elapsed(d: std::time::Duration) -> String {
+        let secs = d.as_secs();
+        if secs >= 3600 {
+            let h = secs / 3600;
+            let m = (secs % 3600) / 60;
+            let s = secs % 60;
+            format!("{h}:{m:02}:{s:02}")
+        } else {
+            format!("{}:{:02}", secs / 60, secs % 60)
         }
     }
 
@@ -1601,6 +1621,15 @@ impl OpenBciGuiApp {
                         self.start_record_session();
                     }
                 }
+                // Elapsed beside Record/Stop Rec (not Hertz/Loss). Both = local only.
+                if recording {
+                    if let Some(d) = self.record_session_elapsed() {
+                        ui.colored_label(
+                            theme::STOP,
+                            format!("Rec {}", Self::format_record_elapsed(d)),
+                        );
+                    }
+                }
                 if !recording && self.record_destination.wants_local() {
                     egui::ComboBox::from_id_salt("record_format")
                         .selected_text(self.recording_format.label())
@@ -1962,7 +1991,15 @@ impl OpenBciGuiApp {
                             }
                         }
                     });
-                    if self.record_destination.wants_sd() {
+                    // SD length combo ONLY for Sd — hide for Both/Local.
+                    // Both arms Hour24 silently; status is "SD writing" (no duration).
+                    let can_sd = self
+                        .board
+                        .as_ref()
+                        .is_some_and(|b| b.supports_cyton_sd_write());
+                    if self.record_destination
+                        == crate::board::cyton_sd_write::RecordDestination::Sd
+                    {
                         ui.horizontal(|ui| {
                             ui.label("SD length");
                             egui::ComboBox::from_id_salt("session_cyton_sd_duration")
@@ -1978,10 +2015,6 @@ impl OpenBciGuiApp {
                                     }
                                 });
                         });
-                        let can_sd = self
-                            .board
-                            .as_ref()
-                            .is_some_and(|b| b.supports_cyton_sd_write());
                         if !can_sd {
                             ui.small(
                                 egui::RichText::new("Cyton session required for SD.")
@@ -1994,6 +2027,19 @@ impl OpenBciGuiApp {
                                     self.cyton_sd_duration.label()
                                 ))
                                 .color(theme::STOP),
+                            );
+                        }
+                    } else if self.record_destination
+                        == crate::board::cyton_sd_write::RecordDestination::Both
+                    {
+                        if !can_sd {
+                            ui.small(
+                                egui::RichText::new("Cyton session required for SD.")
+                                    .color(theme::STOP),
+                            );
+                        } else if self.cyton_sd_active {
+                            ui.small(
+                                egui::RichText::new("SD writing").color(theme::STOP),
                             );
                         }
                     }
@@ -2913,13 +2959,8 @@ impl eframe::App for OpenBciGuiApp {
                         );
                     }
 
-                    if self.record_session_active() {
-                        let dur = self
-                            .record_session_elapsed()
-                            .map(|d| format!("{}:{:02}", d.as_secs() / 60, d.as_secs() % 60))
-                            .unwrap_or_default();
-                        ui.colored_label(theme::STOP, format!("REC {dur}"));
-                    }
+                    // Rec elapsed lives beside Record/Stop Rec in draw_record_export
+                    // (not Hertz/Loss-adjacent).
 
                     if let Some(focus) = self
                         .tool_widgets
@@ -4117,6 +4158,23 @@ mod properties_rack_tests {
     }
 
     #[test]
+    fn format_record_elapsed_under_and_past_hour() {
+        use super::OpenBciGuiApp;
+        assert_eq!(
+            OpenBciGuiApp::format_record_elapsed(std::time::Duration::from_secs(83)),
+            "1:23"
+        );
+        assert_eq!(
+            OpenBciGuiApp::format_record_elapsed(std::time::Duration::from_secs(0)),
+            "0:00"
+        );
+        assert_eq!(
+            OpenBciGuiApp::format_record_elapsed(std::time::Duration::from_secs(3661)),
+            "1:01:01"
+        );
+    }
+
+    #[test]
     fn status_bar_is_allocated_before_central_panel() {
         let src = include_str!("app.rs");
         let status = src.find("TopBottomPanel::bottom(\"status_bar\")").expect("status");
@@ -4228,12 +4286,54 @@ mod properties_rack_tests {
         );
         assert!(
             src.contains("record_session_elapsed"),
-            "REC chip uses elapsed for local or SD-only"
+            "Rec elapsed for local or SD-only"
         );
         assert!(
-            src.contains("record_session_active()"),
-            "REC chip shows whenever record session is active"
+            src.contains("format_record_elapsed"),
+            "Rec 1:23 under hour; H:MM:SS past hour"
         );
+        assert!(
+            src.contains("Elapsed beside Record/Stop Rec"),
+            "Rec lives beside Record/Stop Rec in draw_record_export"
+        );
+        assert!(
+            src.contains("not Hertz/Loss-adjacent"),
+            "no REC chip beside Hertz/Loss"
+        );
+        assert!(
+            !src.contains("format!(\"REC {dur}\")"),
+            "old Hertz/Loss REC chip must be gone"
+        );
+        assert!(
+            src.contains("SD length combo ONLY for Sd"),
+            "SD length hidden for Both/Local"
+        );
+        assert!(
+            src.contains("Both arms Hour24 silently"),
+            "Both arms 24h without SD length combo"
+        );
+        assert!(
+            src.contains("RichText::new(\"SD writing\")"),
+            "Both status SD writing without duration"
+        );
+        // start_cyton_sd_write: Both → Hour24
+        {
+            let fn_body = src
+                .split("fn start_cyton_sd_write")
+                .nth(1)
+                .unwrap_or("")
+                .split("fn record_session_elapsed")
+                .next()
+                .unwrap_or("");
+            assert!(
+                fn_body.contains("CytonSdDuration::Hour24"),
+                "Both arms Hour24 silently: {fn_body}"
+            );
+            assert!(
+                fn_body.contains("RecordDestination::Both"),
+                "Hour24 gated on Both: {fn_body}"
+            );
+        }
         // start_record_session must not call cyton_sd_write_start (SD on Start only).
         {
             let fn_body = src
@@ -4250,6 +4350,24 @@ mod properties_rack_tests {
             assert!(
                 fn_body.contains("wants_local"),
                 "Record still starts local disk when dest wants it"
+            );
+        }
+        // draw_record_export: Both Rec follows local logging only
+        {
+            let fn_body = src
+                .split("fn draw_record_export")
+                .nth(1)
+                .unwrap_or("")
+                .split("fn run_export_kind")
+                .next()
+                .unwrap_or("");
+            assert!(
+                fn_body.contains("data_logger.is_logging()"),
+                "Both Rec follows local logging: {fn_body}"
+            );
+            assert!(
+                fn_body.contains("format!(\"Rec {}\""),
+                "Rec label beside Record/Stop Rec: {fn_body}"
             );
         }
 
