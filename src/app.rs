@@ -191,6 +191,8 @@ pub struct OpenBciGuiApp {
     export_prompt_open: bool,
     /// Cyton on-board SD logging armed / active (SDK file on the card).
     cyton_sd_active: bool,
+    /// When SD became active (REC elapsed for SD-only; local uses data_logger).
+    cyton_sd_started_at: Option<std::time::Instant>,
     cyton_sd_duration: crate::board::cyton_sd_write::CytonSdDuration,
     record_destination: crate::board::cyton_sd_write::RecordDestination,
     scrubbing: bool,
@@ -320,6 +322,7 @@ impl OpenBciGuiApp {
             export_kind: crate::export::ExportKind::Bdf,
             export_prompt_open: false,
             cyton_sd_active: false,
+            cyton_sd_started_at: None,
             cyton_sd_duration: crate::board::cyton_sd_write::CytonSdDuration::Min5,
             record_destination: crate::board::cyton_sd_write::RecordDestination::Local,
             scrubbing: false,
@@ -966,6 +969,7 @@ impl OpenBciGuiApp {
             }
         }
         self.cyton_sd_active = false;
+        self.cyton_sd_started_at = None;
     }
 
     fn start_cyton_sd_write(&mut self) -> bool {
@@ -974,6 +978,7 @@ impl OpenBciGuiApp {
         const SD_STATUS_FAIL: &str = "Couldn't write to the SD card";
         let Some(ref mut b) = self.board else {
             self.cyton_sd_active = false;
+            self.cyton_sd_started_at = None;
             self.connection_status = SD_STATUS_FAIL.to_string();
             self.event_log
                 .log_error("Cyton SD write: start a Cyton session first");
@@ -981,6 +986,7 @@ impl OpenBciGuiApp {
         };
         if !b.supports_cyton_sd_write() {
             self.cyton_sd_active = false;
+            self.cyton_sd_started_at = None;
             self.connection_status = SD_STATUS_FAIL.to_string();
             self.event_log
                 .log_error("Cyton SD write: this board cannot log to SD");
@@ -990,6 +996,7 @@ impl OpenBciGuiApp {
         match b.cyton_sd_write_start(dur) {
             Ok(()) => {
                 self.cyton_sd_active = true;
+                self.cyton_sd_started_at = Some(std::time::Instant::now());
                 self.event_log.log_recording(&format!(
                     "Cyton SD write started ({})",
                     dur.label()
@@ -999,6 +1006,7 @@ impl OpenBciGuiApp {
             Err(e) => {
                 // Never pretend SD is recording. Both may still Local-write.
                 self.cyton_sd_active = false;
+                self.cyton_sd_started_at = None;
                 self.connection_status = SD_STATUS_FAIL.to_string();
                 self.event_log
                     .log_error(&format!("Cyton SD start failed: {e}"));
@@ -1011,18 +1019,22 @@ impl OpenBciGuiApp {
         self.data_logger.is_logging() || self.cyton_sd_active
     }
 
+    /// REC mm:ss — local disk duration, else SD-only Instant since arm.
+    fn record_session_elapsed(&self) -> Option<std::time::Duration> {
+        if self.data_logger.is_logging() {
+            self.data_logger.recording_duration()
+        } else if self.cyton_sd_active {
+            self.cyton_sd_started_at.map(|t| t.elapsed())
+        } else {
+            None
+        }
+    }
+
     /// One transport Record — uses Session Record to Local|SD|Both.
+    /// While streaming: never cyton_sd_write_start / config_board (SD arms on Start only).
     fn start_record_session(&mut self) {
         let dest = self.record_destination;
-        if dest.wants_sd() {
-            if !self.cyton_sd_active {
-                let ok = self.start_cyton_sd_write();
-                if !ok && !dest.wants_local() {
-                    // SD-only and not confirmed — do not pretend recording.
-                    return;
-                }
-            }
-        }
+        // SD already active from Start: leave it. Mid-live dest change applies on next Start.
         if dest.wants_local() && !self.data_logger.is_logging() {
             let _ = self.start_recording_like_session();
         }
@@ -1557,7 +1569,15 @@ impl OpenBciGuiApp {
             // Playback never offers Record — only live sessions do.
             if !is_take {
                 // One Record only — destination is Session Record to Local|SD|Both.
-                let recording = self.record_session_active();
+                // SD|Both: SD arms on Start. Record toggles local when dest wants it;
+                // SD-only: Stop Rec while cyton_sd_active (started on Start).
+                let recording = if self.record_destination
+                    == crate::board::cyton_sd_write::RecordDestination::Sd
+                {
+                    self.cyton_sd_active
+                } else {
+                    self.data_logger.is_logging()
+                };
                 let record_label = if recording { "Stop Rec" } else { "Record" };
                 let live_hw = self.board.as_ref().is_some_and(|b| {
                     let n = b.name();
@@ -1937,6 +1957,7 @@ impl OpenBciGuiApp {
                                 btn = btn.fill(theme::PANEL).stroke(theme::hairline());
                             }
                             if ui.add(btn).clicked() {
+                                // Mid-live dest change does not arm SD — applies on next Start.
                                 self.record_destination = d;
                             }
                         }
@@ -2112,16 +2133,21 @@ impl eframe::App for OpenBciGuiApp {
             match receiver.try_recv() {
                 Ok(Ok(mut connected_board)) => {
                     self.connection_status = format!("Connected to {}", connected_board.name());
-                    // Auto-start streaming so the user sees real data immediately
-                    if let Err(e) = connected_board.start_streaming() {
-                        tracing::error!(
-                            "Failed to auto-start streaming after hardware connection: {}",
-                            e
-                        );
-                    } else {
-                        self.streaming = true;
-                    }
                     self.board = Some(Box::new(connected_board) as Box<dyn DataSource>); // plan.md Phase 7 — polymorphic board (Playback + Live)
+                    // SD|Both: do not auto-stream — SD arms on transport Start before start_streaming.
+                    // Local: auto-start so graphs appear immediately.
+                    if self.record_destination.wants_sd() {
+                        self.streaming = false;
+                    } else if let Some(ref mut b) = self.board {
+                        if let Err(e) = b.start_streaming() {
+                            tracing::error!(
+                                "Failed to auto-start streaming after hardware connection: {}",
+                                e
+                            );
+                        } else {
+                            self.streaming = true;
+                        }
+                    }
                     self.event_log
                         .log_connection(&format!("Connected to {}", self.connection_status));
                     // Phase 7 Reconnect: remember this successful real-hardware connect
@@ -2233,13 +2259,18 @@ impl eframe::App for OpenBciGuiApp {
                             self.connection_status = "Using BrainFlow Synthetic Board".to_string();
                             let mut board = BrainFlowBoard::synthetic(chans);
                             let _ = board.initialize();
-                            // Auto-start streaming so the user immediately sees graphs
-                            if let Err(e) = board.start_streaming() {
-                                tracing::error!("Failed to auto-start streaming on Synthetic: {}", e);
-                            } else {
-                                self.streaming = true;
-                            }
                             self.board = Some(Box::new(board) as Box<dyn DataSource>);
+                            // SD|Both waits for transport Start (fail-closed if board cannot SD).
+                            if self.record_destination.wants_sd() {
+                                self.streaming = false;
+                            } else if let Some(ref mut b) = self.board {
+                                // Auto-start streaming so the user immediately sees graphs
+                                if let Err(e) = b.start_streaming() {
+                                    tracing::error!("Failed to auto-start streaming on Synthetic: {}", e);
+                                } else {
+                                    self.streaming = true;
+                                }
+                            }
                             self.event_log.log_connection("Connected to BrainFlow Synthetic board");
                             // Phase 7 Reconnect: remember the Synthetic settings (chans etc.)
                             self.save_last_connection();
@@ -2422,8 +2453,16 @@ impl eframe::App for OpenBciGuiApp {
                                             self.connection_status = "Using BrainFlow Synthetic Board (Reconnect)".to_string();
                                             let mut board = BrainFlowBoard::synthetic(params.channels);
                                             let _ = board.initialize();
-                                            if let Err(e) = board.start_streaming() { tracing::error!("Reconnect synth: {}", e);} else { self.streaming = true; }
                                             self.board = Some(Box::new(board) as Box<dyn DataSource>);
+                                            if self.record_destination.wants_sd() {
+                                                self.streaming = false;
+                                            } else if let Some(ref mut b) = self.board {
+                                                if let Err(e) = b.start_streaming() {
+                                                    tracing::error!("Reconnect synth: {}", e);
+                                                } else {
+                                                    self.streaming = true;
+                                                }
+                                            }
                                             self.event_log.log_connection("Connected to Synthetic (Reconnect)");
                                             self.save_last_connection();
                                             self.enter_running_session();
@@ -2746,21 +2785,42 @@ impl eframe::App for OpenBciGuiApp {
                             stream_btn = stream_btn.fill(theme::PANEL).stroke(theme::hairline());
                         }
                         if ui.add(stream_btn).clicked() {
-                            if let Some(ref mut b) = self.board {
-                                if self.streaming {
+                            if self.streaming {
+                                if let Some(ref mut b) = self.board {
                                     let _ = b.stop_streaming();
-                                    self.streaming = false;
-                                    self.event_log.log_system("Streaming stopped");
-                                    // Stop session stream also stops Record if it is running.
-                                    self.stop_recording_like_session();
-                                    self.stop_cyton_sd_write_if_active();
-                                } else if let Err(e) = b.start_streaming() {
-                                    tracing::error!("Start failed: {:?}", e);
-                                    self.event_log
-                                        .log_error(&format!("Failed to start streaming: {}", e));
+                                }
+                                self.streaming = false;
+                                self.event_log.log_system("Streaming stopped");
+                                // Stop session stream also stops Record if it is running.
+                                self.stop_recording_like_session();
+                                self.stop_cyton_sd_write_if_active();
+                            } else {
+                                // SD|Both: arm Cyton SD on Start, before start_streaming
+                                // (never mid-live Record via config_board — kills graph spike).
+                                let sd_ok = if self.record_destination.wants_sd()
+                                    && !self.cyton_sd_active
+                                {
+                                    self.start_cyton_sd_write()
                                 } else {
-                                    self.streaming = true;
-                                    self.event_log.log_system("Streaming started");
+                                    true
+                                };
+                                if !sd_ok {
+                                    // Fail-closed — connection_status already
+                                    // "Couldn't write to the SD card". No stream.
+                                } else if let Some(ref mut b) = self.board {
+                                    if let Err(e) = b.start_streaming() {
+                                        tracing::error!("Start failed: {:?}", e);
+                                        self.event_log.log_error(&format!(
+                                            "Failed to start streaming: {}",
+                                            e
+                                        ));
+                                        if self.cyton_sd_active {
+                                            self.stop_cyton_sd_write_if_active();
+                                        }
+                                    } else {
+                                        self.streaming = true;
+                                        self.event_log.log_system("Streaming started");
+                                    }
                                 }
                             }
                         }
@@ -2853,10 +2913,9 @@ impl eframe::App for OpenBciGuiApp {
                         );
                     }
 
-                    if self.data_logger.is_logging() {
+                    if self.record_session_active() {
                         let dur = self
-                            .data_logger
-                            .recording_duration()
+                            .record_session_elapsed()
                             .map(|d| format!("{}:{:02}", d.as_secs() / 60, d.as_secs() % 60))
                             .unwrap_or_default();
                         ui.colored_label(theme::STOP, format!("REC {dur}"));
@@ -4054,10 +4113,9 @@ mod properties_rack_tests {
 
     #[test]
     fn version_is_semver() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.25");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.41");
     }
 
-    #[test]
     #[test]
     fn status_bar_is_allocated_before_central_panel() {
         let src = include_str!("app.rs");
@@ -4071,6 +4129,7 @@ mod properties_rack_tests {
         );
     }
 
+    #[test]
     fn status_bar_does_not_draw_a_second_scrub_bar() {
         let src = include_str!("app.rs");
         assert!(
@@ -4155,6 +4214,44 @@ mod properties_rack_tests {
             src.contains("Couldn't write to the SD card"),
             "bottom status on SD fail"
         );
+        assert!(
+            src.contains("arm Cyton SD on Start, before start_streaming"),
+            "SD|Both arms on Start before stream, not mid-Record"
+        );
+        assert!(
+            src.contains("never mid-live Record via config_board"),
+            "mid-live Record must not config_board for SD"
+        );
+        assert!(
+            src.contains("Mid-live dest change does not arm SD"),
+            "Record to mid-live applies on next Start"
+        );
+        assert!(
+            src.contains("record_session_elapsed"),
+            "REC chip uses elapsed for local or SD-only"
+        );
+        assert!(
+            src.contains("record_session_active()"),
+            "REC chip shows whenever record session is active"
+        );
+        // start_record_session must not call cyton_sd_write_start (SD on Start only).
+        {
+            let fn_body = src
+                .split("fn start_record_session")
+                .nth(1)
+                .unwrap_or("")
+                .split("fn stop_record_session")
+                .next()
+                .unwrap_or("");
+            assert!(
+                !fn_body.contains("start_cyton_sd_write"),
+                "start_record_session must not arm SD mid-stream: {fn_body}"
+            );
+            assert!(
+                fn_body.contains("wants_local"),
+                "Record still starts local disk when dest wants it"
+            );
+        }
 
         assert!(
             src.contains("RecordDestination::ALL"),

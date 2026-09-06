@@ -1,7 +1,7 @@
 //! Cyton on-board SD card logging (OpenBCI SDK SD commands).
 //!
 //! Starts a file on the card in the Cyton, independent of local Record.
-//! Stop with `j`. Prefer starting before stream for a clear board reply.
+//! Stop with `j`. Arm on transport Start before start_streaming (not mid-live Record).
 
 /// Where transport Record writes. Session Record to Local|SD|Both; Local default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
