@@ -197,13 +197,15 @@ impl ControlPanel {
                 .inner_margin(egui::Margin::symmetric(20, 16));
 
             glass.show(ui, |ui| {
-                ui.set_max_width(440.0);
-                ui.set_min_width(440.0);
-                ui.label(
-                    egui::RichText::new("Data Source")
-                        .strong()
-                        .color(crate::theme::TEXT),
-                );
+                ui.set_max_width(400.0);
+                ui.set_min_width(400.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Data Source")
+                            .strong()
+                            .color(crate::theme::TEXT),
+                    );
+                });
                 ui.add_space(6.0);
 
                 // Always-on bare radios (not toggles). Order: Cyton Serial / Synthetic / Playback.
