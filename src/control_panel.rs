@@ -187,7 +187,7 @@ impl ControlPanel {
         let hero = self.ensure_hero_icon(ui.ctx()).clone();
 
         ui.vertical_centered(|ui| {
-            ui.add(egui::Image::new(&hero).fit_to_exact_size(egui::vec2(96.0, 96.0)));
+            ui.add(egui::Image::new(&hero).fit_to_exact_size(egui::vec2(180.0, 180.0)));
             ui.add_space(12.0);
 
             let glass = egui::Frame::new()
@@ -197,7 +197,8 @@ impl ControlPanel {
                 .inner_margin(egui::Margin::symmetric(20, 16));
 
             glass.show(ui, |ui| {
-                ui.set_min_width(420.0);
+                ui.set_max_width(440.0);
+                ui.set_min_width(440.0);
                 ui.label(
                     egui::RichText::new("Data Source")
                         .strong()
@@ -633,8 +634,8 @@ mod tests {
                 && !impl_src.contains("mind-harness-icon-candidate")
                 && !impl_src.contains("icon-candidate-a")
                 && draw_body.contains("Image::new")
-                && draw_body.contains("96.0"),
-            "Setup hero must be 96px Image from mind-harness-icon.rgba only"
+                && draw_body.contains("180.0"),
+            "Setup hero must be 180px Image from mind-harness-icon.rgba only"
         );
         assert!(
             !draw_body.contains("add_space(72.0)"),
