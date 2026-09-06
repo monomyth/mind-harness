@@ -2,9 +2,31 @@
 //!
 //! Uses `rustfft` under the hood. Returns frequency bins + magnitude in dB
 //! for the first `max_freq` Hz (typical EEG interest is 0–100 Hz).
+//!
+//! Performance: FFT planners are cached per-thread to avoid rebuilding every frame.
 
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::f64::consts::PI;
+use std::sync::Arc;
+
+thread_local! {
+    static FFT_PLANNER: RefCell<FftPlanner<f64>> = RefCell::new(FftPlanner::new());
+    static FFT_CACHE: RefCell<HashMap<usize, Arc<dyn Fft<f64>>>> = RefCell::new(HashMap::new());
+}
+
+fn get_cached_fft(n: usize) -> Arc<dyn Fft<f64>> {
+    FFT_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache
+            .entry(n)
+            .or_insert_with(|| {
+                FFT_PLANNER.with(|planner| planner.borrow_mut().plan_fft_forward(n))
+            })
+            .clone()
+    })
+}
 
 /// Matches Java `W_FFT.pde` `fft_plot.setXLim(0.1, xLim)` so the DC bin is not drawn.
 pub const FFT_DISPLAY_MIN_HZ: f64 = 0.1;
@@ -51,8 +73,7 @@ pub fn compute_fft_magnitude(
     }
 
     let n = samples.len().next_power_of_two();
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(n);
+    let fft = get_cached_fft(n);
 
     // Java DataProcessing: `fooData[I] -= meanData` before the Hamming FFT.
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
@@ -178,8 +199,8 @@ pub fn fft_single_sided_uv(samples: &[f64], sample_rate: f64) -> (Vec<f64>, Vec<
         let w = 0.54 - 0.46 * (2.0 * PI * i as f64 / denom).cos();
         val.re *= w;
     }
-    let mut planner = FftPlanner::<f64>::new();
-    planner.plan_fft_forward(n).process(&mut buffer);
+    let fft = get_cached_fft(n);
+    fft.process(&mut buffer);
 
     let n_half = n / 2;
     let bin = sample_rate / n as f64;

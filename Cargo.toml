@@ -79,7 +79,7 @@ rosc = "0.10"
 # scripts/build_brainflow_macos.sh or scripts/build_brainflow_linux.sh;
 # BRAINFLOW_LIB overrides only the native lib search path (not this path=).
 # --------------------------------------------------------------------
-brainflow = { path = "../brainflow/rust_package/brainflow" }
+brainflow = { path = "/Users/monomyth/github/brainflow/rust_package/brainflow" }
 
 # Native session archive (2.2.0). No arrow feature — SerializedFileWriter only.
 parquet = { version = "59.3.0", default-features = false }
@@ -110,3 +110,10 @@ OpenBCI text. Real-time visualization, filtering, and networking (LSL/OSC/UDP).
 [[bin]]
 name = "cyton-probe"
 path = "src/bin/cyton_probe.rs"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "fft_bench"
+harness = false

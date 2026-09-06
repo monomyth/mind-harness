@@ -173,6 +173,19 @@ impl DataSource for SyntheticBoard {
         }
     }
 
+    fn get_channel_data(&self, channel: usize, max_samples: usize) -> Vec<f64> {
+        if let Ok(guard) = self.latest_data.lock() {
+            let len = guard.len();
+            let start = len.saturating_sub(max_samples);
+            guard[start..]
+                .iter()
+                .map(|row| row.get(channel).copied().unwrap_or(0.0))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     fn get_frame_data(&self) -> Vec<Vec<f64>> {
         if let Ok(guard) = self.latest_data.lock() {
             guard.last().cloned().into_iter().collect()

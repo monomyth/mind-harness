@@ -490,6 +490,15 @@ impl DataSource for PlaybackBoard {
         playback_tail(src, self.playhead, max_samples)
     }
 
+    fn get_channel_data(&self, channel: usize, max_samples: usize) -> Vec<f64> {
+        let src = if self.filtered.is_empty() {
+            &self.samples
+        } else {
+            &self.filtered
+        };
+        playback_channel(src, self.playhead, channel, max_samples)
+    }
+
     fn get_raw_data(&self, max_samples: usize) -> Vec<Vec<f64>> {
         playback_tail(&self.samples, self.playhead, max_samples)
     }
@@ -635,6 +644,23 @@ fn playback_tail(src: &[Vec<f64>], playhead: usize, max_samples: usize) -> Vec<V
     let end = playhead + 1;
     let start = end.saturating_sub(max_samples);
     src[start..end.min(src.len())].to_vec()
+}
+
+fn playback_channel(
+    src: &[Vec<f64>],
+    playhead: usize,
+    channel: usize,
+    max_samples: usize,
+) -> Vec<f64> {
+    if src.is_empty() {
+        return vec![];
+    }
+    let end = playhead + 1;
+    let start = end.saturating_sub(max_samples);
+    src[start..end.min(src.len())]
+        .iter()
+        .map(|row| row.get(channel).copied().unwrap_or(0.0))
+        .collect()
 }
 
 #[cfg(test)]

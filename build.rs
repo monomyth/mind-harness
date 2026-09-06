@@ -31,16 +31,21 @@ fn main() {
     };
 
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let mac_absolute = PathBuf::from("/Users/monomyth/github/brainflow/rust_package/brainflow/lib");
     let sibling = manifest.join("../brainflow/rust_package/brainflow/lib");
 
     let lib = match std::env::var_os("BRAINFLOW_LIB") {
         Some(raw) => {
             let dir = PathBuf::from(raw);
-            require_libs(&dir, &required, true);
+            require_libs(&dir, &required, "BRAINFLOW_LIB");
             dir
         }
+        None if mac_absolute.exists() => {
+            require_libs(&mac_absolute, &required, "Mac absolute path");
+            mac_absolute
+        }
         None => {
-            require_libs(&sibling, &required, false);
+            require_libs(&sibling, &required, "sibling ../brainflow/rust_package/brainflow/lib");
             sibling
         }
     };
@@ -51,7 +56,6 @@ fn main() {
     }
     println!("cargo:rerun-if-changed={}", lib.display());
     println!("cargo:rustc-link-search=native={}", lib.display());
-    // Absolute rpath so DYLD_LIBRARY_PATH / LD_LIBRARY_PATH are not required.
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
 
     // Homebrew labstreaminglayer/tap/lsl installs lsl.framework (not -llsl).
@@ -77,7 +81,7 @@ fn main() {
     }
 }
 
-fn require_libs(dir: &Path, required: &[&str; 3], from_env: bool) {
+fn require_libs(dir: &Path, required: &[&str; 3], source: &str) {
     let missing: Vec<&str> = required
         .iter()
         .copied()
@@ -87,11 +91,6 @@ fn require_libs(dir: &Path, required: &[&str; 3], from_env: bool) {
         return;
     }
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| "?".into());
-    let source = if from_env {
-        "BRAINFLOW_LIB"
-    } else {
-        "sibling ../brainflow/rust_package/brainflow/lib"
-    };
     panic!(
         "BrainFlow native libraries not found for target OS `{target_os}`.\n\
          Looked in ({source}): {}\n\

@@ -65,6 +65,16 @@ pub trait DataSource: Send + Sync {
     /// Each inner Vec<f64> is one "row" (all channels for one sample).
     fn get_data(&self, max_samples: usize) -> Vec<Vec<f64>>;
 
+    /// Extract a single channel's data without cloning all channels.
+    /// Performance optimization for widgets that only need one channel (e.g., FFT, Spectrogram).
+    /// Default implementation falls back to `get_data` + column extraction.
+    fn get_channel_data(&self, channel: usize, max_samples: usize) -> Vec<f64> {
+        self.get_data(max_samples)
+            .iter()
+            .map(|row| row.get(channel).copied().unwrap_or(0.0))
+            .collect()
+    }
+
     /// Unfiltered board rows (Java `dataProcessingRawBuffer`). Used for ODF/BDF recording.
     fn get_raw_data(&self, max_samples: usize) -> Vec<Vec<f64>> {
         self.get_data(max_samples)
