@@ -209,14 +209,14 @@ impl ControlPanel {
                         // Content 400 + 20 side margins => outer ≈440.
                         ui.set_max_width(400.0);
                         ui.set_min_width(400.0);
+                        // Place lock: title + radios + Advanced + details as ONE centered block.
                         ui.vertical_centered(|ui| {
                             ui.label(
                                 egui::RichText::new("Data Source")
                                     .strong()
                                     .color(crate::theme::TEXT),
                             );
-                        });
-                        ui.add_space(6.0);
+                            ui.add_space(6.0);
 
                 // Always-on bare radios (not toggles). Order: Cyton Serial / Synthetic / Playback.
                 self.setup_radio(ui, DataSourceType::CytonSerial, "Cyton (Serial / USB Dongle)");
@@ -488,7 +488,8 @@ impl ControlPanel {
                         }
                     }
                 }
-            });
+                        }); // end vertical_centered (title + control stack)
+                    }); // end glass.show
 
             ui.add_space(24.0);
 
@@ -699,6 +700,19 @@ mod tests {
         assert!(
             cyton < synth && synth < play,
             "always-on radios must be Cyton Serial / Synthetic / Playback"
+        );
+        // Place lock: whole control stack (title + radios + Advanced + match) in one
+        // vertical_centered inside glass.show (outer hero column has its own).
+        let glass_at = draw_body.find("glass.show").expect("glass.show");
+        let after_glass = &draw_body[glass_at..];
+        let stack_vc = after_glass
+            .find("ui.vertical_centered(|ui| {")
+            .expect("vertical_centered inside glass");
+        let in_stack = &after_glass[stack_vc..];
+        assert!(
+            in_stack.find("Data Source").expect("title")
+                < in_stack.find("setup_radio").expect("radios"),
+            "Data Source title and radios must share one vertical_centered inside glass"
         );
     }
 }
