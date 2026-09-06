@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Run on isengard:  sudo bash /home/monomyth/install-mh-linux-deps.sh
+# Install Mind Harness + BrainFlow build/runtime deps on Arch Linux.
+# Tested package set used on isengard for the 2.2.48 Linux build path.
+# Other distros: map equivalents yourself; only Arch was verified.
+#
+# Usage (on the Linux host):
+#   sudo bash scripts/install-mh-linux-deps.sh
+#
+# Then build BrainFlow with scripts/build_brainflow_linux.sh and
+# cargo build --release --locked --bin mind-harness from a sibling layout.
 set -euo pipefail
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "Run: sudo bash $0"
@@ -19,4 +27,4 @@ pacman -Sy --needed --noconfirm \
   bluez-libs \
   mesa \
   wayland wayland-protocols
-echo "deps installed. Rust Performance can continue the BrainFlow + cargo build."
+echo "deps installed. Next: scripts/build_brainflow_linux.sh then cargo build --release --locked."

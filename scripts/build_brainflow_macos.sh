@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 #
-# Build BrainFlow C++ core + Rust binding for Apple Silicon (macOS arm64)
+# Build BrainFlow C++ core for Apple Silicon (macOS arm64)
 #
-# This script is part of the OpenBCI GUI Rust native port.
-# Run it once before `cargo build` in the Rust project.
+# Mind Harness expects a sibling BrainFlow checkout:
+#   parent/mind-harness  +  parent/brainflow
+# (On WayStation, parent/brainflow may be a symlink to ~/github/brainflow.)
+#
+# Run once before `cargo build` in mind-harness. Uses build/ + installed/
+# under the BrainFlow tree (macOS only). For Linux use
+# scripts/build_brainflow_linux.sh (separate build-linux/ dirs).
 #
 # Prerequisites:
 #   - Xcode + Command Line Tools
 #   - CMake (brew install cmake)
 #   - Rust toolchain
 #
-# After running this script successfully, the four key dylibs will be in:
-#   brainflow/installed/lib/
-#
-# Then you can point the Rust brainflow crate at them or copy them into
-# the Rust project's resources/ folder for bundling.
+# After success, key dylibs are under brainflow/installed/lib/. Stage or
+# copy them into brainflow/rust_package/brainflow/lib/ (binding default)
+# or set BRAINFLOW_LIB to that directory.
 #
 set -euo pipefail
 
@@ -22,7 +25,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Where we expect the brainflow source (sibling to this repo or user-specified)
-BRAINFLOW_SRC="${BRAINFLOW_SRC:-$HOME/github/brainflow}"
+DEFAULT_SIBLING="$(cd "$PROJECT_ROOT/.." && pwd)/brainflow"
+BRAINFLOW_SRC="${BRAINFLOW_SRC:-$DEFAULT_SIBLING}"
+# Legacy fallback if sibling missing:
+if [ ! -d "$BRAINFLOW_SRC" ] && [ -d "$HOME/github/brainflow" ]; then
+  BRAINFLOW_SRC="$HOME/github/brainflow"
+fi
 BUILD_DIR="$BRAINFLOW_SRC/build"
 INSTALL_DIR="$BRAINFLOW_SRC/installed"
 
@@ -36,8 +44,8 @@ echo
 
 if [ ! -d "$BRAINFLOW_SRC" ]; then
     echo "ERROR: BrainFlow source not found at $BRAINFLOW_SRC"
-    echo "Clone it first:"
-    echo "  git clone https://github.com/brainflow-dev/brainflow.git $BRAINFLOW_SRC"
+    echo "Clone it beside mind-harness (or set BRAINFLOW_SRC):"
+    echo "  git clone https://github.com/brainflow-dev/brainflow.git $DEFAULT_SIBLING"
     exit 1
 fi
 
@@ -74,18 +82,15 @@ echo "=============================================================="
 echo " NEXT STEPS FOR THE RUST GUI"
 echo "=============================================================="
 echo
-echo "1. The Rust brainflow binding needs to find these dylibs."
-echo "   Either:"
-echo "     a) Add rpath at link time (recommended for app bundle), or"
-echo "     b) Copy the four dylibs into openbci-gui-rust/resources/"
+echo "1. Stage dylibs into the Rust binding lib dir if needed:"
+echo "     mkdir -p \"$BRAINFLOW_SRC/rust_package/brainflow/lib\""
+echo "     cp \"$INSTALL_DIR\"/lib/libBoardController.dylib \"$BRAINFLOW_SRC/rust_package/brainflow/lib/\""
+echo "     cp \"$INSTALL_DIR\"/lib/libDataHandler.dylib \"$BRAINFLOW_SRC/rust_package/brainflow/lib/\""
+echo "     cp \"$INSTALL_DIR\"/lib/libMLModule.dylib \"$BRAINFLOW_SRC/rust_package/brainflow/lib/\""
 echo
-echo "2. Then in openbci-gui-rust/, uncomment the brainflow dependency"
-echo "   in Cargo.toml and run:"
+echo "2. From mind-harness beside brainflow:"
+echo "     cargo build --release --locked --bin mind-harness"
+echo "   Or override: BRAINFLOW_LIB=... cargo build --release --locked"
 echo
-echo "     cargo build --features generate_binding"
-echo
-echo "3. The binding will generate brainflow.rs and link the C++ libs."
-echo
-echo "For more details see the official docs:"
-echo "  https://brainflow.readthedocs.io/en/stable/BuildBrainFlow.html#rust"
+echo "Docs: https://brainflow.readthedocs.io/en/stable/BuildBrainFlow.html#rust"
 echo "=============================================================="
