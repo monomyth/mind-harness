@@ -65,6 +65,38 @@ pub struct SerialPortInfo {
     pub description: String,
 }
 
+/// USB-serial that is likely an OpenBCI FTDI dongle (not Bluetooth / debug consoles).
+pub fn looks_like_cyton_dongle(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    if n.contains("bluetooth") || n.contains("debug") || n.contains("incoming") {
+        return false;
+    }
+    n.contains("usbserial")
+        || n.contains("ttyusb")
+        || n.contains("ttyacm")
+        || n.contains("usbmodem")
+}
+
+/// Prefer a still-plugged last port, then cu.usbserial / ttyUSB, then usbmodem.
+pub fn pick_cyton_port(ports: &[SerialPortInfo], preferred: Option<&str>) -> Option<String> {
+    if let Some(want) = preferred {
+        if ports.iter().any(|p| p.port_name == want) {
+            return Some(want.to_string());
+        }
+    }
+    let mut cands: Vec<&SerialPortInfo> = ports
+        .iter()
+        .filter(|p| looks_like_cyton_dongle(&p.port_name))
+        .collect();
+    cands.sort_by_key(|p| {
+        let n = p.port_name.to_ascii_lowercase();
+        let tty = n.contains("/tty.");
+        let usbserial = n.contains("usbserial") || n.contains("ttyusb") || n.contains("ttyacm");
+        (tty, !usbserial, p.port_name.clone())
+    });
+    cands.first().map(|p| p.port_name.clone())
+}
+
 pub struct ControlPanel {
     pub selected_source: DataSourceType,
     pub synthetic_channels: usize,
@@ -104,6 +136,10 @@ impl ControlPanel {
         };
         panel.refresh_serial_ports();
         panel
+    }
+
+    pub fn pick_present_cyton_port(&self, preferred: Option<&str>) -> Option<String> {
+        pick_cyton_port(&self.serial_ports, preferred)
     }
 
     pub fn refresh_serial_ports(&mut self) {
@@ -584,6 +620,34 @@ impl ControlPanel {
 #[cfg(test)]
 mod tests {
     use super::DataSourceType;
+
+    #[test]
+    fn pick_cyton_port_prefers_cu_usbserial() {
+        use super::{pick_cyton_port, SerialPortInfo};
+        let ports = vec![
+            SerialPortInfo {
+                port_name: "/dev/cu.Bluetooth-Incoming-Port".into(),
+                description: "Bluetooth".into(),
+            },
+            SerialPortInfo {
+                port_name: "/dev/tty.usbserial-DN00967F".into(),
+                description: "USB".into(),
+            },
+            SerialPortInfo {
+                port_name: "/dev/cu.usbserial-DN00967F".into(),
+                description: "USB".into(),
+            },
+        ];
+        assert_eq!(
+            pick_cyton_port(&ports, None).as_deref(),
+            Some("/dev/cu.usbserial-DN00967F")
+        );
+        assert_eq!(
+            pick_cyton_port(&ports, Some("/dev/cu.usbserial-DN00967F")).as_deref(),
+            Some("/dev/cu.usbserial-DN00967F")
+        );
+        assert!(pick_cyton_port(&[], None).is_none());
+    }
 
     #[test]
     fn play_is_finished_take_only() {

@@ -47,7 +47,7 @@ pub fn run() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([980.0, 580.0])
-            .with_title(format!("Mind Harness v{} — Session Setup", env!("CARGO_PKG_VERSION")))
+            .with_title(format!("Mind Harness v{}", env!("CARGO_PKG_VERSION")))
             .with_icon(icon)
             .with_decorations(true)
             .with_transparent(false),

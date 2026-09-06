@@ -46,7 +46,6 @@ enum ConnectionState {
         receiver: oneshot::Receiver<Result<BrainFlowBoard, String>>,
         status_message: String,
     },
-    Failed(String),
 }
 
 /// Phase 7 Reconnect support (plan.md Phase 7 polish / step 8).
@@ -211,6 +210,10 @@ pub struct OpenBciGuiApp {
     window_empty: u64,
     starve: crate::starve::StarveLog,
     live_autostart_used: bool,
+    /// True when this session is BrainFlow synthetic because no dongle (or Cyton failed).
+    simulation_notice: bool,
+    device_picker_open: bool,
+    pending_device: Option<(DataSourceType, usize, Option<String>)>,
 
     // Last marker for status bar
     last_marker: String,
@@ -337,6 +340,9 @@ impl OpenBciGuiApp {
             window_empty: 0,
             starve: crate::starve::StarveLog::default(),
             live_autostart_used: false,
+            simulation_notice: false,
+            device_picker_open: false,
+            pending_device: None,
 
             last_marker: String::new(),
 
@@ -889,20 +895,21 @@ impl OpenBciGuiApp {
         self.populate_widgets_for_new_session();
         self.populate_tool_widgets();
 
-        // Show Control Panel again. A just-finished take is armed as Playback so Play is one click.
         self.control_panel.show = true;
+        self.live_autostart_used = false;
+        self.simulation_notice = false;
+        self.device_picker_open = false;
         self.system_mode = SystemMode::PreInit;
         if let Some(ref p) = self.last_recording_path {
             if p.exists() {
-                self.control_panel.selected_source = crate::control_panel::DataSourceType::Playback;
                 self.control_panel.playback_file = Some(p.display().to_string());
             }
         }
 
         self.event_log
-            .log_system("Session ended — returned to Control Panel (all widgets reset)");
+            .log_system("Session ended — next frame autostarts dongle or simulation");
 
-        tracing::info!("Session ended — returned to Control Panel");
+        tracing::info!("Session ended — autostart dongle or synthetic");
     }
 
     /// Open the recording file on the writer thread. Never BoardShim / ingest RPC.
@@ -2231,8 +2238,28 @@ impl eframe::App for OpenBciGuiApp {
                     tracing::error!("Hardware connection failed: {}", err);
                     self.event_log
                         .log_error(&format!("Connection failed: {}", err));
-                    self.connection_state = ConnectionState::Failed(err.clone());
-                    // Stay in PreInit so user can try again or choose Synthetic
+                    self.connection_state = ConnectionState::Idle;
+                    self.simulation_notice = true;
+                    self.device_picker_open = true;
+                    self.connection_status =
+                        "Couldn't open the board. Running a BrainFlow simulation.".to_string();
+                    let chans = self.control_panel.synthetic_channels.max(1);
+                    let mut board = BrainFlowBoard::synthetic(chans);
+                    let _ = board.initialize();
+                    self.board = Some(Box::new(board) as Box<dyn DataSource>);
+                    if self.record_destination.wants_sd() {
+                        self.streaming = false;
+                    } else if let Some(ref mut b) = self.board {
+                        if let Err(e) = b.start_streaming() {
+                            tracing::error!("Failed to auto-start streaming on Synthetic: {}", e);
+                        } else {
+                            self.streaming = true;
+                        }
+                    }
+                    self.event_log
+                        .log_connection("Connected to BrainFlow Synthetic board (fallback)");
+                    self.save_last_connection();
+                    self.enter_running_session();
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {
                     // Still connecting — show a nice connecting screen
@@ -2247,11 +2274,30 @@ impl eframe::App for OpenBciGuiApp {
                             ui.add_space(30.0);
                             if ui.button("Cancel").clicked() {
                                 self.connection_state = ConnectionState::Idle;
-                                self.connection_status = "Connection cancelled".to_string();
+                                self.simulation_notice = true;
+                                self.device_picker_open = true;
+                                self.connection_status =
+                                    "Connection cancelled. Running a BrainFlow simulation.".to_string();
+                                let chans = self.control_panel.synthetic_channels.max(1);
+                                let mut board = BrainFlowBoard::synthetic(chans);
+                                let _ = board.initialize();
+                                self.board = Some(Box::new(board) as Box<dyn DataSource>);
+                                if let Some(ref mut b) = self.board {
+                                    if b.start_streaming().is_ok() {
+                                        self.streaming = true;
+                                    }
+                                }
+                                self.event_log.log_connection(
+                                    "Connected to BrainFlow Synthetic board (cancelled hardware)",
+                                );
+                                self.save_last_connection();
+                                self.enter_running_session();
                             }
                         });
                     });
-                    return; // Don't draw the normal control panel while connecting
+                    if matches!(self.connection_state, ConnectionState::InProgress { .. }) {
+                        return;
+                    }
                 }
                 Err(oneshot::error::TryRecvError::Closed) => {
                     self.connection_status = "Connection channel closed unexpectedly".to_string();
@@ -2261,13 +2307,11 @@ impl eframe::App for OpenBciGuiApp {
         }
 
         if setup_panel_active(self.system_mode) {
-            // === Control Panel (PreInit) ===
-            egui::CentralPanel::default().show(ctx, |ui| {
-                let live_auto = if !self.live_autostart_used {
+            let live_auto = self.pending_device.take().or_else(|| if !self.live_autostart_used {
+                    self.live_autostart_used = true;
                     if let Ok(port) = std::env::var("OPENBCI_LIVE_SERIAL") {
                         let port = port.trim().to_string();
                         if !port.is_empty() {
-                            self.live_autostart_used = true;
                             tracing::info!("OPENBCI_LIVE_SERIAL start on {port}");
                             Some((
                                 crate::control_panel::DataSourceType::CytonSerial,
@@ -2280,27 +2324,51 @@ impl eframe::App for OpenBciGuiApp {
                     } else if std::env::var("OPENBCI_CROP").is_ok()
                         && std::env::var("OPENBCI_SYNTHETIC").is_ok()
                     {
-                        self.live_autostart_used = true;
+                        self.simulation_notice = false;
                         Some((
                             crate::control_panel::DataSourceType::Synthetic,
                             8usize,
                             None,
                         ))
                     } else {
-                        None
+                        self.control_panel.refresh_serial_ports();
+                        let preferred = self
+                            .control_panel
+                            .selected_serial_port
+                            .and_then(|i| self.control_panel.serial_ports.get(i))
+                            .map(|p| p.port_name.clone());
+                        if let Some(port) = self
+                            .control_panel
+                            .pick_present_cyton_port(preferred.as_deref())
+                        {
+                            tracing::info!("Autostart Cyton on {port}");
+                            Some((
+                                crate::control_panel::DataSourceType::CytonSerial,
+                                self.control_panel.cyton_channels.max(8),
+                                Some(port),
+                            ))
+                        } else {
+                            self.simulation_notice = true;
+                            tracing::info!("No Cyton dongle — BrainFlow synthetic");
+                            Some((
+                                crate::control_panel::DataSourceType::Synthetic,
+                                self.control_panel.synthetic_channels.max(1),
+                                None,
+                            ))
+                        }
                     }
                 } else {
                     None
-                };
-                if let Some((source, chans, serial_port)) =
-                    live_auto.or_else(|| self.control_panel.draw(ui))
-                {
-                    // User clicked "Start Session" — clear any previous Failed state (plan.md Phase 7 Reconnect)
-                    if matches!(self.connection_state, ConnectionState::Failed(_)) {
-                        self.connection_state = ConnectionState::Idle;
-                        self.connection_status.clear();
+                });
+                if let Some((source, chans, serial_port)) = live_auto {
+                    self.control_panel.selected_source = source;
+                    if source == DataSourceType::Synthetic {
+                        if std::env::var("OPENBCI_CROP").is_err() {
+                            self.simulation_notice = true;
+                        }
+                    } else {
+                        self.simulation_notice = false;
                     }
-                    // User clicked "Start Session"
                     match source {
                         DataSourceType::Synthetic => {
                             self.connection_status = "Using BrainFlow Synthetic Board".to_string();
@@ -2445,104 +2513,6 @@ impl eframe::App for OpenBciGuiApp {
                         }
                     }
                 }
-
-                // Phase 7 Reconnect banner
-                // The button restores the last good params (port, chans, file) into the control panel dropdowns
-                // and for instant sources (Synthetic/Playback) performs a true 1-click reconnect. Cyton gets
-                // the dropdowns fixed + a hint to hit the normal Start (the background thread path is not duped).
-                // We extract the needed data *before* the egui closure to satisfy the borrow checker.
-                let reconnect_info: Option<(String, Option<LastConnectionParams>)> =
-                    if let ConnectionState::Failed(ref m) = self.connection_state {
-                        Some((m.clone(), self.last_connection.clone()))
-                    } else {
-                        None
-                    };
-                if let Some((err_msg, last_params)) = reconnect_info {
-                    ui.add_space(10.0);
-                    egui::Frame::NONE
-                        .fill(egui::Color32::from_rgb(55, 25, 25))
-                        .inner_margin(10.0)
-                        .show(ui, |ui| {
-                            ui.vertical_centered(|ui| {
-                                ui.colored_label(egui::Color32::from_rgb(255, 180, 180), "Couldn't open the board");
-                                let _ = &err_msg;
-                                ui.add_space(6.0);
-                                if let Some(ref params) = last_params {
-                                    let label = match params.source {
-                                        DataSourceType::CytonSerial => format!("Cyton{} on {}", if params.channels >= 16 { " + Daisy" } else { "" }, params.serial_port_name.as_deref().unwrap_or("selected port")),
-                                        DataSourceType::CytonWifi => format!("Cyton WiFi {}", self.control_panel.cyton_wifi_ip),
-                                        DataSourceType::Synthetic => format!("Synthetic ({} ch)", params.channels),
-                                        DataSourceType::Playback => "the same Playback file".to_string(),
-                                        DataSourceType::GanglionNative => {
-                                            format!("Ganglion {}", self.control_panel.ganglion_device_id)
-                                        }
-                                    };
-                                    if ui.button(egui::RichText::new(format!("🔄 Reconnect using {}", label)).strong()).clicked() {
-                                        // Restore exact previous choices into the visible control panel
-                                        self.control_panel.selected_source = params.source;
-                                        if let Some(ref name) = params.serial_port_name {
-                                            if let Some(idx) = self.control_panel.serial_ports.iter().position(|p| &p.port_name == name) {
-                                                self.control_panel.selected_serial_port = Some(idx);
-                                            }
-                                        }
-                                        match params.source {
-                                            DataSourceType::Synthetic => self.control_panel.synthetic_channels = params.channels,
-                                            DataSourceType::CytonSerial | DataSourceType::CytonWifi => self.control_panel.cyton_channels = params.channels,
-                                            _ => {}
-                                        }
-                                        self.control_panel.playback_file = params.playback_file.clone();
-
-                                        self.connection_status = "Reconnect settings restored".into();
-                                        self.event_log.log_system(&format!("Reconnect used — restored {:?}", params.source));
-
-                                        // True 1-click for the paths that don't need background thread
-                                        if params.source == DataSourceType::Synthetic {
-                                            self.connection_status = "Using BrainFlow Synthetic Board (Reconnect)".to_string();
-                                            let mut board = BrainFlowBoard::synthetic(params.channels);
-                                            let _ = board.initialize();
-                                            self.board = Some(Box::new(board) as Box<dyn DataSource>);
-                                            if self.record_destination.wants_sd() {
-                                                self.streaming = false;
-                                            } else if let Some(ref mut b) = self.board {
-                                                if let Err(e) = b.start_streaming() {
-                                                    tracing::error!("Reconnect synth: {}", e);
-                                                } else {
-                                                    self.streaming = true;
-                                                }
-                                            }
-                                            self.event_log.log_connection("Connected to Synthetic (Reconnect)");
-                                            self.save_last_connection();
-                                            self.enter_running_session();
-                                            self.connection_state = ConnectionState::Idle;
-                                        } else if params.source == DataSourceType::Playback {
-                                            if let Some(ref f) = params.playback_file {
-                                                if let Ok(mut pb) = crate::board::playback::PlaybackBoard::from_file(std::path::Path::new(f)) {
-                                                    let _ = pb.initialize();
-                                                    if let Err(e) = pb.start_streaming() { tracing::error!("Reconnect pb: {}", e);} else { self.streaming = true; }
-                                                    self.board = Some(Box::new(pb) as Box<dyn DataSource>);
-                                                    self.connection_status = format!("Playback: {} (Reconnect)", f);
-                                                    self.event_log.log_connection(&format!(
-                                                        "Playback · {}",
-                                                        std::path::Path::new(f)
-                                                            .file_name()
-                                                            .and_then(|s| s.to_str())
-                                                            .unwrap_or("file"),
-                                                    ));
-                                                    self.save_last_connection();
-                                                    self.enter_running_session();
-                                                    self.connection_state = ConnectionState::Idle;
-                                                }
-                                            }
-                                        } else {
-                                            // Cyton or other: dropdowns are now correct; user clicks the normal Start Session (green) button.
-                                            self.connection_status = "Panel restored — click the big Start Session button to retry".to_string();
-                                        }
-                                    }
-                                }
-                            });
-                        });
-                }
-            });
             // Session may have started this frame (Synthetic / Playback). Fall through to transport.
             if setup_panel_active(self.system_mode) {
                 ctx.request_repaint();
@@ -2985,6 +2955,20 @@ impl eframe::App for OpenBciGuiApp {
                         {
                             self.end_session();
                         }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Device").color(theme::TEXT),
+                                )
+                                .fill(theme::PANEL)
+                                .stroke(theme::hairline())
+                                .min_size(egui::vec2(56.0, 22.0)),
+                            )
+                            .clicked()
+                        {
+                            self.device_picker_open = !self.device_picker_open;
+                            self.control_panel.refresh_serial_ports();
+                        }
                         ui.small(
                             egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                                 .color(theme::HAIRLINE),
@@ -2992,6 +2976,75 @@ impl eframe::App for OpenBciGuiApp {
                     });
                 });
             });
+
+        if self.simulation_notice && self.system_mode == SystemMode::PostInit {
+            egui::TopBottomPanel::top("sim_notice")
+                .exact_height(36.0)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(0x1a, 0x32, 0x30))
+                        .inner_margin(egui::Margin::symmetric(10, 6)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "Simulation — BrainFlow synthetic. No Cyton dongle. Choose a device to record.",
+                            )
+                            .color(theme::SETUP_CYAN),
+                        );
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Choose device")
+                                        .color(theme::TEXT)
+                                        .strong(),
+                                )
+                                .fill(theme::PANEL)
+                                .stroke(egui::Stroke::new(1.0_f32, theme::SETUP_CYAN)),
+                            )
+                            .clicked()
+                        {
+                            self.device_picker_open = true;
+                            self.control_panel.refresh_serial_ports();
+                        }
+                    });
+                });
+        }
+
+        if self.device_picker_open {
+            let mut open = true;
+            egui::Window::new("Choose device")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    if let Some((source, chans, serial_port)) = self.control_panel.draw(ui) {
+                        self.pending_device = Some((source, chans, serial_port));
+                        self.device_picker_open = false;
+                    }
+                });
+            if !open {
+                self.device_picker_open = false;
+            }
+        }
+
+        if let Some((source, chans, serial_port)) = self.pending_device.take() {
+            if self.board.is_some() {
+                if let Some(mut board) = self.board.take() {
+                    if board.is_streaming() {
+                        let _ = board.stop_streaming();
+                    }
+                    let _ = board.uninitialize();
+                }
+                self.streaming = false;
+            }
+            self.simulation_notice = source == DataSourceType::Synthetic;
+            self.live_autostart_used = true;
+            self.system_mode = SystemMode::PreInit;
+            self.pending_device = Some((source, chans, serial_port));
+        }
 
         if !self.tool_widgets.is_empty() {
             egui::SidePanel::right("tool_panel")
@@ -4155,7 +4208,7 @@ mod properties_rack_tests {
 
     #[test]
     fn version_is_semver() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.54");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.55");
     }
 
     #[test]
