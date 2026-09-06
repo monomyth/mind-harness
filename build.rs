@@ -14,19 +14,19 @@ fn main() {
         Some(manifest.join("../brainflow/rust_package/brainflow/lib")),
     ];
 
-    let lib = candidates
+    // Allow compilation without real BrainFlow dylibs (mock mode for benchmarks/tests)
+    if let Some(lib) = candidates
         .into_iter()
         .flatten()
-        .find(|p| p.join("libBoardController.dylib").exists())
-        .expect(
-            "BrainFlow dylibs not found. Set BRAINFLOW_LIB to the directory that contains \
-             libBoardController.dylib (usually brainflow/rust_package/brainflow/lib).",
-        );
-
-    let lib = lib.canonicalize().unwrap_or(lib);
-    println!("cargo:rerun-if-changed={}", lib.display());
-    println!("cargo:rustc-link-search=native={}", lib.display());
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
+        .find(|p| p.join("libBoardController.dylib").exists() || p.join("libBoardController.so").exists())
+    {
+        let lib = lib.canonicalize().unwrap_or(lib);
+        println!("cargo:rerun-if-changed={}", lib.display());
+        println!("cargo:rustc-link-search=native={}", lib.display());
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
+    } else {
+        println!("cargo:warning=BrainFlow dylibs not found; using mock brainflow (benchmarks only)");
+    }
 
     // Homebrew labstreaminglayer/tap/lsl installs lsl.framework (not -llsl).
     let fw_candidates = [

@@ -77,7 +77,7 @@ rosc = "0.10"
 # in brainflow/rust_package/brainflow/src/ffi/*.rs can be committed and
 # future builds can drop the feature for faster iteration.
 # --------------------------------------------------------------------
-brainflow = { path = "/Users/monomyth/github/brainflow/rust_package/brainflow" }  # pre-generated FFI matches the arm64 dylibs in the binding's lib/ folder
+brainflow = { path = "brainflow-mock" }  # mock for cloud VM compilation
 
 # Native session archive (2.2.0). No arrow feature — SerializedFileWriter only.
 parquet = { version = "59.3.0", default-features = false }
@@ -108,3 +108,10 @@ OpenBCI text. Real-time visualization, filtering, and networking (LSL/OSC/UDP).
 [[bin]]
 name = "cyton-probe"
 path = "src/bin/cyton_probe.rs"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "fft_bench"
+harness = false
