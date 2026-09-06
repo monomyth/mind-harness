@@ -451,6 +451,10 @@ impl DataSource for BrainFlowBoard {
         tail_locked(&self.filtered_data, max_samples)
     }
 
+    fn get_channel_data(&self, channel: usize, max_samples: usize) -> Vec<f64> {
+        channel_from_locked(&self.filtered_data, channel, max_samples)
+    }
+
     fn get_raw_data(&self, max_samples: usize) -> Vec<Vec<f64>> {
         tail_locked(&self.latest_data, max_samples)
     }
@@ -733,6 +737,19 @@ fn tail_locked(buf: &Mutex<Vec<Vec<f64>>>, max_samples: usize) -> Vec<Vec<f64>> 
         let len = guard.len();
         let start = len.saturating_sub(max_samples);
         guard[start..].to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+fn channel_from_locked(buf: &Mutex<Vec<Vec<f64>>>, channel: usize, max_samples: usize) -> Vec<f64> {
+    if let Ok(guard) = buf.lock() {
+        let len = guard.len();
+        let start = len.saturating_sub(max_samples);
+        guard[start..]
+            .iter()
+            .map(|row| row.get(channel).copied().unwrap_or(0.0))
+            .collect()
     } else {
         Vec::new()
     }
