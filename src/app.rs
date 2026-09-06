@@ -1568,53 +1568,8 @@ impl OpenBciGuiApp {
                             );
                         });
                 }
-                // Cyton on-board SD write (card in the headset), separate from local Record.
-                let can_sd = self
-                    .board
-                    .as_ref()
-                    .is_some_and(|b| b.supports_cyton_sd_write());
-                if can_sd {
-                    if self.cyton_sd_active {
-                        if ui
-                            .add(
-                                egui::Button::new("Stop SD")
-                                    .fill(theme::STOP)
-                                    .min_size(egui::vec2(64.0, 22.0)),
-                            )
-                            .on_hover_text("Close the file on the Cyton SD card (command j)")
-                            .clicked()
-                        {
-                            self.stop_cyton_sd_write_if_active();
-                        }
-                    } else {
-                        egui::ComboBox::from_id_salt("cyton_sd_duration")
-                            .selected_text(self.cyton_sd_duration.label())
-                            .width(72.0)
-                            .show_ui(ui, |ui| {
-                                for d in crate::board::cyton_sd_write::CytonSdDuration::ALL {
-                                    ui.selectable_value(
-                                        &mut self.cyton_sd_duration,
-                                        d,
-                                        d.label(),
-                                    );
-                                }
-                            });
-                        if ui
-                            .add(
-                                egui::Button::new("SD Write")
-                                    .fill(theme::PANEL)
-                                    .stroke(theme::hairline())
-                                    .min_size(egui::vec2(72.0, 22.0)),
-                            )
-                            .on_hover_text(
-                                "Start Cyton on-board SD logging for the chosen length. Best before Start stream. Needs a compatible SD card in the board.",
-                            )
-                            .clicked()
-                        {
-                            self.start_cyton_sd_write();
-                        }
-                    }
-                }
+                // Cyton SD Write UI parked — Interface picks placement (no transport clutter).
+                // Board helpers: start_cyton_sd_write / stop_cyton_sd_write_if_active.
             }
             if !self.data_logger.is_logging() {
                 // Format is chosen in a prompt when Export is pressed — not chrome.
@@ -4106,8 +4061,12 @@ mod properties_rack_tests {
             "End must be far right"
         );
         assert!(
-            src.contains("Cyton on-board SD write"),
-            "Cyton SD Write control must exist"
+            src.contains("start_cyton_sd_write"),
+            "Cyton SD write board helpers must exist"
+        );
+        assert!(
+            src.contains("Cyton SD Write UI parked"),
+            "SD Write chrome waits on Interface placement"
         );
         assert!(
             src.contains("Stop session stream also stops Record"),
