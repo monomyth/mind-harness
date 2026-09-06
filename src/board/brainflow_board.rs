@@ -702,6 +702,27 @@ impl DataSource for BrainFlowBoard {
                 | BoardIds::CytonDaisyWifiBoard
         )
     }
+
+    fn supports_cyton_sd_write(&self) -> bool {
+        self.supports_aux_widgets()
+    }
+
+    fn cyton_sd_write_start(
+        &mut self,
+        duration: crate::board::cyton_sd_write::CytonSdDuration,
+    ) -> Result<(), BoardError> {
+        if !self.supports_cyton_sd_write() {
+            return Err(BoardError::Io("Cyton SD write is Cyton-only".into()));
+        }
+        self.config_board_str(duration.start_cmd())
+    }
+
+    fn cyton_sd_write_stop(&mut self) -> Result<(), BoardError> {
+        if !self.supports_cyton_sd_write() {
+            return Err(BoardError::Io("Cyton SD write is Cyton-only".into()));
+        }
+        self.config_board_str(crate::board::cyton_sd_write::CytonSdDuration::stop_cmd())
+    }
 }
 
 fn tail_locked(buf: &Mutex<Vec<Vec<f64>>>, max_samples: usize) -> Vec<Vec<f64>> {

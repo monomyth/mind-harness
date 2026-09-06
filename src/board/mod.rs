@@ -17,6 +17,7 @@ pub mod impedance;
 pub mod ingest;
 pub mod playback;
 pub mod sd_card;
+pub mod cyton_sd_write;
 pub mod synthetic;
 
 /// The core contract that every data source (real board or synthetic) must implement.
@@ -208,6 +209,22 @@ pub trait DataSource: Send + Sync {
     /// Analog / Digital / Pulse widgets. False on Synthetic (no fake pulse).
     fn supports_aux_widgets(&self) -> bool {
         false
+    }
+
+    /// Cyton can log a hex dump onto its own SD card (SDK A–L / j).
+    fn supports_cyton_sd_write(&self) -> bool {
+        false
+    }
+
+    fn cyton_sd_write_start(
+        &mut self,
+        _duration: cyton_sd_write::CytonSdDuration,
+    ) -> Result<(), BoardError> {
+        Err(BoardError::Io("Cyton SD write not supported".into()))
+    }
+
+    fn cyton_sd_write_stop(&mut self) -> Result<(), BoardError> {
+        Err(BoardError::Io("Cyton SD write not supported".into()))
     }
 
     fn session_markers(&self) -> &[crate::markers::MarkerEvent] {
