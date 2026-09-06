@@ -484,14 +484,14 @@ impl ControlPanel {
                 ui.add_space(8.0);
             }
 
-            // Readable Start (Eugene/Interface): solid cyan + near-white label.
+            // Quiet studio Start: PANEL fill + SETUP_CYAN label.
             let start = ui.add(
                 egui::Button::new(
                     egui::RichText::new(self.selected_source.go_label())
-                        .color(egui::Color32::from_rgb(0xf2, 0xf7, 0xf8))
+                        .color(crate::theme::SETUP_CYAN)
                         .strong(),
                 )
-                .fill(crate::theme::SETUP_CYAN)
+                .fill(crate::theme::PANEL)
                 .stroke(egui::Stroke::new(1.0_f32, crate::theme::SETUP_CYAN))
                 .corner_radius(8.0)
                 .min_size(egui::vec2(200.0, 36.0)),
@@ -649,10 +649,11 @@ mod tests {
             "glass card and selected radio must use cyan rim"
         );
         assert!(
-            draw_body.contains(".fill(crate::theme::SETUP_CYAN)")
-                && draw_body.contains("0xf2, 0xf7, 0xf8")
-                && !draw_body.contains("SETUP_NEON"),
-            "Start Session must use solid SETUP_CYAN + near-white label, not SETUP_NEON"
+            draw_body.contains(".fill(crate::theme::PANEL)")
+                && draw_body.contains(".color(crate::theme::SETUP_CYAN)")
+                && !draw_body.contains("SETUP_NEON")
+                && !draw_body.contains("0xf2, 0xf7, 0xf8"),
+            "Start Session must use PANEL fill + SETUP_CYAN label, not SETUP_NEON"
         );
         assert!(
             draw_body.contains("Advanced"),
