@@ -714,7 +714,10 @@ impl DataSource for BrainFlowBoard {
         if !self.supports_cyton_sd_write() {
             return Err(BoardError::Io("Cyton SD write is Cyton-only".into()));
         }
-        self.config_board_str(duration.start_cmd())
+        let ingest = self.ingest.as_ref().ok_or(BoardError::NotInitialized)?;
+        let resp = ingest.config_response(duration.start_cmd())?;
+        crate::board::cyton_sd_write::sd_write_confirmed(&resp).map_err(BoardError::Io)?;
+        Ok(())
     }
 
     fn cyton_sd_write_stop(&mut self) -> Result<(), BoardError> {

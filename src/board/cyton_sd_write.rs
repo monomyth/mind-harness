@@ -92,6 +92,41 @@ impl CytonSdDuration {
     }
 }
 
+/// Fail-closed: board must confirm SD start. Empty or failure text = not recording.
+pub fn sd_write_confirmed(response: &str) -> Result<(), String> {
+    let trimmed = response.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    const FAIL: &[&str] = &[
+        "fail",
+        "error",
+        "couldn",
+        "could not",
+        "no card",
+        "no sd",
+        "init failure",
+        "sd init",
+        "card not",
+        "not found",
+        "missing",
+    ];
+    for needle in FAIL {
+        if lower.contains(needle) {
+            let msg = if trimmed.is_empty() {
+                "SD write failed — check the card".to_string()
+            } else {
+                format!("SD write failed — {trimmed}")
+            };
+            return Err(msg);
+        }
+    }
+    if trimmed.is_empty() {
+        return Err(
+            "Couldn't confirm SD write — check the card (best before Start)".into(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +143,22 @@ mod tests {
         assert_eq!(CytonSdDuration::Hour12.start_cmd(), "K");
         assert_eq!(CytonSdDuration::Hour24.start_cmd(), "L");
         assert_eq!(CytonSdDuration::stop_cmd(), "j");
+    }
+
+    #[test]
+    fn empty_response_is_not_confirmed() {
+        assert!(sd_write_confirmed("").is_err());
+        assert!(sd_write_confirmed("   ").is_err());
+    }
+
+    #[test]
+    fn failure_text_is_not_confirmed() {
+        assert!(sd_write_confirmed("SD init failure").is_err());
+        assert!(sd_write_confirmed("Could not create file").is_err());
+    }
+
+    #[test]
+    fn success_text_is_confirmed() {
+        assert!(sd_write_confirmed("The new filename is OBCI_01.TXT").is_ok());
     }
 }

@@ -193,6 +193,8 @@ pub struct OpenBciGuiApp {
     export_prompt_open: bool,
     /// Cyton on-board SD logging armed / active (SDK file on the card).
     cyton_sd_active: bool,
+    /// Fail-closed warn when SD destination requested but board did not confirm.
+    cyton_sd_warn: Option<String>,
     cyton_sd_duration: crate::board::cyton_sd_write::CytonSdDuration,
     record_destination: crate::board::cyton_sd_write::RecordDestination,
     scrubbing: bool,
@@ -322,6 +324,7 @@ impl OpenBciGuiApp {
             export_kind: crate::export::ExportKind::Bdf,
             export_prompt_open: false,
             cyton_sd_active: false,
+            cyton_sd_warn: None,
             cyton_sd_duration: crate::board::cyton_sd_write::CytonSdDuration::Min5,
             record_destination: crate::board::cyton_sd_write::RecordDestination::Local,
             scrubbing: false,
@@ -971,31 +974,43 @@ impl OpenBciGuiApp {
         self.cyton_sd_active = false;
     }
 
-    fn start_cyton_sd_write(&mut self) {
+    fn start_cyton_sd_write(&mut self) -> bool {
         let Some(ref mut b) = self.board else {
-            self.event_log
-                .log_error("Cyton SD write: start a Cyton session first");
-            return;
+            let msg = "SD write failed — start a Cyton session first".to_string();
+            self.cyton_sd_warn = Some(msg.clone());
+            self.cyton_sd_active = false;
+            self.event_log.log_error(&msg);
+            self.connection_status = msg;
+            return false;
         };
         if !b.supports_cyton_sd_write() {
-            self.event_log
-                .log_error("Cyton SD write: this board cannot log to SD");
-            return;
+            let msg = "SD write failed — this board cannot log to SD".to_string();
+            self.cyton_sd_warn = Some(msg.clone());
+            self.cyton_sd_active = false;
+            self.event_log.log_error(&msg);
+            self.connection_status = msg;
+            return false;
         }
         let dur = self.cyton_sd_duration;
         match b.cyton_sd_write_start(dur) {
             Ok(()) => {
                 self.cyton_sd_active = true;
+                self.cyton_sd_warn = None;
                 self.event_log.log_recording(&format!(
                     "Cyton SD write started ({})",
                     dur.label()
                 ));
-                self.connection_status =
-                    format!("Cyton SD · {}", dur.label());
+                self.connection_status = format!("Recording · SD · {}", dur.label());
+                true
             }
             Err(e) => {
-                self.event_log
-                    .log_error(&format!("Cyton SD start failed: {e}"));
+                // Fail closed — never pretend SD is recording.
+                self.cyton_sd_active = false;
+                let msg = format!("{e}");
+                self.cyton_sd_warn = Some(msg.clone());
+                self.event_log.log_error(&format!("Cyton SD start failed: {msg}"));
+                self.connection_status = msg;
+                false
             }
         }
     }
@@ -1004,24 +1019,19 @@ impl OpenBciGuiApp {
         self.data_logger.is_logging() || self.cyton_sd_active
     }
 
-    /// One transport Record — uses Hardware Local|SD|Both.
+    /// One transport Record — uses Session Recording Local|SD|Both.
     fn start_record_session(&mut self) {
         let dest = self.record_destination;
         if dest.wants_sd() {
-            let can = self
-                .board
-                .as_ref()
-                .is_some_and(|b| b.supports_cyton_sd_write());
-            if !can {
-                self.event_log.log_error(
-                    "Record destination includes SD, but this board cannot write SD",
-                );
-                if !dest.wants_local() {
+            if !self.cyton_sd_active {
+                let ok = self.start_cyton_sd_write();
+                if !ok && !dest.wants_local() {
+                    // SD-only and not confirmed — do not pretend recording.
                     return;
                 }
-            } else if !self.cyton_sd_active {
-                self.start_cyton_sd_write();
             }
+        } else {
+            self.cyton_sd_warn = None;
         }
         if dest.wants_local() && !self.data_logger.is_logging() {
             let _ = self.start_recording_like_session();
@@ -1033,6 +1043,7 @@ impl OpenBciGuiApp {
             self.stop_recording_like_session();
         }
         self.stop_cyton_sd_write_if_active();
+        // Keep fail-closed warn until destination changes or a later Record confirms.
     }
 
     fn tick_contact_sidecar(&mut self) {
@@ -1909,6 +1920,70 @@ impl OpenBciGuiApp {
                 if persist_filters {
                     self.apply_persisted_filters_to_current_board();
                     self.save_current_persisted_settings();
+                }
+
+
+                // Eugene: Recording destination lives in Session (not Hardware).
+                // One transport Record; Local|SD|Both here. Session Setup "SD Card" stays hex playback.
+                ui.add_space(6.0);
+                ui.small(egui::RichText::new("Recording").color(theme::HAIRLINE));
+                ui.horizontal(|ui| {
+                    for d in crate::board::cyton_sd_write::RecordDestination::ALL {
+                        let selected = self.record_destination == d;
+                        let mut btn = egui::Button::new(d.label())
+                            .min_size(egui::vec2(52.0, 22.0));
+                        if selected {
+                            btn = btn.fill(theme::START);
+                        } else {
+                            btn = btn.fill(theme::PANEL).stroke(theme::hairline());
+                        }
+                        if ui.add(btn).clicked() {
+                            self.record_destination = d;
+                            if !d.wants_sd() {
+                                self.cyton_sd_warn = None;
+                            }
+                        }
+                    }
+                });
+                if self.record_destination.wants_sd() {
+                    ui.horizontal(|ui| {
+                        ui.small(
+                            egui::RichText::new("SD length").color(theme::HAIRLINE),
+                        );
+                        egui::ComboBox::from_id_salt("session_cyton_sd_duration")
+                            .selected_text(self.cyton_sd_duration.label())
+                            .width(80.0)
+                            .show_ui(ui, |ui| {
+                                for d in crate::board::cyton_sd_write::CytonSdDuration::ALL {
+                                    ui.selectable_value(
+                                        &mut self.cyton_sd_duration,
+                                        d,
+                                        d.label(),
+                                    );
+                                }
+                            });
+                    });
+                    let can_sd = self
+                        .board
+                        .as_ref()
+                        .is_some_and(|b| b.supports_cyton_sd_write());
+                    if !can_sd {
+                        ui.small(
+                            egui::RichText::new("Cyton session required for SD.")
+                                .color(theme::STOP),
+                        );
+                    } else if self.cyton_sd_active {
+                        ui.small(
+                            egui::RichText::new(format!(
+                                "SD writing · {}",
+                                self.cyton_sd_duration.label()
+                            ))
+                            .color(theme::STOP),
+                        );
+                    }
+                    if let Some(ref warn) = self.cyton_sd_warn {
+                        ui.small(egui::RichText::new(warn).color(theme::STOP));
+                    }
                 }
 
                 if self
@@ -3195,64 +3270,6 @@ impl eframe::App for OpenBciGuiApp {
                                     }
                                     ui.add_space(8.0);
 
-                                    // Interface: one Record; Hardware destination Local|SD|Both.
-                                    // Session Setup "SD Card" stays hex playback only.
-                                    ui.small(
-                                        egui::RichText::new("Record to").color(theme::HAIRLINE),
-                                    );
-                                    ui.horizontal(|ui| {
-                                        for d in crate::board::cyton_sd_write::RecordDestination::ALL {
-                                            let selected = self.record_destination == d;
-                                            let mut btn = egui::Button::new(d.label())
-                                                .min_size(egui::vec2(52.0, 22.0));
-                                            if selected {
-                                                btn = btn.fill(theme::START);
-                                            } else {
-                                                btn = btn.fill(theme::PANEL).stroke(theme::hairline());
-                                            }
-                                            if ui.add(btn).clicked() {
-                                                self.record_destination = d;
-                                            }
-                                        }
-                                    });
-                                    if self.record_destination.wants_sd() {
-                                        ui.horizontal(|ui| {
-                                            ui.small(
-                                                egui::RichText::new("SD length")
-                                                    .color(theme::HAIRLINE),
-                                            );
-                                            egui::ComboBox::from_id_salt("hw_cyton_sd_duration")
-                                                .selected_text(self.cyton_sd_duration.label())
-                                                .width(80.0)
-                                                .show_ui(ui, |ui| {
-                                                    for d in crate::board::cyton_sd_write::CytonSdDuration::ALL
-                                                    {
-                                                        ui.selectable_value(
-                                                            &mut self.cyton_sd_duration,
-                                                            d,
-                                                            d.label(),
-                                                        );
-                                                    }
-                                                });
-                                        });
-                                        let can_sd = self
-                                            .board
-                                            .as_ref()
-                                            .is_some_and(|b| b.supports_cyton_sd_write());
-                                        if !can_sd {
-                                            ui.small("Cyton session required for SD destination.");
-                                        } else if self.cyton_sd_active {
-                                            ui.small(
-                                                egui::RichText::new(format!(
-                                                    "SD writing · {}",
-                                                    self.cyton_sd_duration.label()
-                                                ))
-                                                .color(theme::STOP),
-                                            );
-                                        }
-                                    }
-                                    ui.add_space(8.0);
-
                                     if let Some(board) = self.board.as_deref() {
                                         {
                                             let mut widget_ctx = WidgetContext::new(
@@ -4156,9 +4173,14 @@ mod properties_rack_tests {
             "one Record drives destination"
         );
         assert!(
-            src.contains("Interface: one Record; Hardware destination Local|SD|Both"),
-            "Hardware destination segmented control"
+            src.contains("Recording destination lives in Session"),
+            "Recording Local|SD|Both lives in Session"
         );
+        assert!(
+            src.contains("ui.small(egui::RichText::new(\"Recording\")"),
+            "Recording label on Session control"
+        );
+
         assert!(
             src.contains("RecordDestination::ALL"),
             "segmented Local SD Both destinations"

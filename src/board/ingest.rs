@@ -140,6 +140,10 @@ enum ShimCmd {
         cmd: String,
         reply: Sender<Result<(), String>>,
     },
+    ConfigResponse {
+        cmd: String,
+        reply: Sender<Result<String, String>>,
+    },
     Shutdown,
 }
 
@@ -198,6 +202,24 @@ impl ShimIngest {
             cmd: cmd.to_string(),
             reply,
         })
+    }
+
+    /// Like `config`, but returns the board's reply string (needed for SD confirm).
+    pub fn config_response(&self, cmd: &str) -> Result<String, BoardError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.tx
+            .lock()
+            .map_err(|_| BoardError::Io("ingest command lock".into()))?
+            .send(ShimCmd::ConfigResponse {
+                cmd: cmd.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|_| BoardError::Io("ingest thread died".into()))?;
+        self.cmds_sent.fetch_add(1, Ordering::Relaxed);
+        reply_rx
+            .recv_timeout(CONFIG_TIMEOUT)
+            .map_err(|_| BoardError::Io("ingest command timeout".into()))?
+            .map_err(BoardError::BrainFlow)
     }
 
     pub fn take_rows(&self) -> (Vec<Vec<f64>>, Option<String>) {
@@ -405,6 +427,25 @@ fn handle_shim_cmd(
                 }
             }
             let _ = reply.send(err.map(Err).unwrap_or(Ok(())));
+            false
+        }
+        ShimCmd::ConfigResponse { cmd, reply } => {
+            let Some(s) = shim.as_ref() else {
+                let _ = reply.send(Err("board is not initialized".into()));
+                return false;
+            };
+            let mut last_ok = String::new();
+            let mut err = None;
+            for piece in split_cyton_config_cmds(&cmd) {
+                match s.config_board(piece) {
+                    Ok(resp) => last_ok = resp,
+                    Err(e) => {
+                        err = Some(format!("{e:?}"));
+                        break;
+                    }
+                }
+            }
+            let _ = reply.send(err.map(Err).unwrap_or(Ok(last_ok)));
             false
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "mind-harness"
-version = "2.2.33"
+version = "2.2.34"
 edition = "2021"
 authors = ["Eugene Ray"]
 description = "Mind Harness — native EEG instrument for the Ultracortex Mark IV"
