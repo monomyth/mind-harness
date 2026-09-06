@@ -187,7 +187,7 @@ impl ControlPanel {
         let hero = self.ensure_hero_icon(ui.ctx()).clone();
 
         ui.vertical_centered(|ui| {
-            ui.add(egui::Image::new(&hero).fit_to_exact_size(egui::vec2(180.0, 180.0)));
+            ui.add(egui::Image::new(&hero).fit_to_exact_size(egui::vec2(440.0, 440.0)));
             ui.add_space(12.0);
 
             let glass = egui::Frame::new()
@@ -634,8 +634,8 @@ mod tests {
                 && !impl_src.contains("mind-harness-icon-candidate")
                 && !impl_src.contains("icon-candidate-a")
                 && draw_body.contains("Image::new")
-                && draw_body.contains("180.0"),
-            "Setup hero must be 180px Image from mind-harness-icon.rgba only"
+                && draw_body.contains("440.0"),
+            "Setup hero must be 440px Image matching glass card width"
         );
         assert!(
             !draw_body.contains("add_space(72.0)"),
