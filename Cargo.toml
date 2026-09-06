@@ -1,6 +1,6 @@
 [package]
 name = "mind-harness"
-version = "2.2.38"
+version = "2.2.39"
 edition = "2021"
 authors = ["Eugene Ray"]
 description = "Mind Harness — native EEG instrument for the Ultracortex Mark IV"
@@ -94,7 +94,7 @@ identifier = "com.openbci.gui"
 # Product icon (Grok Imagine Mark IV head) — not the Java sketch.icns / eframe e-icon.
 # Window icon: resources/mind-harness-icon.rgba via ViewportBuilder::with_icon in main.rs.
 icon = ["resources/icon.icns"]
-version = "2.2.38"
+version = "2.2.39"
 resources = ["resources/"]
 copyright = "Copyright © 2026 OpenBCI"
 category = "public.app-category.education"

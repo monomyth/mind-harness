@@ -332,7 +332,7 @@ impl ControlPanel {
                             if let Some(path) = rfd::FileDialog::new()
                                 .set_title("Select recording or Cyton SD hex")
                                 .add_filter(
-                                    "Recordings / SD",
+                                    "Recordings",
                                     &["parquet", "txt", "odf", "csv", "bdf", "log", "hex"],
                                 )
                                 .set_directory(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
