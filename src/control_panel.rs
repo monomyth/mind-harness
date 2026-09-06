@@ -45,6 +45,11 @@ impl DataSourceType {
         matches!(self, Self::Playback)
     }
 
+    /// WiFi shield / Ganglion — behind Session Setup Advanced.
+    pub fn is_advanced(self) -> bool {
+        matches!(self, Self::CytonWifi | Self::GanglionNative)
+    }
+
     pub fn go_label(self) -> &'static str {
         if self.is_finished_take() {
             "Play"
@@ -76,6 +81,10 @@ pub struct ControlPanel {
     pub ble_devices: Vec<crate::board::ble_scan::GanglionDevice>,
     pub ble_scan_status: Option<String>,
     pub last_setup_error: Option<String>,
+    /// Gates Cyton WiFi + Ganglion. Always-on: Synthetic, Cyton Serial, Playback.
+    pub show_advanced: bool,
+    /// Session Setup hero (product icon). Loaded on first draw.
+    icon_texture: Option<egui::TextureHandle>,
 }
 
 impl ControlPanel {
@@ -93,9 +102,23 @@ impl ControlPanel {
             ble_devices: Vec::new(),
             ble_scan_status: None,
             last_setup_error: None,
+            show_advanced: false,
+            icon_texture: None,
         };
         panel.refresh_serial_ports();
         panel
+    }
+
+    fn ensure_hero_icon(&mut self, ctx: &egui::Context) -> &egui::TextureHandle {
+        self.icon_texture.get_or_insert_with(|| {
+            let rgba = include_bytes!("../resources/mind-harness-icon.rgba");
+            let image = egui::ColorImage::from_rgba_unmultiplied([256, 256], rgba);
+            ctx.load_texture(
+                "mind_harness_setup_hero",
+                image,
+                egui::TextureOptions::LINEAR,
+            )
+        })
     }
 
     pub fn refresh_serial_ports(&mut self) {
@@ -156,28 +179,72 @@ impl ControlPanel {
     pub fn draw(&mut self, ui: &mut egui::Ui) -> Option<(DataSourceType, usize, Option<String>)> {
         let mut result = None;
 
+        // Persist Advanced open when an advanced source is already selected (e.g. restore).
+        if self.selected_source.is_advanced() {
+            self.show_advanced = true;
+        }
+
+        let hero = self.ensure_hero_icon(ui.ctx()).clone();
+
         ui.vertical_centered(|ui| {
+            ui.add(
+                egui::Image::new(&hero).fit_to_exact_size(egui::vec2(128.0, 128.0)),
+            );
+            ui.add_space(8.0);
             ui.heading(
+                egui::RichText::new("Mind Harness")
+                    .size(28.0)
+                    .color(crate::theme::TEXT),
+            );
+            ui.label(
                 egui::RichText::new(format!(
-                    "Mind Harness  v{}  —  Session Setup",
+                    "Session Setup  ·  v{}",
                     env!("CARGO_PKG_VERSION")
                 ))
                 .color(crate::theme::TEXT),
-            );
-            ui.label(
-                egui::RichText::new("Same boards, same experiment loop.")
-                    .italics()
-                    .color(crate::theme::TEXT),
             );
             ui.add_space(16.0);
 
             ui.group(|ui| {
                 ui.label("Data Source");
-                ui.radio_value(&mut self.selected_source, DataSourceType::Synthetic, "Synthetic (BrainFlow)");
-                ui.radio_value(&mut self.selected_source, DataSourceType::CytonSerial, "Cyton (Serial / USB Dongle)");
-                ui.radio_value(&mut self.selected_source, DataSourceType::CytonWifi, "Cyton (WiFi shield)");
-                ui.radio_value(&mut self.selected_source, DataSourceType::GanglionNative, "Ganglion (Native BLE)");
-                ui.radio_value(&mut self.selected_source, DataSourceType::Playback, "Playback (recording / Cyton SD)");
+                // Always-on: Synthetic, Cyton Serial, Playback. No Cyton board on the bench.
+                ui.radio_value(
+                    &mut self.selected_source,
+                    DataSourceType::Synthetic,
+                    "Synthetic (BrainFlow)",
+                );
+                ui.radio_value(
+                    &mut self.selected_source,
+                    DataSourceType::CytonSerial,
+                    "Cyton (Serial / USB Dongle)",
+                );
+                ui.radio_value(
+                    &mut self.selected_source,
+                    DataSourceType::Playback,
+                    "Playback (recording / Cyton SD)",
+                );
+
+                ui.add_space(6.0);
+                if ui
+                    .checkbox(&mut self.show_advanced, "Advanced")
+                    .changed()
+                    && !self.show_advanced
+                    && self.selected_source.is_advanced()
+                {
+                    self.selected_source = DataSourceType::Synthetic;
+                }
+                if self.show_advanced {
+                    ui.radio_value(
+                        &mut self.selected_source,
+                        DataSourceType::CytonWifi,
+                        "Cyton (WiFi shield)",
+                    );
+                    ui.radio_value(
+                        &mut self.selected_source,
+                        DataSourceType::GanglionNative,
+                        "Ganglion (Native BLE)",
+                    );
+                }
             });
 
             ui.add_space(10.0);
@@ -456,5 +523,41 @@ mod tests {
             assert_eq!(src.go_label(), "Start Session", "{src:?}");
             assert!(!src.is_finished_take(), "{src:?}");
         }
+    }
+
+    #[test]
+    fn advanced_gates_wifi_and_ganglion_only() {
+        assert!(DataSourceType::CytonWifi.is_advanced());
+        assert!(DataSourceType::GanglionNative.is_advanced());
+        assert!(!DataSourceType::Synthetic.is_advanced());
+        assert!(!DataSourceType::CytonSerial.is_advanced());
+        assert!(!DataSourceType::Playback.is_advanced());
+    }
+
+    #[test]
+    fn session_setup_drops_tagline_and_shows_icon_hero() {
+        let src = include_str!("control_panel.rs");
+        let draw_body = src
+            .split("pub fn draw(")
+            .nth(1)
+            .and_then(|s| s.split("#[cfg(test)]").next())
+            .expect("draw body");
+        assert!(
+            !draw_body.contains("Same boards"),
+            "tagline must be gone from Session Setup"
+        );
+        assert!(
+            draw_body.contains("mind_harness_setup_hero")
+                || src.contains("mind_harness_setup_hero"),
+            "Session Setup must load the product icon as hero"
+        );
+        assert!(
+            draw_body.contains("Advanced"),
+            "Advanced toggle must gate WiFi + Ganglion"
+        );
+        assert!(
+            draw_body.contains("show_advanced"),
+            "Advanced flag must gate WiFi + Ganglion radios"
+        );
     }
 }

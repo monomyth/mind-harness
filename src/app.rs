@@ -401,6 +401,7 @@ impl OpenBciGuiApp {
         // === Phase 8: Load persisted settings (silent on any error / missing file) ===
         let persisted = OpenBciGuiApp::load_persisted_settings();
         app.control_panel.selected_source = persisted.selected_source;
+        app.control_panel.show_advanced = persisted.selected_source.is_advanced();
         app.control_panel.synthetic_channels = persisted.synthetic_channels;
         app.control_panel.cyton_channels = persisted.cyton_channels;
         app.control_panel.playback_file = persisted.playback_file.clone();
@@ -4154,7 +4155,7 @@ mod properties_rack_tests {
 
     #[test]
     fn version_is_semver() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.41");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.42");
     }
 
     #[test]
