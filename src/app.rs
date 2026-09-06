@@ -1556,7 +1556,7 @@ impl OpenBciGuiApp {
         ui.horizontal(|ui| {
             // Playback never offers Record — only live sessions do.
             if !is_take {
-                // One Record only — destination is Hardware Local|SD|Both.
+                // One Record only — destination is Session Record to Local|SD|Both.
                 let recording = self.record_session_active();
                 let record_label = if recording { "Stop Rec" } else { "Record" };
                 let live_hw = self.board.as_ref().is_some_and(|b| {
@@ -1913,58 +1913,68 @@ impl OpenBciGuiApp {
 
                 // Eugene: Record to destination lives in Session (not Hardware).
                 // One transport Record; Local|SD|Both here. Cyton SD hex opens via Playback (one finished-take path).
-                ui.add_space(6.0);
-                ui.small(egui::RichText::new("Record to").color(theme::HAIRLINE));
-                ui.horizontal(|ui| {
-                    for d in crate::board::cyton_sd_write::RecordDestination::ALL {
-                        let selected = self.record_destination == d;
-                        let mut btn = egui::Button::new(d.label())
-                            .min_size(egui::vec2(52.0, 22.0));
-                        if selected {
-                            btn = btn.fill(theme::START);
-                        } else {
-                            btn = btn.fill(theme::PANEL).stroke(theme::hairline());
-                        }
-                        if ui.add(btn).clicked() {
-                            self.record_destination = d;
-                        }
-                    }
-                });
-                if self.record_destination.wants_sd() {
-                    ui.horizontal(|ui| {
-                        ui.small(
-                            egui::RichText::new("SD length").color(theme::HAIRLINE),
-                        );
-                        egui::ComboBox::from_id_salt("session_cyton_sd_duration")
-                            .selected_text(self.cyton_sd_duration.label())
-                            .width(80.0)
-                            .show_ui(ui, |ui| {
-                                for d in crate::board::cyton_sd_write::CytonSdDuration::ALL {
-                                    ui.selectable_value(
-                                        &mut self.cyton_sd_duration,
-                                        d,
-                                        d.label(),
-                                    );
-                                }
-                            });
-                    });
-                    let can_sd = self
+                // Finished take (same as transport hiding Record): do not draw Record to / segment / SD length.
+                let is_finished_take = self
+                    .board
+                    .as_ref()
+                    .and_then(|b| b.playback_progress())
+                    .is_some()
+                    || self
                         .board
                         .as_ref()
-                        .is_some_and(|b| b.supports_cyton_sd_write());
-                    if !can_sd {
-                        ui.small(
-                            egui::RichText::new("Cyton session required for SD.")
+                        .is_some_and(|b| b.name().contains("Playback"));
+                if !is_finished_take {
+                    ui.add_space(6.0);
+                    ui.label("Record to");
+                    ui.horizontal(|ui| {
+                        for d in crate::board::cyton_sd_write::RecordDestination::ALL {
+                            let selected = self.record_destination == d;
+                            let mut btn = egui::Button::new(d.label())
+                                .min_size(egui::vec2(52.0, 22.0));
+                            if selected {
+                                btn = btn.fill(theme::START);
+                            } else {
+                                btn = btn.fill(theme::PANEL).stroke(theme::hairline());
+                            }
+                            if ui.add(btn).clicked() {
+                                self.record_destination = d;
+                            }
+                        }
+                    });
+                    if self.record_destination.wants_sd() {
+                        ui.horizontal(|ui| {
+                            ui.label("SD length");
+                            egui::ComboBox::from_id_salt("session_cyton_sd_duration")
+                                .selected_text(self.cyton_sd_duration.label())
+                                .width(80.0)
+                                .show_ui(ui, |ui| {
+                                    for d in crate::board::cyton_sd_write::CytonSdDuration::ALL {
+                                        ui.selectable_value(
+                                            &mut self.cyton_sd_duration,
+                                            d,
+                                            d.label(),
+                                        );
+                                    }
+                                });
+                        });
+                        let can_sd = self
+                            .board
+                            .as_ref()
+                            .is_some_and(|b| b.supports_cyton_sd_write());
+                        if !can_sd {
+                            ui.small(
+                                egui::RichText::new("Cyton session required for SD.")
+                                    .color(theme::STOP),
+                            );
+                        } else if self.cyton_sd_active {
+                            ui.small(
+                                egui::RichText::new(format!(
+                                    "SD writing · {}",
+                                    self.cyton_sd_duration.label()
+                                ))
                                 .color(theme::STOP),
-                        );
-                    } else if self.cyton_sd_active {
-                        ui.small(
-                            egui::RichText::new(format!(
-                                "SD writing · {}",
-                                self.cyton_sd_duration.label()
-                            ))
-                            .color(theme::STOP),
-                        );
+                            );
+                        }
                     }
                 }
 
@@ -4130,8 +4140,16 @@ mod properties_rack_tests {
             "Record to Local|SD|Both lives in Session"
         );
         assert!(
-            src.contains("ui.small(egui::RichText::new(\"Record to\")"),
-            "Record to label on Session control"
+            src.contains("ui.label(\"Record to\")"),
+            "Record to label visible on Session (not HAIRLINE-only)"
+        );
+        assert!(
+            !src.contains(concat!("Recording ", "destination")),
+            "label is Record to, not the old destination chrome"
+        );
+        assert!(
+            src.contains("do not draw Record to / segment / SD length"),
+            "playback finished take hides Record to entirely"
         );
         assert!(
             src.contains("Couldn't write to the SD card"),

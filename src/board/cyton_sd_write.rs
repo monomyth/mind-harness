@@ -3,7 +3,7 @@
 //! Starts a file on the card in the Cyton, independent of local Record.
 //! Stop with `j`. Prefer starting before stream for a clear board reply.
 
-/// Where transport Record writes. Hardware segmented control; Local default.
+/// Where transport Record writes. Session Record to Local|SD|Both; Local default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RecordDestination {
     #[default]
