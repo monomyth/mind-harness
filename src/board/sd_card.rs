@@ -84,7 +84,9 @@ pub fn parse_sd_row(line: &str) -> Result<(Vec<f64>, usize), BoardError> {
 }
 
 pub fn parse_sd_file(path: &std::path::Path) -> Result<(Vec<Vec<f64>>, usize, i32), BoardError> {
-    let text = std::fs::read_to_string(path).map_err(|e| BoardError::Io(e.to_string()))?;
+    // Binary-safe: Cyton SD files often end with NUL-padded preallocated space.
+    let bytes = std::fs::read(path).map_err(|e| BoardError::Io(e.to_string()))?;
+    let text = String::from_utf8_lossy(&bytes);
     parse_sd_text(&text)
 }
 
@@ -92,11 +94,16 @@ pub fn parse_sd_text(text: &str) -> Result<(Vec<Vec<f64>>, usize, i32), BoardErr
     let mut samples = Vec::new();
     let mut n_exg = 8usize;
     for (i, line) in text.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('%') || trimmed.starts_with('#') {
+        // Pre-sized card files: stop at the first NUL-padded partial row
+        // (OBCI_2C.TXT line 6061: "42,12E3" then 0x00 fill).
+        let cleaned = line.split('\0').next().unwrap_or("").trim();
+        if cleaned.is_empty() || cleaned.starts_with('%') || cleaned.starts_with('#') {
+            if !samples.is_empty() && cleaned.is_empty() {
+                break;
+            }
             continue;
         }
-        match parse_sd_row(trimmed) {
+        match parse_sd_row(cleaned) {
             Ok((row, n)) => {
                 n_exg = n;
                 samples.push(row);
@@ -104,6 +111,10 @@ pub fn parse_sd_text(text: &str) -> Result<(Vec<Vec<f64>>, usize, i32), BoardErr
             Err(e) => {
                 if samples.is_empty() && i < 8 {
                     continue;
+                }
+                // Trailing truncated row after real samples = end of take, not I/O fail.
+                if !samples.is_empty() {
+                    break;
                 }
                 return Err(BoardError::Io(format!("SD line {}: {e}", i + 1)));
             }
@@ -156,5 +167,19 @@ mod tests {
         assert_eq!(sr, 250);
         assert_eq!(rows.len(), 1);
         assert!((rows[0][1] - 2.0 * SCALE_UV_PER_COUNT).abs() < 1e-9);
+    }
+
+    #[test]
+    fn trailing_nul_padded_partial_row_stops_soft() {
+        // Real OBCI_2C.TXT shape: good rows, then truncated sample + NUL pad.
+        let text = concat!(
+            "40,16635D,0151C9,DD9A5C,800000,E4A993,DBFAEB,AC8031,F69F41\n",
+            "41,17310A,01E6CF,DE5F7D,800000,E545A9,DC8BF6,A084A8,F74CA6,FF50,1E50,06C0\n",
+            "42,12E3\0\0\0\0\0\0rest-of-prealloc\n",
+        );
+        let (rows, n, sr) = parse_sd_text(text).unwrap();
+        assert_eq!(n, 8);
+        assert_eq!(sr, 250);
+        assert_eq!(rows.len(), 2);
     }
 }
