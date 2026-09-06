@@ -187,26 +187,36 @@ impl ControlPanel {
         let hero = self.ensure_hero_icon(ui.ctx()).clone();
 
         ui.vertical_centered(|ui| {
-            ui.add(egui::Image::new(&hero).fit_to_exact_size(egui::vec2(440.0, 440.0)));
+            const COLUMN: f32 = 440.0;
+            ui.add(egui::Image::new(&hero).fit_to_exact_size(egui::vec2(COLUMN, COLUMN)));
             ui.add_space(12.0);
 
+            // Pin glass to the same centered 440 column as the hero (Frame otherwise
+            // expands to full window width and content looks left-stuck).
             let glass = egui::Frame::new()
                 .fill(crate::theme::SETUP_GLASS)
                 .stroke(egui::Stroke::new(1.25, crate::theme::SETUP_CYAN))
                 .corner_radius(14.0)
                 .inner_margin(egui::Margin::symmetric(20, 16));
 
-            glass.show(ui, |ui| {
-                ui.set_max_width(400.0);
-                ui.set_min_width(400.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("Data Source")
-                            .strong()
-                            .color(crate::theme::TEXT),
-                    );
-                });
-                ui.add_space(6.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(COLUMN, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_width(COLUMN);
+                    ui.set_max_width(COLUMN);
+                    glass.show(ui, |ui| {
+                        // Content 400 + 20 side margins => outer ≈440.
+                        ui.set_max_width(400.0);
+                        ui.set_min_width(400.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new("Data Source")
+                                    .strong()
+                                    .color(crate::theme::TEXT),
+                            );
+                        });
+                        ui.add_space(6.0);
 
                 // Always-on bare radios (not toggles). Order: Cyton Serial / Synthetic / Playback.
                 self.setup_radio(ui, DataSourceType::CytonSerial, "Cyton (Serial / USB Dongle)");
@@ -481,6 +491,8 @@ impl ControlPanel {
             });
 
             ui.add_space(24.0);
+
+            }); // end centered 440 column
 
             if let Some(ref err) = self.last_setup_error {
                 ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
