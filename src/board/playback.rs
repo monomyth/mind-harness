@@ -602,11 +602,12 @@ impl DataSource for PlaybackBoard {
 }
 
 fn looks_like_sd(path: &std::path::Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(bytes) = std::fs::read(path) else {
         return false;
     };
+    let text = String::from_utf8_lossy(&bytes);
     for line in text.lines().take(32) {
-        let t = line.trim();
+        let t = line.split('\0').next().unwrap_or("").trim();
         if t.is_empty() || t.starts_with('%') || t.starts_with('#') || t.starts_with("OpenBCI") {
             continue;
         }

@@ -37,13 +37,12 @@ pub enum DataSourceType {
     CytonWifi,
     GanglionNative,
     Playback, // Phase 7 — record → End Session → immediate Playback of the exact file
-    SDCard,
 }
 
 impl DataSourceType {
     /// Finished take (Playback / SD). Live boards Start a session.
     pub fn is_finished_take(self) -> bool {
-        matches!(self, Self::Playback | Self::SDCard)
+        matches!(self, Self::Playback)
     }
 
     pub fn go_label(self) -> &'static str {
@@ -74,7 +73,6 @@ pub struct ControlPanel {
     /// BrainFlow Ganglion Native identifier (MAC or advertised name). Empty = do not connect.
     pub ganglion_device_id: String,
     pub cyton_wifi_ip: String,
-    pub sd_file: Option<String>,
     pub ble_devices: Vec<crate::board::ble_scan::GanglionDevice>,
     pub ble_scan_status: Option<String>,
     pub last_setup_error: Option<String>,
@@ -92,7 +90,6 @@ impl ControlPanel {
             playback_file: None,
             ganglion_device_id: String::new(),
             cyton_wifi_ip: String::new(),
-            sd_file: None,
             ble_devices: Vec::new(),
             ble_scan_status: None,
             last_setup_error: None,
@@ -180,8 +177,7 @@ impl ControlPanel {
                 ui.radio_value(&mut self.selected_source, DataSourceType::CytonSerial, "Cyton (Serial / USB Dongle)");
                 ui.radio_value(&mut self.selected_source, DataSourceType::CytonWifi, "Cyton (WiFi shield)");
                 ui.radio_value(&mut self.selected_source, DataSourceType::GanglionNative, "Ganglion (Native BLE)");
-                ui.radio_value(&mut self.selected_source, DataSourceType::Playback, "Playback (.parquet / .bdf / .txt)");
-                ui.radio_value(&mut self.selected_source, DataSourceType::SDCard, "SD Card (Cyton hex dump)");
+                ui.radio_value(&mut self.selected_source, DataSourceType::Playback, "Playback (recording / Cyton SD)");
             });
 
             ui.add_space(10.0);
@@ -330,15 +326,14 @@ impl ControlPanel {
                     }
                 }
                 DataSourceType::Playback => {
-                    // Phase 7 Playback roundtrip UI (plan.md Phase 7 step 3)
-                    // rfd native file picker for .txt / .odf recordings produced by this GUI or Java GUI.
+                    // One finished-take path: local Record files and Cyton SD hex (via PlaybackBoard::from_file).
                     ui.horizontal(|ui| {
                         if ui.button("📁 Choose Recording File...").clicked() {
                             if let Some(path) = rfd::FileDialog::new()
-                                .set_title("Select OpenBCI recording (.parquet / .bdf / .txt)")
+                                .set_title("Select recording or Cyton SD hex")
                                 .add_filter(
-                                    "OpenBCI Recordings",
-                                    &["parquet", "txt", "odf", "csv", "bdf"],
+                                    "Recordings / SD",
+                                    &["parquet", "txt", "odf", "csv", "bdf", "log", "hex"],
                                 )
                                 .set_directory(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
                                 .pick_file()
@@ -346,7 +341,6 @@ impl ControlPanel {
                                 self.playback_file = Some(path.display().to_string());
                             }
                         }
-                        // Allow: the nested if is required for immediate-mode UI (button must only be drawn/clicked when a file is selected)
                         #[allow(clippy::collapsible_if)]
                         if self.playback_file.is_some() {
                             if ui.button("Clear").clicked() {
@@ -358,29 +352,7 @@ impl ControlPanel {
                         let short = if f.len() > 60 { format!("...{}", &f[f.len()-57..]) } else { f.clone() };
                         ui.label(egui::RichText::new(format!("Selected: {}", short)).small());
                     } else {
-                        ui.label(egui::RichText::new("Select a .parquet / .bdf / .txt recording from this GUI or Java.").italics().small());
-                    }
-                }
-                DataSourceType::SDCard => {
-                    ui.label("Cyton SD hex dump (Java DataSourceSDCard: comma-separated 24-bit hex).");
-                    ui.horizontal(|ui| {
-                        if ui.button("Choose SD file...").clicked() {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .set_title("Select Cyton SD file")
-                                .add_filter("SD / text", &["txt", "csv", "log", "hex"])
-                                .pick_file()
-                            {
-                                self.sd_file = Some(path.display().to_string());
-                            }
-                        }
-                        if self.sd_file.is_some() && ui.button("Clear").clicked() {
-                            self.sd_file = None;
-                        }
-                    });
-                    if let Some(ref f) = self.sd_file {
-                        ui.small(format!("Selected: {f}"));
-                    } else {
-                        ui.small("Pick a Cyton SD hex file. Wrong format returns a readable error.");
+                        ui.label(egui::RichText::new("Select a recording (.parquet / .bdf / .txt) or Cyton SD hex dump.").italics().small());
                     }
                 }
             }
@@ -410,10 +382,6 @@ impl ControlPanel {
                     && self.playback_file.as_ref().map(|s| s.is_empty()).unwrap_or(true)
                 {
                     self.last_setup_error = Some("Choose a playback file first.".into());
-                } else if self.selected_source == DataSourceType::SDCard
-                    && self.sd_file.as_ref().map(|s| s.is_empty()).unwrap_or(true)
-                {
-                    self.last_setup_error = Some("Choose a Cyton SD hex file first.".into());
                 } else if self.selected_source == DataSourceType::CytonWifi
                     && self.cyton_wifi_ip.trim().is_empty()
                 {
@@ -441,9 +409,6 @@ impl ControlPanel {
                     if self.selected_source == DataSourceType::Playback {
                         port = self.playback_file.clone();
                     }
-                    if self.selected_source == DataSourceType::SDCard {
-                        port = self.sd_file.clone();
-                    }
                     if self.selected_source == DataSourceType::GanglionNative {
                         port = Some(self.ganglion_device_id.trim().to_string());
                     }
@@ -458,7 +423,6 @@ impl ControlPanel {
                         }
                         DataSourceType::GanglionNative => 4,
                         DataSourceType::Playback => 8,
-                        DataSourceType::SDCard => 8,
                     };
 
                     result = Some((self.selected_source, channels, port));
@@ -478,9 +442,7 @@ mod tests {
     #[test]
     fn play_is_finished_take_only() {
         assert_eq!(DataSourceType::Playback.go_label(), "Play");
-        assert_eq!(DataSourceType::SDCard.go_label(), "Play");
         assert!(DataSourceType::Playback.is_finished_take());
-        assert!(DataSourceType::SDCard.is_finished_take());
     }
 
     #[test]

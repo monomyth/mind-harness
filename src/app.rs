@@ -95,7 +95,6 @@ struct PersistedSettings {
     #[serde(default)]
     ganglion_device_id: String,
     #[serde(default)]
-    sd_file: Option<String>,
 
     // Post-Phase 8 polish: Graph speed & stability controls (Time Window + Smoothing wave)
     // + per-channel y-scale overrides for the classic ChannelBar +/- experience
@@ -154,7 +153,6 @@ impl Default for PersistedSettings {
             ads_channels: vec![],
             cyton_wifi_ip: String::new(),
             ganglion_device_id: String::new(),
-            sd_file: None,
 
             // Defaults chosen to match previous hard-coded behavior + good UX
             ts_time_window_sec: 5.0,
@@ -405,7 +403,6 @@ impl OpenBciGuiApp {
         app.control_panel.playback_file = persisted.playback_file.clone();
         app.control_panel.cyton_wifi_ip = persisted.cyton_wifi_ip.clone();
         app.control_panel.ganglion_device_id = persisted.ganglion_device_id.clone();
-        app.control_panel.sd_file = persisted.sd_file.clone();
         app.persisted_ads_channels = persisted.ads_channels.clone();
         app.font_sizes = persisted.font_sizes.clone();
         theme::set_font_sizes(app.font_sizes.clone());
@@ -1396,7 +1393,6 @@ impl OpenBciGuiApp {
             ads_channels,
             cyton_wifi_ip: cp.cyton_wifi_ip.clone(),
             ganglion_device_id: cp.ganglion_device_id.clone(),
-            sd_file: cp.sd_file.clone(),
 
             ts_time_window_sec: ts_tw,
             ts_y_scale_uv: ts_ys,
@@ -1916,7 +1912,7 @@ impl OpenBciGuiApp {
 
 
                 // Eugene: Record to destination lives in Session (not Hardware).
-                // One transport Record; Local|SD|Both here. Session Setup "SD Card" stays hex playback.
+                // One transport Record; Local|SD|Both here. Cyton SD hex opens via Playback (one finished-take path).
                 ui.add_space(6.0);
                 ui.small(egui::RichText::new("Record to").color(theme::HAIRLINE));
                 ui.horizontal(|ui| {
@@ -2359,34 +2355,6 @@ impl eframe::App for OpenBciGuiApp {
                                 }
                             }
                         }
-                        DataSourceType::SDCard => {
-                            let file_path = serial_port.clone().unwrap_or_default();
-                            if file_path.is_empty() {
-                                self.control_panel.show = true;
-                                self.control_panel.last_setup_error =
-                                    Some("Choose a Cyton SD hex file first.".into());
-                                return;
-                            }
-                            match crate::board::playback::PlaybackBoard::from_sd(std::path::Path::new(&file_path))
-                            {
-                                Ok(mut pb) => {
-                                    let _ = pb.initialize();
-                                    if pb.start_streaming().is_ok() {
-                                        self.streaming = true;
-                                    }
-                                    self.board = Some(Box::new(pb) as Box<dyn DataSource>);
-                                    self.connection_status = format!("SD playback: {}", file_path);
-                                    self.event_log.log_connection(&format!("SD card playback {file_path}"));
-                                    self.save_last_connection();
-                                    self.enter_running_session();
-                                }
-                                Err(e) => {
-                                    self.control_panel.show = true;
-                                    self.control_panel.last_setup_error = Some(format!("{e}"));
-                                    self.event_log.log_error(&format!("SD file: {e}"));
-                                }
-                            }
-                        }
                     }
                 }
 
@@ -2417,7 +2385,6 @@ impl eframe::App for OpenBciGuiApp {
                                         DataSourceType::CytonWifi => format!("Cyton WiFi {}", self.control_panel.cyton_wifi_ip),
                                         DataSourceType::Synthetic => format!("Synthetic ({} ch)", params.channels),
                                         DataSourceType::Playback => "the same Playback file".to_string(),
-                                        DataSourceType::SDCard => "the same SD file".to_string(),
                                         DataSourceType::GanglionNative => {
                                             format!("Ganglion {}", self.control_panel.ganglion_device_id)
                                         }
@@ -2480,7 +2447,7 @@ impl eframe::App for OpenBciGuiApp {
                         });
                 }
             });
-            // Session may have started this frame (Synthetic / Playback / SD). Fall through to transport.
+            // Session may have started this frame (Synthetic / Playback). Fall through to transport.
             if setup_panel_active(self.system_mode) {
                 ctx.request_repaint();
                 return;
