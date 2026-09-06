@@ -12,6 +12,13 @@ pub const STL_BACK: &str = "M4_Medium_Back.stl";
 
 /// Official Ultracortex Mark IV Cyton 8ch (docs.openbci.com).
 pub const DEFAULT_SITES: [&str; 8] = ["Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2"];
+/// Official Cyton Daisy extra eight (Daisy N1P–N8P = GUI ch 9–16).
+pub const DEFAULT_SITES_DAISY: [&str; 8] = ["F7", "F8", "F3", "F4", "T7", "T8", "P3", "P4"];
+/// Cyton 8 then Daisy 8.
+pub const DEFAULT_SITES_16: [&str; 16] = [
+    "Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2", "F7", "F8", "F3", "F4", "T7", "T8", "P3",
+    "P4",
+];
 
 /// Classic 10-20 holes present on a Mark IV medium frame.
 pub const HOLES: [&str; 35] = [
@@ -539,7 +546,7 @@ mod tests {
     #[test]
     fn mark_iv_holes_include_default_and_o1_o2() {
         assert_eq!(HOLES.len(), 35);
-        for s in DEFAULT_SITES {
+        for s in DEFAULT_SITES_16 {
             assert!(HOLES.contains(&s), "missing {s}");
         }
         assert!(HOLES.contains(&"O1"));

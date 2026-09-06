@@ -11,7 +11,15 @@ use std::sync::OnceLock;
 
 pub const HEADSET_MARK_IV: &str = "Ultracortex Mark IV";
 pub const HEADSET_NAME: &str = HEADSET_MARK_IV;
+/// Official Ultracortex Mark IV Cyton 8 (docs.openbci.com, GUI N1P–N8P).
 pub const DEFAULT_SITES: [&str; 8] = ["Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2"];
+/// Official Cyton Daisy extra eight (Daisy N1P–N8P = GUI ch 9–16).
+pub const DEFAULT_SITES_DAISY: [&str; 8] = ["F7", "F8", "F3", "F4", "T7", "T8", "P3", "P4"];
+/// Cyton 8 then Daisy 8.
+pub const DEFAULT_SITES_16: [&str; 16] = [
+    "Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2", "F7", "F8", "F3", "F4", "T7", "T8", "P3",
+    "P4",
+];
 
 /// 3/4 view, slightly above: headset lattice and the 8 wired holes both read.
 pub const VIEW_YAW: f32 = 0.58;
@@ -200,13 +208,17 @@ fn load_bin(buf: &[u8]) -> Option<FrameMesh> {
 /// bbox-center / max-radius=1 into the same coordinate frame as frame.bin.
 /// Each center sits in the empty circular rim (r≈0.12) of a printed node —
 /// not a decorative lattice opening, not a ray-snap onto nearby verts, and not
-/// the ideal r=0.96 10-20 sphere. Names are 10-20/10-10 by anatomy.
+/// the ideal r=0.96 10-20 sphere. Names are the Mark IV 10-20 insert that
+/// takes that electrode (OpenBCI Mark IV docs).
 ///
-/// Default 8-channel Cyton positions:
-///   Fp1/Fp2 — frontmost left/right inserts (forehead, Y≈−0.86)
-///   C3/C4   — lateral to Cz on the coronal plane (Y≈0.006)
-///   P7/P8   — behind and above ears (Y≈0.50, large |X|)
-///   O1/O2   — backmost left/right inserts (near inion, Y≈0.86)
+/// Default Cyton 8 (N1P–N8P), board mount at the back:
+///   Fp1/Fp2 — front pair, left/right forehead (flat units)
+///   C3/C4   — left/right central (lateral to Cz)
+///   P7/P8   — left/right behind the ears
+///   O1/O2   — lowest back pair, left/right of the board (inion)
+/// Cyton Daisy 16 keeps those and adds (Daisy N1P–N8P = GUI 9–16):
+///   F7/F8 — outer frontal; F3/F4 — inner frontal
+///   T7/T8 — temporal, over the ears; P3/P4 — parietal, inboard of P7/P8
 const INSERT_HOLES: [(&str, [f32; 3]); 35] = [
     ("Cz", [0.002241, 0.005675, 0.427471]),
     ("P4", [0.306720, 0.331303, 0.325633]),
@@ -2030,6 +2042,22 @@ mod tests {
         assert!(channel_at(&occ, "F8").is_none());
         assert!(channel_at(&occ, "P3").is_none());
         assert!(channel_at(&occ, "P4").is_none());
+    }
+
+    #[test]
+    fn default_16_is_cyton_then_official_daisy() {
+        assert_eq!(&DEFAULT_SITES_16[..8], &DEFAULT_SITES);
+        assert_eq!(&DEFAULT_SITES_16[8..], &DEFAULT_SITES_DAISY);
+        assert_eq!(
+            DEFAULT_SITES_DAISY,
+            ["F7", "F8", "F3", "F4", "T7", "T8", "P3", "P4"]
+        );
+        for name in DEFAULT_SITES_16 {
+            assert!(
+                hole_index(name).is_some(),
+                "Daisy/Cyton default {name} must be a named insert"
+            );
+        }
     }
 
     #[test]

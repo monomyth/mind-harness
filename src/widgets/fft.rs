@@ -250,7 +250,7 @@ impl Widget for WFFT {
                 let color = theme::channel_color(i);
                 plot_ui.line(
                     Line::new(
-                        crate::widgets::head_plot::LABELS
+                        crate::widgets::mark_iv::DEFAULT_SITES_16
                             .get(i)
                             .copied()
                             .unwrap_or("?"),

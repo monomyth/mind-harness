@@ -10,7 +10,6 @@
 
 use crate::board::DataSource;
 use crate::laterality::latch_rails;
-use crate::widgets::head_plot::LABELS;
 use crate::widgets::Widget;
 use eframe::egui;
 
@@ -126,7 +125,10 @@ impl Widget for WImpedance {
                 ui.colored_label(egui::Color32::from_rgb(80, 200, 120), "● Testing...");
             }
             if let Some(ch) = source.impedance_scan_channel() {
-                let site = LABELS.get(ch).copied().unwrap_or("—");
+                let site = crate::widgets::mark_iv::DEFAULT_SITES_16
+                    .get(ch)
+                    .copied()
+                    .unwrap_or("—");
                 ui.small(format!("measuring {} (ADS1299 lead-off)", site));
             }
         });
@@ -151,7 +153,10 @@ impl Widget for WImpedance {
             ui.end_row();
 
             for (i, val) in self.last_values.iter().enumerate().take(n) {
-                let label = LABELS.get(i).copied().unwrap_or_else(|| "—");
+                let label = crate::widgets::mark_iv::DEFAULT_SITES_16
+                    .get(i)
+                    .copied()
+                    .unwrap_or("—");
                 let is_railed = self.railed.get(i).copied().unwrap_or(false);
                 ui.label(label);
                 if is_railed {

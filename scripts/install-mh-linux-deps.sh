@@ -27,4 +27,4 @@ pacman -Sy --needed --noconfirm \
   bluez-libs \
   mesa \
   wayland wayland-protocols
-echo "deps installed. Next: scripts/build_brainflow_linux.sh then cargo build --release --locked."
+echo "Deps installed. Next: ./scripts/build_brainflow_linux.sh, then cargo build --release --locked --bin mind-harness."

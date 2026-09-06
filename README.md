@@ -4,11 +4,11 @@ A native app for looking at EEG from an Ultracortex Mark IV. Record a sitting, p
 
 ![Head Plot — Ultracortex Mark IV, default eight sites](docs/head-plot.png)
 
-The Head Plot shows the Mark IV on a dummy head. The default eight inserts follow OpenBCI’s Cyton map: Fp1, Fp2, C3, C4, P7, P8, O1, O2. Empty inserts stay empty.
+The Head Plot shows the Mark IV on a dummy head. The default eight inserts follow OpenBCI’s Cyton map: Fp1, Fp2, C3, C4, P7, P8, O1, O2. Cyton Daisy 16 adds F7, F8, F3, F4, T7, T8, P3, P4. Empty inserts stay empty.
 
 ## Layout (portable BrainFlow)
 
-Mind Harness depends on a **sibling** BrainFlow checkout (no machine-specific absolute paths in `Cargo.toml`):
+Mind Harness needs a **sibling** BrainFlow checkout. No machine-specific paths in `Cargo.toml`:
 
 ```text
 parent/
@@ -17,7 +17,7 @@ parent/
     rust_package/brainflow/   # Cargo path dependency + lib/ natives
 ```
 
-Example: `~/code/grok/mind-harness` beside `~/code/grok/brainflow` (symlink to `~/github/brainflow` is fine). Native libs: set `BRAINFLOW_LIB` to the directory with `libBoardController` / `DataHandler` / `MLModule` (`.dylib` on macOS, `.so` on Linux), or leave unset to use `../brainflow/rust_package/brainflow/lib`.
+Example: `mind-harness` beside `brainflow` (a symlink into your BrainFlow clone is fine). For native libs, set `BRAINFLOW_LIB` to the folder with `libBoardController`, `libDataHandler`, and `libMLModule` (`.dylib` on macOS, `.so` on Linux), or leave it unset to use `../brainflow/rust_package/brainflow/lib`.
 
 Compatible BrainFlow revision used on WayStation for this tree: `3a8ebea15d90ebcf162bb755afad8d45be621418` (record your own if you rebuild).
 
@@ -28,7 +28,7 @@ Compatible BrainFlow revision used on WayStation for this tree: `3a8ebea15d90ebc
 ./scripts/build_brainflow_macos.sh
 # stage dylibs into rust_package/brainflow/lib if needed (script prints steps)
 
-cd ~/code/grok/mind-harness
+cd /path/to/mind-harness
 cargo build --release --locked --bin mind-harness
 cargo run --release --locked --bin mind-harness
 ```
@@ -37,7 +37,7 @@ First compile is slow; later ones are not. Optional Homebrew `lsl.framework` ena
 
 ## Run (Linux)
 
-Arch packages (verified on **isengard** for the **2.2.48** build path):
+Arch packages (verified once on **isengard**, for the **2.2.48** build path):
 
 ```bash
 sudo bash scripts/install-mh-linux-deps.sh
@@ -45,7 +45,7 @@ sudo bash scripts/install-mh-linux-deps.sh
 cargo build --release --locked --bin mind-harness
 ```
 
-Linux portability (`Cargo.toml` sibling path + OS-aware `build.rs`) lands on **2.2.53**. Full Linux rebuild of 2.2.53 is pending unless run on a Linux host. Linux LSL is not enabled by this work. Physical EEG / full UI on Linux were not re-verified for this integration.
+Portable BrainFlow path and OS-aware builds ship in **2.2.53**. A full Linux rebuild of that stamp is still pending on a Linux host. Linux LSL is off. Physical EEG and a full UI pass on Linux were not re-checked for this integration.
 
 ## What it talks to
 

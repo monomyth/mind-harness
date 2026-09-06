@@ -297,7 +297,7 @@ pub(crate) fn left_channel_label(logical: usize, map_label: &str) -> String {
     if !t.is_empty() && !t.eq_ignore_ascii_case(&format!("Ch {}", logical + 1)) {
         return t.to_string();
     }
-    crate::widgets::head_plot::LABELS
+    crate::widgets::mark_iv::DEFAULT_SITES_16
         .get(logical)
         .copied()
         .unwrap_or("?")
@@ -814,6 +814,11 @@ mod tests {
         assert_ne!(super::left_channel_label(2, ""), "F7");
         assert_ne!(super::left_channel_label(6, ""), "P3");
         assert_ne!(super::left_channel_label(7, ""), "P4");
+        // Official Daisy 16 (GUI 9–16) when the board has those channels.
+        assert_eq!(super::left_channel_label(8, ""), "F7");
+        assert_eq!(super::left_channel_label(9, "Ch 10"), "F8");
+        assert_eq!(super::left_channel_label(10, ""), "F3");
+        assert_eq!(super::left_channel_label(15, ""), "P4");
     }
 
     #[test]

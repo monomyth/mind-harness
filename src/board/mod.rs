@@ -249,8 +249,9 @@ pub trait DataSource: Send + Sync {
     }
 
     /// Left-column Time Series label — 10-20 site name (same as Head Plot holes).
+    /// Channels 0..7 are Cyton 8; 8..15 are official Daisy 16 if present.
     fn channel_label(&self, logical: usize) -> String {
-        crate::widgets::head_plot::LABELS
+        crate::widgets::mark_iv::DEFAULT_SITES_16
             .get(logical)
             .copied()
             .unwrap_or("?")

@@ -31,7 +31,6 @@ fn main() {
     };
 
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let mac_absolute = PathBuf::from("/Users/monomyth/github/brainflow/rust_package/brainflow/lib");
     let sibling = manifest.join("../brainflow/rust_package/brainflow/lib");
 
     let lib = match std::env::var_os("BRAINFLOW_LIB") {
@@ -40,12 +39,12 @@ fn main() {
             require_libs(&dir, &required, "BRAINFLOW_LIB");
             dir
         }
-        None if mac_absolute.exists() => {
-            require_libs(&mac_absolute, &required, "Mac absolute path");
-            mac_absolute
-        }
         None => {
-            require_libs(&sibling, &required, "sibling ../brainflow/rust_package/brainflow/lib");
+            require_libs(
+                &sibling,
+                &required,
+                "sibling ../brainflow/rust_package/brainflow/lib",
+            );
             sibling
         }
     };
