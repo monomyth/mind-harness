@@ -1,9 +1,10 @@
-//! Session export: Parquet → BDF / original OpenBCI text, plus labeled feature CSV/JSONL.
+//! Session export: Parquet → BDF / MCAP / original OpenBCI text, plus labeled feature CSV/JSONL.
 
 use crate::board::playback::PlaybackBoard;
 use crate::board::{BoardError, DataSource};
 use crate::data_logger::RecordingSample;
 use crate::data_writers::bdf::{recording_signals_ex, DataWriterBDF};
+use crate::data_writers::mcap::DataWriterMcap;
 use crate::fft::{band_powers_psd, nfft_safe};
 use crate::markers::MarkerEvent;
 use std::io::Write;
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportKind {
     Bdf,
+    Mcap,
     OpenBciText,
     Features,
 }
@@ -21,6 +23,7 @@ impl ExportKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Bdf => "BDF",
+            Self::Mcap => "MCAP",
             Self::OpenBciText => "OpenBCI text",
             Self::Features => "Features",
         }
@@ -82,6 +85,11 @@ pub fn export_recording(
             convert_to_bdf(src, &dest)?;
             Ok((dest, None))
         }
+        ExportKind::Mcap => {
+            let dest = sibling_with_ext(src, "mcap");
+            convert_to_mcap(src, &dest)?;
+            Ok((dest, None))
+        }
         ExportKind::OpenBciText => {
             let dest = sibling_with_ext(src, "txt");
             convert_to_odf(src, &dest)?;
@@ -102,6 +110,61 @@ pub fn convert_to_bdf(src: &Path, dest: &Path) -> Result<(), BoardError> {
     let (samples, n_exg, n_analog, n_digital, sr) = playback_to_samples(&pb);
     write_bdf_file(dest, &samples, n_exg, n_analog, n_digital, sr, pb.session_markers())
         .map_err(|e| BoardError::Io(e.to_string()))
+}
+
+pub fn convert_to_mcap(src: &Path, dest: &Path) -> Result<(), BoardError> {
+    let pb = PlaybackBoard::from_file(src).map_err(|e| BoardError::Io(e.to_string()))?;
+    let (samples, n_exg, n_analog, n_digital, sr) = playback_to_samples(&pb);
+    write_mcap_file(
+        dest,
+        &samples,
+        n_exg,
+        n_analog,
+        n_digital,
+        sr,
+        pb.session_markers(),
+    )
+    .map_err(|e| BoardError::Io(e.to_string()))
+}
+
+fn write_mcap_file(
+    dest: &Path,
+    samples: &[RecordingSample],
+    n_exg: usize,
+    n_analog: usize,
+    n_digital: usize,
+    sample_rate: i32,
+    markers: &[MarkerEvent],
+) -> std::io::Result<()> {
+    let mut w = DataWriterMcap::new(
+        dest.to_path_buf(),
+        n_exg,
+        sample_rate,
+        n_analog,
+        n_digital,
+    )?;
+    let mut mark_i = 0;
+    let mut marks: Vec<&MarkerEvent> = markers.iter().collect();
+    marks.sort_by_key(|m| m.sample_index);
+    let fs = sample_rate.max(1) as f64;
+    for (i, rec) in samples.iter().enumerate() {
+        while mark_i < marks.len() && marks[mark_i].sample_index as usize == i {
+            w.write_marker(marks[mark_i])?;
+            mark_i += 1;
+        }
+        let t = if rec.time.is_finite() && rec.time != 0.0 {
+            rec.time
+        } else {
+            i as f64 / fs
+        };
+        w.write_sample(rec, t)?;
+    }
+    while mark_i < marks.len() {
+        w.write_marker(marks[mark_i])?;
+        mark_i += 1;
+    }
+    w.close()?;
+    Ok(())
 }
 
 fn write_odf_file(
@@ -441,6 +504,40 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&bdf);
         let _ = std::fs::remove_file(&txt);
+        let _ = std::fs::remove_file(crate::markers::sidecar_path(&path));
+    }
+
+    #[test]
+    fn parquet_export_emits_mcap() {
+        use crate::data_logger::{DataLogger, LogFormat, RecordingSample};
+        let mut logger = DataLogger::new();
+        let path = logger.start(LogFormat::Parquet, 8, 250).unwrap();
+        for i in 0..20 {
+            logger.log_recording(&RecordingSample {
+                packet_index: i as f64,
+                exg: vec![i as f64; 8],
+                accel: [0.1, -0.2, 0.9],
+                time: i as f64 / 250.0,
+                ..Default::default()
+            });
+        }
+        logger.write_marker_annotation(0.0, "blink").unwrap();
+        logger.stop();
+        let (mcap_path, _) = export_recording(&path, ExportKind::Mcap).expect("mcap");
+        assert_eq!(
+            mcap_path.extension().and_then(|s| s.to_str()),
+            Some("mcap")
+        );
+        let rec = crate::data_writers::mcap::read_mcap(&mcap_path).expect("read export");
+        assert_eq!(rec.sample_rate, 250);
+        assert_eq!(rec.n_exg, 8);
+        assert_eq!(rec.samples.len(), 20);
+        assert!((rec.samples[10].exg[0] - 10.0).abs() < 1e-9);
+        assert!(rec.markers.iter().any(|m| m.label == "blink"));
+        let bytes = std::fs::read(&mcap_path).unwrap();
+        assert!(bytes.starts_with(mcap::MAGIC));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&mcap_path);
         let _ = std::fs::remove_file(crate::markers::sidecar_path(&path));
     }
 }

@@ -1760,6 +1760,12 @@ impl OpenBciGuiApp {
                         self.run_export_kind(crate::export::ExportKind::OpenBciText);
                     }
                     if ui
+                        .add_sized([200.0, 28.0], egui::Button::new("MCAP"))
+                        .clicked()
+                    {
+                        self.run_export_kind(crate::export::ExportKind::Mcap);
+                    }
+                    if ui
                         .add_sized([200.0, 28.0], egui::Button::new("Features"))
                         .clicked()
                     {
@@ -4213,7 +4219,7 @@ mod properties_rack_tests {
 
     #[test]
     fn version_is_semver() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.56");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.57");
     }
 
     #[test]
@@ -4304,6 +4310,7 @@ mod properties_rack_tests {
         assert!(src.contains("record_format"), "Parquet must be listed for Record");
         assert!(src.contains("LogFormat::Mcap"), "MCAP is a Record option");
         assert!(src.contains("Export as"), "Export format is a prompt, not chrome");
+        assert!(src.contains("ExportKind::Mcap"), "MCAP is an Export option");
         assert!(
             src.contains("End sits at the far right of transport"),
             "End must be far right"
