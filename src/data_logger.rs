@@ -1,6 +1,7 @@
-//! Data logging — native Parquet, plus BDF+ / OpenBCI text writers for export.
+//! Data logging — native Parquet / MCAP, plus BDF+ / OpenBCI text writers for export.
 
 use crate::data_writers::bdf::{recording_signals_ex, DataWriterBDF};
+use crate::data_writers::mcap::DataWriterMcap;
 use crate::data_writers::parquet::DataWriterParquet;
 use crate::markers::{self, MarkerEvent};
 use std::fs::File;
@@ -173,6 +174,7 @@ impl RecordingSample {
 #[allow(clippy::upper_case_acronyms)]
 pub enum LogFormat {
     Parquet,
+    Mcap,
     ODF,
     BDF,
 }
@@ -181,6 +183,7 @@ impl LogFormat {
     pub fn label(self) -> &'static str {
         match self {
             Self::Parquet => "Parquet",
+            Self::Mcap => "MCAP",
             Self::ODF => "OpenBCI text",
             Self::BDF => "BDF",
         }
@@ -191,6 +194,7 @@ pub struct DataLogger {
     odf_writer: Option<Box<dyn Write + Send>>,
     bdf_writer: Option<DataWriterBDF>,
     parquet_writer: Option<DataWriterParquet>,
+    mcap_writer: Option<DataWriterMcap>,
     rows_written: u64,
     output_path: Option<PathBuf>,
     format: LogFormat,
@@ -234,6 +238,7 @@ impl DataLogger {
             odf_writer: None,
             bdf_writer: None,
             parquet_writer: None,
+            mcap_writer: None,
             rows_written: 0,
             output_path: None,
             format: LogFormat::Parquet,
@@ -295,6 +300,20 @@ impl DataLogger {
                     n_digital,
                 )?;
                 self.parquet_writer = Some(w);
+                self.output_path = Some(path.clone());
+                (path, filename)
+            }
+            LogFormat::Mcap => {
+                let filename = format!("OpenBCI_{}.mcap", timestamp);
+                let path = rec_dir.join(&filename);
+                let w = DataWriterMcap::new(
+                    path.clone(),
+                    nb_channels,
+                    sample_rate,
+                    n_analog,
+                    n_digital,
+                )?;
+                self.mcap_writer = Some(w);
                 self.output_path = Some(path.clone());
                 (path, filename)
             }
@@ -369,6 +388,16 @@ impl DataLogger {
                     self.samples_logged += 1;
                 }
             }
+            LogFormat::Mcap => {
+                if self.mcap_writer.is_some() {
+                    let t = self.board_time();
+                    if let Some(ref mut w) = self.mcap_writer {
+                        let _ = w.write_sample(rec, t);
+                    }
+                    self.rows_written += 1;
+                    self.samples_logged += 1;
+                }
+            }
             LogFormat::ODF => {
                 if let Some(ref mut w) = self.odf_writer {
                     let row = rec.odf_row_ex(self.n_exg, self.n_analog, self.n_digital);
@@ -433,6 +462,9 @@ impl DataLogger {
         if let Some(mut pq) = self.parquet_writer.take() {
             let _ = pq.close();
         }
+        if let Some(mut mcap) = self.mcap_writer.take() {
+            let _ = mcap.close();
+        }
         if let Some(mut bdf) = self.bdf_writer.take() {
             // Flush any remaining samples
             if !self.bdf_buffer.is_empty() && !self.bdf_buffer[0].is_empty() {
@@ -452,7 +484,10 @@ impl DataLogger {
     }
 
     pub fn is_logging(&self) -> bool {
-        self.odf_writer.is_some() || self.bdf_writer.is_some() || self.parquet_writer.is_some()
+        self.odf_writer.is_some()
+            || self.bdf_writer.is_some()
+            || self.parquet_writer.is_some()
+            || self.mcap_writer.is_some()
     }
 
     pub fn recording_duration(&self) -> Option<std::time::Duration> {
@@ -492,6 +527,8 @@ impl DataLogger {
             bdf.write_annotation(board_timestamp, 0.0, &event.label)?;
         } else if let Some(ref mut w) = self.odf_writer {
             writeln!(w, "{}", event.odf_line())?;
+        } else if let Some(ref mut mcap) = self.mcap_writer {
+            mcap.write_marker(&event)?;
         }
         self.markers.push(event);
         Ok(())
@@ -940,6 +977,59 @@ mod tests {
         pump.stop();
         let rec = crate::data_writers::parquet::read_parquet(&path).expect("read");
         assert_eq!(rec.samples.len(), 30);
+        let sidecar = crate::markers::load_sidecar(&path);
+        assert!(sidecar.iter().any(|m| m.label == "sit still"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::markers::sidecar_path(&path));
+    }
+
+    #[test]
+    fn mcap_roundtrip_index_exg_accel_time() {
+        let mut logger = DataLogger::new();
+        let path = logger.start(LogFormat::Mcap, 8, 250).expect("start mcap");
+        for i in 0..40 {
+            logger.log_recording(&RecordingSample {
+                packet_index: i as f64,
+                exg: vec![i as f64; 8],
+                accel: [0.1, 0.2, 0.9],
+                time: i as f64 / 250.0,
+                ..Default::default()
+            });
+        }
+        logger.write_marker_annotation(0.0, "blink").unwrap();
+        logger.stop();
+        let rec = crate::data_writers::mcap::read_mcap(&path).expect("read");
+        assert_eq!(rec.sample_rate, 250);
+        assert_eq!(rec.n_exg, 8);
+        assert_eq!(rec.samples.len(), 40);
+        assert!((rec.samples[10].exg[0] - 10.0).abs() < 1e-9);
+        assert!((rec.samples[10].accel[2] - 0.9).abs() < 1e-9);
+        assert!(rec.markers.iter().any(|m| m.label == "blink"));
+        let sidecar = crate::markers::load_sidecar(&path);
+        assert_eq!(sidecar.len(), 1);
+        assert_eq!(sidecar[0].label, "blink");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::markers::sidecar_path(&path));
+    }
+
+    #[test]
+    fn record_pump_writes_mcap_on_the_writer_thread() {
+        let mut pump = RecordPump::spawn();
+        let path = pump.start(LogFormat::Mcap, 8, 250).expect("start");
+        for i in 0..30 {
+            pump.log_recording(&RecordingSample {
+                packet_index: i as f64,
+                exg: vec![i as f64; 8],
+                accel: [0.0, 0.0, 1.0],
+                time: i as f64 / 250.0,
+                ..Default::default()
+            });
+        }
+        pump.write_marker_annotation(0.0, "sit still").unwrap();
+        pump.stop();
+        let rec = crate::data_writers::mcap::read_mcap(&path).expect("read");
+        assert_eq!(rec.samples.len(), 30);
+        assert!(rec.markers.iter().any(|m| m.label == "sit still"));
         let sidecar = crate::markers::load_sidecar(&path);
         assert!(sidecar.iter().any(|m| m.label == "sit still"));
         let _ = std::fs::remove_file(&path);

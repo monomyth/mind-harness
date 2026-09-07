@@ -1,6 +1,6 @@
 [package]
 name = "mind-harness"
-version = "2.2.55"
+version = "2.2.56"
 edition = "2021"
 authors = ["Eugene Ray"]
 description = "Mind Harness — native EEG instrument for the Ultracortex Mark IV"
@@ -84,6 +84,9 @@ brainflow = { path = "../brainflow/rust_package/brainflow" }
 # Native session archive (2.2.0). No arrow feature — SerializedFileWriter only.
 parquet = { version = "59.3.0", default-features = false }
 
+# Foxglove MCAP writer. default-features off so Linux does not need zstd-sys.
+mcap = { version = "0.25", default-features = false }
+
 [build-dependencies]
 
 [[bin]]
@@ -96,13 +99,13 @@ identifier = "com.openbci.gui"
 # Product icon (Grok Imagine Mark IV head) — not the Java sketch.icns / eframe e-icon.
 # Window icon: resources/mind-harness-icon.rgba via ViewportBuilder::with_icon in main.rs.
 icon = ["resources/icon.icns"]
-version = "2.2.55"
+version = "2.2.56"
 resources = ["resources/"]
 copyright = "Copyright © 2026 OpenBCI"
 category = "public.app-category.education"
 short_description = "Visualize and record EEG from OpenBCI devices"
 long_description = """
-Mind Harness records native Parquet (sample index, eight EXG, Accel X/Y/Z, time;
+Mind Harness records native Parquet and MCAP (sample index, EXG, Accel X/Y/Z, time;
 analog/aux and digital when those modes are on) and can export BDF and original
 OpenBCI text. Real-time visualization, filtering, and networking (LSL/OSC/UDP).
 """

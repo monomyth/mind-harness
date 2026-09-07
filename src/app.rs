@@ -1649,6 +1649,11 @@ impl OpenBciGuiApp {
                             );
                             ui.selectable_value(
                                 &mut self.recording_format,
+                                crate::data_logger::LogFormat::Mcap,
+                                "MCAP",
+                            );
+                            ui.selectable_value(
+                                &mut self.recording_format,
                                 crate::data_logger::LogFormat::BDF,
                                 "BDF",
                             );
@@ -4208,7 +4213,7 @@ mod properties_rack_tests {
 
     #[test]
     fn version_is_semver() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.55");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.56");
     }
 
     #[test]
@@ -4297,6 +4302,7 @@ mod properties_rack_tests {
         assert!(!src.contains(concat!("RichText::new(\"Play\")")), "live transport must not offer Play");
         assert!(src.contains("Playback never offers Record"), "playback hides Record");
         assert!(src.contains("record_format"), "Parquet must be listed for Record");
+        assert!(src.contains("LogFormat::Mcap"), "MCAP is a Record option");
         assert!(src.contains("Export as"), "Export format is a prompt, not chrome");
         assert!(
             src.contains("End sits at the far right of transport"),
