@@ -33,6 +33,24 @@ pub enum SystemMode {
     PostInit,
 }
 
+/// Place-locked shell (ReBot hierarchy). Interface owns place; soft until crop.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AppPlace {
+    SessionSetup,
+    Live,
+    Playback,
+}
+
+impl AppPlace {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SessionSetup => "Session Setup",
+            Self::Live => "Live",
+            Self::Playback => "Playback",
+        }
+    }
+}
+
 /// True while the PreInit setup panel should keep the frame (no running session yet).
 /// Session start must flip to PostInit even when a PROPERTIES accordion section is open.
 pub(crate) fn setup_panel_active(mode: SystemMode) -> bool {
@@ -170,6 +188,7 @@ impl Default for PersistedSettings {
 pub struct OpenBciGuiApp {
     pub frame_count: u64,
     pub system_mode: SystemMode,
+    pub place: AppPlace,
     pub board: Option<Box<dyn DataSource>>,
     pub streaming: bool,
     pub widget_manager: WidgetManager,
@@ -282,6 +301,7 @@ impl OpenBciGuiApp {
         let mut app = Self {
             frame_count: 0,
             system_mode: SystemMode::PreInit,
+            place: AppPlace::SessionSetup,
             board: None,
             streaming: false,
             widget_manager: WidgetManager::new(), // replaced immediately below
@@ -771,6 +791,20 @@ impl OpenBciGuiApp {
         self.apply_persisted_filters_to_current_board();
         self.save_current_persisted_settings();
         self.system_mode = SystemMode::PostInit;
+        let is_take = self
+            .board
+            .as_ref()
+            .and_then(|b| b.playback_progress())
+            .is_some()
+            || self
+                .board
+                .as_ref()
+                .is_some_and(|b| b.name().contains("Playback"));
+        self.place = if is_take {
+            AppPlace::Playback
+        } else {
+            AppPlace::Live
+        };
     }
 
     /// Phase 7 hybrid layout (plan.md Phase 7 step 5): populate the interactive tool widgets
@@ -900,6 +934,7 @@ impl OpenBciGuiApp {
         self.simulation_notice = false;
         self.device_picker_open = false;
         self.system_mode = SystemMode::PreInit;
+        self.place = AppPlace::SessionSetup;
         if let Some(ref p) = self.last_recording_path {
             if p.exists() {
                 self.control_panel.playback_file = Some(p.display().to_string());
@@ -907,9 +942,9 @@ impl OpenBciGuiApp {
         }
 
         self.event_log
-            .log_system("Session ended — next frame autostarts dongle or simulation");
+            .log_system("Session ended — Session Setup");
 
-        tracing::info!("Session ended — autostart dongle or synthetic");
+        tracing::info!("Session ended — Session Setup");
     }
 
     /// Open the recording file on the writer thread. Never BoardShim / ingest RPC.
@@ -2160,6 +2195,969 @@ impl OpenBciGuiApp {
             self.save_current_persisted_settings();
         }
     }
+
+    /// Start a board from Session Setup (or nav). Soft — same paths as former live_auto arms.
+    fn start_from_setup(
+        &mut self,
+        source: DataSourceType,
+        chans: usize,
+        serial_port: Option<String>,
+    ) {
+        self.control_panel.selected_source = source;
+        match source {
+            DataSourceType::Synthetic => {
+                if std::env::var("OPENBCI_CROP").is_err() {
+                    self.simulation_notice = true;
+                } else {
+                    self.simulation_notice = false;
+                }
+                self.connection_status = "Using BrainFlow Synthetic Board".to_string();
+                let mut board = BrainFlowBoard::synthetic(chans);
+                let _ = board.initialize();
+                self.board = Some(Box::new(board) as Box<dyn DataSource>);
+                if self.record_destination.wants_sd() {
+                    self.streaming = false;
+                } else if let Some(ref mut b) = self.board {
+                    if b.start_streaming().is_ok() {
+                        self.streaming = true;
+                    }
+                }
+                self.event_log
+                    .log_connection("Connected to BrainFlow Synthetic board");
+                self.save_last_connection();
+                self.enter_running_session();
+            }
+            DataSourceType::CytonSerial => {
+                self.simulation_notice = false;
+                let default_port = if cfg!(target_os = "macos") {
+                    "/dev/cu.usbserial-0000".to_string()
+                } else {
+                    "/dev/tty.usbserial-0000".to_string()
+                };
+                let port = serial_port.unwrap_or(default_port);
+                let is_daisy = chans >= 16;
+                let port_for_thread = port.clone();
+                let (tx, rx) = oneshot::channel();
+                std::thread::spawn(move || {
+                    let mut board = if is_daisy {
+                        BrainFlowBoard::cyton_serial_daisy(&port_for_thread)
+                    } else {
+                        BrainFlowBoard::cyton_serial(&port_for_thread)
+                    };
+                    let result = board.initialize().map(|_| board).map_err(|e| e.to_string());
+                    let _ = tx.send(result);
+                });
+                self.connection_state = ConnectionState::InProgress {
+                    receiver: rx,
+                    status_message: format!("Connecting to Cyton on {}...", port),
+                };
+            }
+            DataSourceType::CytonWifi => {
+                self.simulation_notice = false;
+                let ip = serial_port.unwrap_or_default();
+                if ip.trim().is_empty() {
+                    self.control_panel.show = true;
+                    self.control_panel.last_setup_error =
+                        Some("Enter the WiFi shield IP address.".into());
+                    return;
+                }
+                let daisy = chans >= 16;
+                let ip_for_thread = ip.clone();
+                let (tx, rx) = oneshot::channel();
+                std::thread::spawn(move || {
+                    let mut board = BrainFlowBoard::cyton_wifi(&ip_for_thread, daisy);
+                    let result = board.initialize().map(|_| board).map_err(|e| e.to_string());
+                    let _ = tx.send(result);
+                });
+                self.connection_state = ConnectionState::InProgress {
+                    receiver: rx,
+                    status_message: format!("Connecting to Cyton WiFi {}...", ip),
+                };
+            }
+            DataSourceType::GanglionNative => {
+                self.simulation_notice = false;
+                let id = serial_port.unwrap_or_default();
+                if id.trim().is_empty() {
+                    self.control_panel.show = true;
+                    self.control_panel.last_setup_error = Some(
+                        "Ganglion: enter a MAC / device name. This is not Synthetic.".into(),
+                    );
+                    return;
+                }
+                let id_for_thread = id.clone();
+                let (tx, rx) = oneshot::channel();
+                std::thread::spawn(move || {
+                    let mut board = BrainFlowBoard::ganglion_native(&id_for_thread);
+                    let result = board.initialize().map(|_| board).map_err(|e| e.to_string());
+                    let _ = tx.send(result);
+                });
+                self.connection_state = ConnectionState::InProgress {
+                    receiver: rx,
+                    status_message: format!("Connecting to Ganglion {}...", id),
+                };
+            }
+            DataSourceType::Playback => {
+                self.simulation_notice = false;
+                let file_path = serial_port.unwrap_or_default();
+                if file_path.is_empty() {
+                    self.control_panel.last_setup_error =
+                        Some("Choose a playback file first.".into());
+                    return;
+                }
+                match crate::board::playback::PlaybackBoard::from_file(std::path::Path::new(
+                    &file_path,
+                )) {
+                    Ok(mut pb) => {
+                        let _ = pb.initialize();
+                        if pb.start_streaming().is_ok() {
+                            self.streaming = true;
+                        }
+                        self.board = Some(Box::new(pb) as Box<dyn DataSource>);
+                        self.connection_status = format!("Playback: {}", file_path);
+                        self.event_log.log_connection(&format!(
+                            "Playback · {}",
+                            std::path::Path::new(&file_path)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("file"),
+                        ));
+                        self.save_last_connection();
+                        self.enter_running_session();
+                    }
+                    Err(e) => {
+                        self.control_panel.last_setup_error =
+                            Some(format!("Failed to load playback file: {}", e));
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_rebot_shell(&mut self, ctx: &egui::Context) {
+        // Sync place from session when board is up.
+        if self.system_mode == SystemMode::PostInit {
+            let is_take = self
+                .board
+                .as_ref()
+                .and_then(|b| b.playback_progress())
+                .is_some()
+                || self
+                    .board
+                    .as_ref()
+                    .is_some_and(|b| b.name().contains("Playback"));
+            if self.place == AppPlace::SessionSetup {
+                self.place = if is_take {
+                    AppPlace::Playback
+                } else {
+                    AppPlace::Live
+                };
+            }
+        }
+
+        self.draw_nav_sidebar(ctx);
+
+        match self.place {
+            AppPlace::SessionSetup => {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE.fill(theme::PANEL_DEEP))
+                    .show(ctx, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(24.0);
+                            ui.label(
+                                egui::RichText::new("Session Setup")
+                                    .heading()
+                                    .color(theme::TEXT),
+                            );
+                            ui.add_space(12.0);
+                            if let Some(result) = self.control_panel.draw(ui) {
+                                self.pending_device = Some(result);
+                            }
+                        });
+                    });
+            }
+            AppPlace::Live => {
+                self.draw_live_inspector(ctx);
+                self.draw_live_transport(ctx);
+                self.draw_session_viewport(ctx);
+            }
+            AppPlace::Playback => {
+                // Playback: viewport + scrub; no Record to inspector; quiet bottom status.
+                self.draw_playback_transport(ctx);
+                self.draw_session_viewport(ctx);
+            }
+        }
+    }
+
+    fn draw_nav_sidebar(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("rebot_nav")
+            .exact_width(220.0)
+            .resizable(false)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::PANEL_DEEP)
+                    .inner_margin(egui::Margin::symmetric(10, 12)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(theme::ACCENT_LIME, "●");
+                    ui.label(egui::RichText::new("Mind Harness").strong().color(theme::TEXT));
+                });
+                ui.add_space(16.0);
+
+                for place in [
+                    AppPlace::SessionSetup,
+                    AppPlace::Live,
+                    AppPlace::Playback,
+                ] {
+                    let active = self.place == place;
+                    let (bg, fg) = if active {
+                        (theme::NAV_PILL, theme::ACCENT_LIME)
+                    } else {
+                        (theme::PANEL_DEEP, theme::TEXT_DIM)
+                    };
+                    let resp = ui.add(
+                        egui::Button::new(egui::RichText::new(place.label()).color(fg))
+                            .fill(bg)
+                            .stroke(if active {
+                                egui::Stroke::new(0.0, theme::ACCENT_LIME)
+                            } else {
+                                egui::Stroke::new(0.0, theme::PANEL_DEEP)
+                            })
+                            .min_size(egui::vec2(200.0, 28.0)),
+                    );
+                    if active {
+                        let r = resp.rect;
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(
+                                egui::pos2(r.min.x, r.min.y + 4.0),
+                                egui::vec2(3.0, r.height() - 8.0),
+                            ),
+                            1.0,
+                            theme::ACCENT_LIME,
+                        );
+                    }
+                    if resp.clicked() {
+                        self.navigate_place(place);
+                    }
+                    ui.add_space(4.0);
+                }
+
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.add_space(8.0);
+                    let (dot, line) = self.sidebar_status_line();
+                    ui.horizontal(|ui| {
+                        ui.colored_label(dot, "●");
+                        ui.label(egui::RichText::new(line).small().color(theme::TEXT_DIM));
+                    });
+                    if self.place == AppPlace::Live {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}  {}",
+                                crate::stream_stats::format_hz(self.current_sample_rate).trim(),
+                                crate::stream_stats::format_loss(self.packet_loss_percent).trim()
+                            ))
+                            .small()
+                            .monospace()
+                            .color(crate::stream_stats::loss_color(self.packet_loss_percent)),
+                        );
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                            .small()
+                            .color(theme::TEXT_MUTED),
+                    );
+                });
+            });
+    }
+
+    fn sidebar_status_line(&self) -> (egui::Color32, String) {
+        match self.board.as_ref() {
+            Some(b) => (theme::ACCENT_LIME, b.name().to_string()),
+            None => (theme::TEXT_MUTED, "Offline".to_string()),
+        }
+    }
+
+    fn navigate_place(&mut self, place: AppPlace) {
+        match place {
+            AppPlace::SessionSetup => {
+                if self.system_mode == SystemMode::PostInit {
+                    self.end_session();
+                } else {
+                    self.place = AppPlace::SessionSetup;
+                }
+            }
+            AppPlace::Live => {
+                if self.system_mode == SystemMode::PostInit {
+                    let is_take = self
+                        .board
+                        .as_ref()
+                        .and_then(|b| b.playback_progress())
+                        .is_some();
+                    if !is_take {
+                        self.place = AppPlace::Live;
+                    }
+                }
+                // Soft: no board yet — stay on Setup (do not invent a live empty cockpit).
+            }
+            AppPlace::Playback => {
+                if self.system_mode == SystemMode::PostInit {
+                    let is_take = self
+                        .board
+                        .as_ref()
+                        .and_then(|b| b.playback_progress())
+                        .is_some()
+                        || self
+                            .board
+                            .as_ref()
+                            .is_some_and(|b| b.name().contains("Playback"));
+                    if is_take {
+                        self.place = AppPlace::Playback;
+                    }
+                } else {
+                    self.place = AppPlace::SessionSetup;
+                    self.control_panel.selected_source = DataSourceType::Playback;
+                }
+            }
+        }
+    }
+
+    fn draw_live_inspector(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::right("rebot_inspector")
+            .resizable(true)
+            .default_width(300.0)
+            .min_width(260.0)
+            .max_width(360.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::PANEL_RAISED)
+                    .inner_margin(8.0),
+            )
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        let mut open = self.properties_open.take();
+                        properties_card(ui, |ui| {
+                            self.draw_session_rack(ui, &mut open);
+                        });
+                        // Fail-closed contact/gate line only — no new chrome words.
+                        if let Some(line) = self.contact.peek_notice() {
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new(line).color(theme::STOP).small());
+                        }
+                        draw_exclusive_section(ui, &mut open, "Experiments", |ui| {
+                            if !self.experiment.is_running() {
+                                egui::ComboBox::from_id_salt("exp_protocol")
+                                    .selected_text(self.experiment_protocol.label())
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut self.experiment_protocol,
+                                            ProtocolKind::Guided,
+                                            ProtocolKind::Guided.label(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.experiment_protocol,
+                                            ProtocolKind::EyesClosed,
+                                            ProtocolKind::EyesClosed.label(),
+                                        );
+                                    });
+                            } else {
+                                ui.label(
+                                    egui::RichText::new(self.experiment.protocol().label())
+                                        .color(theme::TEXT),
+                                );
+                            }
+                            let exp_running = self.experiment.is_running();
+                            let exp_label = if exp_running {
+                                "Stop experiment"
+                            } else {
+                                "Run experiment"
+                            };
+                            let live_hw = self.board.as_ref().is_some_and(|b| {
+                                let n = b.name();
+                                n != "Playback" && !n.contains("Synthetic")
+                            });
+                            let exp_fill = if exp_running {
+                                theme::STOP
+                            } else if live_hw {
+                                theme::START
+                            } else {
+                                theme::PANEL_RAISED
+                            };
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(exp_label).color(theme::TEXT),
+                                    )
+                                    .fill(exp_fill)
+                                    .stroke(theme::hairline()),
+                                )
+                                .clicked()
+                            {
+                                if exp_running {
+                                    self.cancel_experiment();
+                                } else {
+                                    self.start_experiment();
+                                }
+                            }
+                        });
+                        draw_exclusive_section(ui, &mut open, "Networking", |ui| {
+                            if let Some(board) = self.board.as_deref() {
+                                let mut widget_ctx = WidgetContext::new(
+                                    &mut self.networking,
+                                    &mut self.data_logger,
+                                    &mut self.last_marker,
+                                    &mut self.event_log,
+                                    &mut self.emg,
+                                );
+                                show_named_tool(
+                                    &mut self.tool_widgets,
+                                    "Networking",
+                                    ui,
+                                    board,
+                                    &mut widget_ctx,
+                                );
+                            }
+                        });
+                        draw_exclusive_section(ui, &mut open, "Hardware", |ui| {
+                            // Headset and Montage controls (moved from Head Plot)
+                            ui.small(
+                                egui::RichText::new("Headset").color(theme::HAIRLINE),
+                            );
+                            let mut headset = HEADSET_NAME.to_string();
+                            egui::ComboBox::from_id_salt("hw_headset")
+                                .selected_text(HEADSET_NAME)
+                                .width(168.0)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut headset,
+                                        HEADSET_NAME.to_string(),
+                                        HEADSET_NAME,
+                                    );
+                                });
+                            let _ = headset;
+
+                            // Montage profile selector and save controls
+                            ui.small(
+                                egui::RichText::new("Montage").color(theme::HAIRLINE),
+                            );
+                            // Get current montage state from WHeadPlot
+                            let (profile_name, profile_names, dirty, save_as_open) = {
+                                let hp = self
+                                    .widget_manager
+                                    .widgets
+                                    .iter()
+                                    .chain(self.tool_widgets.iter())
+                                    .find_map(|w| w.as_any().downcast_ref::<WHeadPlot>());
+                                if let Some(hp) = hp {
+                                    (
+                                        hp.profile_name().to_string(),
+                                        hp.profile_names().to_vec(),
+                                        hp.is_dirty(),
+                                        hp.is_save_as_open(),
+                                    )
+                                } else {
+                                    (
+                                        self.montage.last_name().to_string(),
+                                        self.montage.names(),
+                                        false,
+                                        false,
+                                    )
+                                }
+                            };
+                            let shown = if dirty {
+                                format!("{}*", profile_name)
+                            } else {
+                                profile_name.clone()
+                            };
+                            let mut pick = profile_name.clone();
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt("hw_montage_profile")
+                                    .selected_text(&shown)
+                                    .width(110.0)
+                                    .show_ui(ui, |ui| {
+                                        for n in &profile_names {
+                                            ui.selectable_value(&mut pick, n.clone(), n);
+                                        }
+                                    });
+                                let save = egui::Button::new("Save").small().frame(false);
+                                if ui
+                                    .add(save)
+                                    .on_hover_text(
+                                        "Write channel → 10-20 hole into the active profile",
+                                    )
+                                    .clicked()
+                                {
+                                    for w in self
+                                        .widget_manager
+                                        .widgets
+                                        .iter_mut()
+                                        .chain(self.tool_widgets.iter_mut())
+                                    {
+                                        if let Some(hp) =
+                                            w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                        {
+                                            hp.set_action(MontageUiAction::Save);
+                                        }
+                                    }
+                                }
+                                if ui
+                                    .add(egui::Button::new("Load").small().frame(false))
+                                    .on_hover_text("Load the selected profile")
+                                    .clicked()
+                                {
+                                    for w in self
+                                        .widget_manager
+                                        .widgets
+                                        .iter_mut()
+                                        .chain(self.tool_widgets.iter_mut())
+                                    {
+                                        if let Some(hp) =
+                                            w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                        {
+                                            hp.set_action(MontageUiAction::Select(
+                                                shown.clone(),
+                                            ));
+                                        }
+                                    }
+                                }
+                                if ui
+                                    .add(egui::Button::new("Default").small().frame(false))
+                                    .on_hover_text("Official 8 inserts")
+                                    .clicked()
+                                {
+                                    for w in self
+                                        .widget_manager
+                                        .widgets
+                                        .iter_mut()
+                                        .chain(self.tool_widgets.iter_mut())
+                                    {
+                                        if let Some(hp) =
+                                            w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                        {
+                                            hp.set_action(MontageUiAction::Select(
+                                                crate::widgets::head_plot::DEFAULT_PROFILE_NAME
+                                                    .to_string(),
+                                            ));
+                                        }
+                                    }
+                                }
+                                if ui
+                                    .add(egui::Button::new("Save as").small().frame(false))
+                                    .clicked()
+                                {
+                                    for w in self
+                                        .widget_manager
+                                        .widgets
+                                        .iter_mut()
+                                        .chain(self.tool_widgets.iter_mut())
+                                    {
+                                        if let Some(hp) =
+                                            w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                        {
+                                            hp.set_save_as_open(true);
+                                        }
+                                    }
+                                }
+                            });
+                            if pick != profile_name {
+                                for w in self
+                                    .widget_manager
+                                    .widgets
+                                    .iter_mut()
+                                    .chain(self.tool_widgets.iter_mut())
+                                {
+                                    if let Some(hp) =
+                                        w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                    {
+                                        hp.set_action(MontageUiAction::Select(pick.clone()));
+                                    }
+                                }
+                            }
+                            // Save as dialog
+                            if save_as_open {
+                                ui.horizontal(|ui| {
+                                    ui.label("Name");
+                                    let mut buf = String::new();
+                                    for w in self
+                                        .widget_manager
+                                        .widgets
+                                        .iter_mut()
+                                        .chain(self.tool_widgets.iter_mut())
+                                    {
+                                        if let Some(hp) =
+                                            w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                        {
+                                            buf = hp.save_as_buf().to_string();
+                                            break;
+                                        }
+                                    }
+                                    let resp = ui.add(
+                                        egui::TextEdit::singleline(&mut buf)
+                                            .desired_width(140.0),
+                                    );
+                                    // Update buffer in WHeadPlot
+                                    for w in self
+                                        .widget_manager
+                                        .widgets
+                                        .iter_mut()
+                                        .chain(self.tool_widgets.iter_mut())
+                                    {
+                                        if let Some(hp) =
+                                            w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                        {
+                                            *hp.save_as_buf_mut() = buf.clone();
+                                        }
+                                    }
+                                    if ui.button("Create").clicked()
+                                        || (resp.lost_focus()
+                                            && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                                    {
+                                        let name = buf.trim().to_string();
+                                        if !name.is_empty() {
+                                            for w in self
+                                                .widget_manager
+                                                .widgets
+                                                .iter_mut()
+                                                .chain(self.tool_widgets.iter_mut())
+                                            {
+                                                if let Some(hp) =
+                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                                {
+                                                    hp.set_action(MontageUiAction::SaveAs(
+                                                        name.clone(),
+                                                    ));
+                                                    hp.set_save_as_open(false);
+                                                    hp.save_as_buf_mut().clear();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        for w in self
+                                            .widget_manager
+                                            .widgets
+                                            .iter_mut()
+                                            .chain(self.tool_widgets.iter_mut())
+                                        {
+                                            if let Some(hp) =
+                                                w.as_any_mut().downcast_mut::<WHeadPlot>()
+                                            {
+                                                hp.set_save_as_open(false);
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                            ui.add_space(8.0);
+
+                            if let Some(board) = self.board.as_deref() {
+                                {
+                                    let mut widget_ctx = WidgetContext::new(
+                                        &mut self.networking,
+                                        &mut self.data_logger,
+                                        &mut self.last_marker,
+                                        &mut self.event_log,
+                                        &mut self.emg,
+                                    );
+                                    ui.small(
+                                        egui::RichText::new("Board").color(theme::HAIRLINE),
+                                    );
+                                    show_named_tool(
+                                        &mut self.tool_widgets,
+                                        "Board",
+                                        ui,
+                                        board,
+                                        &mut widget_ctx,
+                                    );
+                                    ui.small(
+                                        egui::RichText::new("Impedance")
+                                            .color(theme::HAIRLINE),
+                                    );
+                                    show_named_tool(
+                                        &mut self.tool_widgets,
+                                        "Impedance",
+                                        ui,
+                                        board,
+                                        &mut widget_ctx,
+                                    );
+                                    ui.small(
+                                        egui::RichText::new("Analog Read")
+                                            .color(theme::HAIRLINE),
+                                    );
+                                    show_named_tool(
+                                        &mut self.tool_widgets,
+                                        "Analog Read",
+                                        ui,
+                                        board,
+                                        &mut widget_ctx,
+                                    );
+                                    ui.small(
+                                        egui::RichText::new("Digital Read")
+                                            .color(theme::HAIRLINE),
+                                    );
+                                    show_named_tool(
+                                        &mut self.tool_widgets,
+                                        "Digital Read",
+                                        ui,
+                                        board,
+                                        &mut widget_ctx,
+                                    );
+                                    ui.small(
+                                        egui::RichText::new("Pulse Sensor")
+                                            .color(theme::HAIRLINE),
+                                    );
+                                    show_named_tool(
+                                        &mut self.tool_widgets,
+                                        "Pulse Sensor",
+                                        ui,
+                                        board,
+                                        &mut widget_ctx,
+                                    );
+                                }
+                                // Packet Loss inspect lives in Hardware, not as a spine row.
+                                ui.small(
+                                    egui::RichText::new("Packet Loss")
+                                        .color(theme::HAIRLINE),
+                                );
+                                let loss = self.packet_loss_percent;
+                                let loss_color = crate::stream_stats::loss_color(loss);
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(loss_color, format!("{:.1}%", loss));
+                                    if ui.button("Reset").clicked() {
+                                        self.packet_loss_history.clear();
+                                        self.packet_loss_percent = 0.0;
+                                        self.window_samples = 0;
+                                        self.window_lost = 0;
+                                        self.last_sample_time = None;
+                                        self.samples_received = 0;
+                                        self.event_log
+                                            .log_system("Packet loss stats reset by user");
+                                    }
+                                });
+                                let hist = &self.packet_loss_history;
+                                if !hist.is_empty() {
+                                    let desired = egui::vec2(ui.available_width(), 42.0);
+                                    let (resp, painter) =
+                                        ui.allocate_painter(desired, egui::Sense::hover());
+                                    let rect = resp.rect;
+                                    let max_l = hist
+                                        .iter()
+                                        .copied()
+                                        .fold(0.0f32, |a, b| a.max(b))
+                                        .max(1.0);
+                                    let n = hist.len() as f32;
+                                    for (i, &v) in hist.iter().enumerate() {
+                                        let x = rect.min.x + (i as f32 / n) * rect.width();
+                                        let y_norm = (v / max_l).min(1.0);
+                                        let y = rect.max.y - y_norm * rect.height();
+                                        if i > 0 {
+                                            let px = rect.min.x
+                                                + ((i - 1) as f32 / n) * rect.width();
+                                            let py_norm = (hist[i - 1] / max_l).min(1.0);
+                                            let py = rect.max.y - py_norm * rect.height();
+                                            painter.line_segment(
+                                                [egui::pos2(px, py), egui::pos2(x, y)],
+                                                egui::Stroke::new(1.5_f32, loss_color),
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    ui.small("(no loss history yet)");
+                                }
+                            }
+                        });
+                        draw_exclusive_section(ui, &mut open, "Fonts", |ui| {
+                            ui.label(egui::RichText::new("Type sizes").color(theme::TEXT));
+                            ui.add(
+                                egui::Slider::new(&mut self.font_sizes.body, 12.0..=22.0)
+                                    .text("Body"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut self.font_sizes.heading, 16.0..=28.0)
+                                    .text("Heading"),
+                            );
+                            if ui.button("Reset fonts").clicked() {
+                                self.font_sizes = theme::FontSizes::default();
+                            }
+                            theme::set_font_sizes(self.font_sizes.clone());
+                        });
+                        self.properties_open = open;
+                    });
+            });
+    }
+
+    fn draw_live_transport(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("rebot_transport")
+            .exact_height(40.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::TRANSPORT)
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let stream_label = transport_go_label(false, self.streaming);
+                    let mut stream_btn =
+                        egui::Button::new(egui::RichText::new(stream_label).color(theme::TEXT))
+                            .min_size(egui::vec2(56.0, 24.0));
+                    if self.streaming {
+                        stream_btn = stream_btn.fill(theme::START);
+                    } else {
+                        stream_btn = stream_btn
+                            .fill(theme::PANEL_RAISED)
+                            .stroke(theme::hairline());
+                    }
+                    if ui.add(stream_btn).clicked() {
+                        if self.streaming {
+                            if let Some(ref mut b) = self.board {
+                                let _ = b.stop_streaming();
+                            }
+                            self.streaming = false;
+                            self.event_log.log_system("Streaming stopped");
+                            self.stop_recording_like_session();
+                            self.stop_cyton_sd_write_if_active();
+                        } else {
+                            let sd_ok = if self.record_destination.wants_sd()
+                                && !self.cyton_sd_active
+                            {
+                                self.start_cyton_sd_write()
+                            } else {
+                                true
+                            };
+                            if sd_ok {
+                                if let Some(ref mut b) = self.board {
+                                    if b.start_streaming().is_ok() {
+                                        self.streaming = true;
+                                        self.event_log.log_system("Streaming started");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.draw_record_export(ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("End").color(theme::TEXT),
+                                )
+                                .fill(theme::PANEL_RAISED)
+                                .stroke(theme::hairline())
+                                .min_size(egui::vec2(44.0, 24.0)),
+                            )
+                            .clicked()
+                        {
+                            self.end_session();
+                        }
+                        if ui.button("Console").clicked() {
+                            self.console_show_window = !self.console_show_window;
+                        }
+                        // Window / Smooth chips (already existed on transport).
+                        self.draw_display_controls(ui);
+                    });
+                });
+            });
+    }
+
+    fn draw_playback_transport(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("rebot_playback_bar")
+            .exact_height(40.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::TRANSPORT)
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let stream_label = transport_go_label(true, self.streaming);
+                    let mut stream_btn =
+                        egui::Button::new(egui::RichText::new(stream_label).color(theme::TEXT))
+                            .min_size(egui::vec2(56.0, 24.0));
+                    if self.streaming {
+                        stream_btn = stream_btn.fill(theme::START);
+                    } else {
+                        stream_btn = stream_btn
+                            .fill(theme::PANEL_RAISED)
+                            .stroke(theme::hairline());
+                    }
+                    if ui.add(stream_btn).clicked() {
+                        if let Some(ref mut b) = self.board {
+                            if self.streaming {
+                                let _ = b.stop_streaming();
+                                self.streaming = false;
+                            } else if b.start_streaming().is_ok() {
+                                self.streaming = true;
+                            }
+                        }
+                    }
+                    self.apply_playback_scrub(ui, 220.0);
+                    if let Some(b) = self.board.as_deref_mut() {
+                        if b.playback_progress().is_some() {
+                            for &s in &[0.5, 1.0, 2.0] {
+                                let lbl = format!("{:.1}x", s);
+                                if ui
+                                    .selectable_label(
+                                        b.playback_speed()
+                                            .is_some_and(|cur| (cur - s).abs() < 0.01),
+                                        lbl,
+                                    )
+                                    .clicked()
+                                {
+                                    b.set_playback_speed(s);
+                                }
+                            }
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("End").color(theme::TEXT),
+                                )
+                                .fill(theme::PANEL_RAISED)
+                                .stroke(theme::hairline()),
+                            )
+                            .clicked()
+                        {
+                            self.end_session();
+                        }
+                        if ui.button("Console").clicked() {
+                            self.console_show_window = !self.console_show_window;
+                        }
+                    });
+                });
+            });
+    }
+
+    fn draw_session_viewport(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(theme::CANVAS))
+            .show(ctx, |ui| {
+                self.apply_display_controls();
+                if let Some(board) = self.board.as_deref() {
+                    self.widget_manager.update(board);
+                    let overlay = self.experiment.overlay(std::time::Instant::now());
+                    for w in &mut self.widget_manager.widgets {
+                        if let Some(ts) = w.as_any_mut().downcast_mut::<WTimeSeries>() {
+                            ts.set_experiment_overlay(overlay.clone());
+                        }
+                    }
+                    let mut widget_ctx = WidgetContext::new(
+                        &mut self.networking,
+                        &mut self.data_logger,
+                        &mut self.last_marker,
+                        &mut self.event_log,
+                        &mut self.emg,
+                    );
+                    self.widget_manager.draw(ui, board, &mut widget_ctx);
+                    self.drain_head_montage();
+                    self.sync_head_plot_chrome();
+                }
+            });
+        self.drain_time_series_drop_mark();
+        self.drain_time_series_scrub();
+    }
 }
 
 impl eframe::App for OpenBciGuiApp {
@@ -2342,31 +3340,9 @@ impl eframe::App for OpenBciGuiApp {
                             None,
                         ))
                     } else {
-                        self.control_panel.refresh_serial_ports();
-                        let preferred = self
-                            .control_panel
-                            .selected_serial_port
-                            .and_then(|i| self.control_panel.serial_ports.get(i))
-                            .map(|p| p.port_name.clone());
-                        if let Some(port) = self
-                            .control_panel
-                            .pick_present_cyton_port(preferred.as_deref())
-                        {
-                            tracing::info!("Autostart Cyton on {port}");
-                            Some((
-                                crate::control_panel::DataSourceType::CytonSerial,
-                                self.control_panel.cyton_channels.max(8),
-                                Some(port),
-                            ))
-                        } else {
-                            self.simulation_notice = true;
-                            tracing::info!("No Cyton dongle — BrainFlow synthetic");
-                            Some((
-                                crate::control_panel::DataSourceType::Synthetic,
-                                self.control_panel.synthetic_channels.max(1),
-                                None,
-                            ))
-                        }
+                        // Place lock: stay on Session Setup unless crop / LIVE_SERIAL.
+                        tracing::info!("Session Setup — no blanket autostart");
+                        None
                     }
                 } else {
                     None
@@ -2524,10 +3500,19 @@ impl eframe::App for OpenBciGuiApp {
                         }
                     }
                 }
-            // Session may have started this frame (Synthetic / Playback). Fall through to transport.
+            // Session may have started this frame (Synthetic / Playback). Fall through to shell.
             if setup_panel_active(self.system_mode) {
-                ctx.request_repaint();
-                return;
+                self.place = AppPlace::SessionSetup;
+                self.draw_rebot_shell(ctx);
+                if let Some((source, chans, serial_port)) = self.pending_device.take() {
+                    self.live_autostart_used = true;
+                    self.control_panel.selected_source = source;
+                    self.start_from_setup(source, chans, serial_port);
+                }
+                if setup_panel_active(self.system_mode) {
+                    ctx.request_repaint();
+                    return;
+                }
             }
         }
 
@@ -2761,925 +3746,8 @@ impl eframe::App for OpenBciGuiApp {
             ctx.request_repaint();
         }
 
-        // Thin transport (Ableton / Resolve), not a 64px Java navy header.
-        egui::TopBottomPanel::top("top_nav")
-            .exact_height(32.0)
-            .frame(
-                egui::Frame::NONE
-                    .fill(theme::TRANSPORT)
-                    .inner_margin(egui::Margin::symmetric(8, 2)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let is_take = self
-                        .board
-                        .as_ref()
-                        .and_then(|b| b.playback_progress())
-                        .is_some();
-                    if is_take {
-                        // Finished take: Play / Pause. Never Start Session.
-                        let stream_label = transport_go_label(true, self.streaming);
-                        let mut stream_btn = egui::Button::new(egui::RichText::new(stream_label).color(theme::TEXT))
-                            .min_size(egui::vec2(56.0, 22.0));
-                        if self.streaming {
-                            stream_btn = stream_btn.fill(theme::START);
-                        } else {
-                            stream_btn = stream_btn.fill(theme::PANEL).stroke(theme::hairline());
-                        }
-                        if ui.add(stream_btn).clicked() {
-                            if let Some(ref mut b) = self.board {
-                                if self.streaming {
-                                    let _ = b.stop_streaming();
-                                    self.streaming = false;
-                                    self.event_log.log_system("Playback paused");
-                                } else if let Err(e) = b.start_streaming() {
-                                    tracing::error!("Play failed: {:?}", e);
-                                    self.event_log
-                                        .log_error(&format!("Failed to play take: {}", e));
-                                } else {
-                                    self.streaming = true;
-                                    self.event_log.log_system("Playback resumed");
-                                }
-                            }
-                        }
-                    } else {
-                        // Live: Start / Stop only.
-                        let stream_label = transport_go_label(false, self.streaming);
-                        let mut stream_btn = egui::Button::new(egui::RichText::new(stream_label).color(theme::TEXT))
-                            .min_size(egui::vec2(56.0, 22.0));
-                        if self.streaming {
-                            stream_btn = stream_btn.fill(theme::START);
-                        } else {
-                            stream_btn = stream_btn.fill(theme::PANEL).stroke(theme::hairline());
-                        }
-                        if ui.add(stream_btn).clicked() {
-                            if self.streaming {
-                                if let Some(ref mut b) = self.board {
-                                    let _ = b.stop_streaming();
-                                }
-                                self.streaming = false;
-                                self.event_log.log_system("Streaming stopped");
-                                // Stop session stream also stops Record if it is running.
-                                self.stop_recording_like_session();
-                                self.stop_cyton_sd_write_if_active();
-                            } else {
-                                // SD|Both: arm Cyton SD on Start, before start_streaming
-                                // (never mid-live Record via config_board — kills graph spike).
-                                let sd_ok = if self.record_destination.wants_sd()
-                                    && !self.cyton_sd_active
-                                {
-                                    self.start_cyton_sd_write()
-                                } else {
-                                    true
-                                };
-                                if !sd_ok {
-                                    // Fail-closed — connection_status already
-                                    // "Couldn't write to the SD card". No stream.
-                                } else if let Some(ref mut b) = self.board {
-                                    if let Err(e) = b.start_streaming() {
-                                        tracing::error!("Start failed: {:?}", e);
-                                        self.event_log.log_error(&format!(
-                                            "Failed to start streaming: {}",
-                                            e
-                                        ));
-                                        if self.cyton_sd_active {
-                                            self.stop_cyton_sd_write_if_active();
-                                        }
-                                    } else {
-                                        self.streaming = true;
-                                        self.event_log.log_system("Streaming started");
-                                    }
-                                }
-                            }
-                        }
-                        // Live has no Play. Open a finished take from Session Setup (Playback).
-                    }
-
-                    self.draw_record_export(ui);
-                    self.draw_display_controls(ui);
-
-                    let exp_running = self.experiment.is_running();
-                    let exp_label = if exp_running {
-                        "Stop experiment"
-                    } else {
-                        "Run experiment"
-                    };
-                    let live_hw = self.board.as_ref().is_some_and(|b| {
-                        let n = b.name();
-                        n != "Playback" && !n.contains("Synthetic")
-                    });
-                    let exp_fill = if exp_running {
-                        theme::STOP
-                    } else if live_hw {
-                        theme::START
-                    } else {
-                        theme::PANEL
-                    };
-                    if ui
-                        .add(
-                            egui::Button::new(egui::RichText::new(exp_label).color(theme::TEXT))
-                                .fill(exp_fill)
-                                .stroke(theme::hairline())
-                                .min_size(egui::vec2(120.0, 22.0)),
-                        )
-                        .clicked()
-                    {
-                        if exp_running {
-                            self.cancel_experiment();
-                        } else {
-                            self.start_experiment();
-                        }
-                    }
-
-                    if self
-                        .board
-                        .as_ref()
-                        .and_then(|b| b.playback_progress())
-                        .is_some()
-                    {
-                        if ui.button("-10s").clicked() {
-                            if let Some(ref mut b) = self.board {
-                                if let Some((pos, total)) = b.playback_progress() {
-                                    let sr = b.sample_rate().max(1) as f32;
-                                    let tot = total.max(1) as f32;
-                                    b.seek_to_fraction(
-                                        ((pos as f32 - 10.0 * sr) / tot).clamp(0.0, 1.0),
-                                    );
-                                }
-                            }
-                        }
-                        if ui.button("+10s").clicked() {
-                            if let Some(ref mut b) = self.board {
-                                if let Some((pos, total)) = b.playback_progress() {
-                                    let sr = b.sample_rate().max(1) as f32;
-                                    let tot = total.max(1) as f32;
-                                    b.seek_to_fraction(
-                                        ((pos as f32 + 10.0 * sr) / tot).clamp(0.0, 1.0),
-                                    );
-                                }
-                            }
-                        }
-                        self.apply_playback_scrub(ui, 180.0);
-                    }
-
-                    ui.separator();
-
-                    if let Some(ref b) = self.board {
-                        let is_take = b.playback_progress().is_some();
-                        let run = transport_run_chip(is_take, self.streaming);
-                        ui.label(
-                            egui::RichText::new(format!("{}  {run}", b.name())).color(theme::TEXT),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{}  {}",
-                                crate::stream_stats::format_hz(self.current_sample_rate).trim(),
-                                crate::stream_stats::format_loss(self.packet_loss_percent).trim()
-                            ))
-                            .monospace()
-                            .color(crate::stream_stats::loss_color(self.packet_loss_percent)),
-                        );
-                    }
-
-                    // Rec elapsed lives beside Record/Stop Rec in draw_record_export
-                    // (not Hertz/Loss-adjacent).
-
-                    if let Some(focus) = self
-                        .tool_widgets
-                        .iter()
-                        .find_map(|t| t.as_any().downcast_ref::<WFocus>())
-                    {
-                        ui.separator();
-                        focus.paint_transport_chip(ui);
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // End sits at the far right of transport (Ableton/Resolve-style).
-                        if ui
-                            .add(
-                                egui::Button::new(egui::RichText::new("End").color(theme::TEXT))
-                                    .fill(theme::PANEL)
-                                    .stroke(theme::hairline())
-                                    .min_size(egui::vec2(44.0, 22.0)),
-                            )
-                            .clicked()
-                        {
-                            self.end_session();
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("Device").color(theme::TEXT),
-                                )
-                                .fill(theme::PANEL)
-                                .stroke(theme::hairline())
-                                .min_size(egui::vec2(56.0, 22.0)),
-                            )
-                            .clicked()
-                        {
-                            self.device_picker_open = !self.device_picker_open;
-                            self.control_panel.refresh_serial_ports();
-                        }
-                        ui.small(
-                            egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                                .color(theme::HAIRLINE),
-                        );
-                    });
-                });
-            });
-
-        if self.simulation_notice && self.system_mode == SystemMode::PostInit {
-            egui::TopBottomPanel::top("sim_notice")
-                .exact_height(36.0)
-                .frame(
-                    egui::Frame::NONE
-                        .fill(egui::Color32::from_rgb(0x1a, 0x32, 0x30))
-                        .inner_margin(egui::Margin::symmetric(10, 6)),
-                )
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(
-                                "Simulation — BrainFlow synthetic. No Cyton dongle. Choose a device to record.",
-                            )
-                            .color(theme::SETUP_CYAN),
-                        );
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("Choose device")
-                                        .color(theme::TEXT)
-                                        .strong(),
-                                )
-                                .fill(theme::PANEL)
-                                .stroke(egui::Stroke::new(1.0_f32, theme::SETUP_CYAN)),
-                            )
-                            .clicked()
-                        {
-                            self.device_picker_open = true;
-                            self.control_panel.refresh_serial_ports();
-                        }
-                    });
-                });
-        }
-
-        if self.device_picker_open {
-            let mut open = true;
-            egui::Window::new("Choose device")
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    if let Some((source, chans, serial_port)) = self.control_panel.draw(ui) {
-                        self.pending_device = Some((source, chans, serial_port));
-                        self.device_picker_open = false;
-                    }
-                });
-            if !open {
-                self.device_picker_open = false;
-            }
-        }
-
-        if let Some((source, chans, serial_port)) = self.pending_device.take() {
-            if self.board.is_some() {
-                if let Some(mut board) = self.board.take() {
-                    if board.is_streaming() {
-                        let _ = board.stop_streaming();
-                    }
-                    let _ = board.uninitialize();
-                }
-                self.streaming = false;
-            }
-            self.simulation_notice = source == DataSourceType::Synthetic;
-            self.live_autostart_used = true;
-            self.system_mode = SystemMode::PreInit;
-            self.pending_device = Some((source, chans, serial_port));
-        }
-
-        if !self.tool_widgets.is_empty() {
-            egui::SidePanel::right("tool_panel")
-                .resizable(true)
-                .default_width(280.0)
-                .min_width(220.0)
-                .max_width(420.0)
-                .frame(
-                    egui::Frame::NONE
-                        .fill(theme::PANEL)
-                        .stroke(theme::hairline())
-                        .inner_margin(6.0),
-                )
-                .show(ctx, |ui| {
-                    ui.vertical(|ui| {
-                        ui.small(egui::RichText::new("PROPERTIES").color(theme::HAIRLINE));
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false; 2])
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 0.0;
-                                let mut open = self.properties_open.take();
-                                properties_card(ui, |ui| {
-                                    self.draw_session_rack(ui, &mut open);
-                                });
-                                draw_exclusive_section(ui, &mut open, "Experiments", |ui| {
-                                    if !self.experiment.is_running() {
-                                        egui::ComboBox::from_id_salt("exp_protocol")
-                                            .selected_text(self.experiment_protocol.label())
-                                            .show_ui(ui, |ui| {
-                                                ui.selectable_value(
-                                                    &mut self.experiment_protocol,
-                                                    ProtocolKind::Guided,
-                                                    ProtocolKind::Guided.label(),
-                                                );
-                                                ui.selectable_value(
-                                                    &mut self.experiment_protocol,
-                                                    ProtocolKind::EyesClosed,
-                                                    ProtocolKind::EyesClosed.label(),
-                                                );
-                                            });
-                                    } else {
-                                        ui.label(
-                                            egui::RichText::new(self.experiment.protocol().label())
-                                                .color(theme::TEXT),
-                                        );
-                                    }
-                                    let exp_running = self.experiment.is_running();
-                                    let exp_label = if exp_running {
-                                        "Stop"
-                                    } else {
-                                        "Start"
-                                    };
-                                    if ui
-                                        .add(
-                                            egui::Button::new(
-                                                egui::RichText::new(exp_label).color(theme::TEXT),
-                                            )
-                                            .fill(if exp_running {
-                                                theme::STOP
-                                            } else {
-                                                theme::START
-                                            })
-                                            .stroke(theme::hairline()),
-                                        )
-                                        .clicked()
-                                    {
-                                        if exp_running {
-                                            self.cancel_experiment();
-                                        } else {
-                                            self.start_experiment();
-                                        }
-                                    }
-                                    if let Some(board) = self.board.as_deref() {
-                                        let mut widget_ctx = WidgetContext::new(
-                                            &mut self.networking,
-                                            &mut self.data_logger,
-                                            &mut self.last_marker,
-                                            &mut self.event_log,
-                                            &mut self.emg,
-                                        );
-                                        ui.small(
-                                            egui::RichText::new("Marker").color(theme::HAIRLINE),
-                                        );
-                                        show_named_tool(
-                                            &mut self.tool_widgets,
-                                            "Marker",
-                                            ui,
-                                            board,
-                                            &mut widget_ctx,
-                                        );
-                                    }
-                                });
-                                draw_exclusive_section(ui, &mut open, "Networking", |ui| {
-                                    if let Some(board) = self.board.as_deref() {
-                                        let mut widget_ctx = WidgetContext::new(
-                                            &mut self.networking,
-                                            &mut self.data_logger,
-                                            &mut self.last_marker,
-                                            &mut self.event_log,
-                                            &mut self.emg,
-                                        );
-                                        show_named_tool(
-                                            &mut self.tool_widgets,
-                                            "Networking",
-                                            ui,
-                                            board,
-                                            &mut widget_ctx,
-                                        );
-                                    }
-                                });
-                                draw_exclusive_section(ui, &mut open, "Hardware", |ui| {
-                                    // Headset and Montage controls (moved from Head Plot)
-                                    ui.small(
-                                        egui::RichText::new("Headset").color(theme::HAIRLINE),
-                                    );
-                                    let mut headset = HEADSET_NAME.to_string();
-                                    egui::ComboBox::from_id_salt("hw_headset")
-                                        .selected_text(HEADSET_NAME)
-                                        .width(168.0)
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(
-                                                &mut headset,
-                                                HEADSET_NAME.to_string(),
-                                                HEADSET_NAME,
-                                            );
-                                        });
-                                    let _ = headset;
-
-                                    // Montage profile selector and save controls
-                                    ui.small(
-                                        egui::RichText::new("Montage").color(theme::HAIRLINE),
-                                    );
-                                    // Get current montage state from WHeadPlot
-                                    let (profile_name, profile_names, dirty, save_as_open) = {
-                                        let hp = self
-                                            .widget_manager
-                                            .widgets
-                                            .iter()
-                                            .chain(self.tool_widgets.iter())
-                                            .find_map(|w| w.as_any().downcast_ref::<WHeadPlot>());
-                                        if let Some(hp) = hp {
-                                            (
-                                                hp.profile_name().to_string(),
-                                                hp.profile_names().to_vec(),
-                                                hp.is_dirty(),
-                                                hp.is_save_as_open(),
-                                            )
-                                        } else {
-                                            (
-                                                self.montage.last_name().to_string(),
-                                                self.montage.names(),
-                                                false,
-                                                false,
-                                            )
-                                        }
-                                    };
-                                    let shown = if dirty {
-                                        format!("{}*", profile_name)
-                                    } else {
-                                        profile_name.clone()
-                                    };
-                                    let mut pick = profile_name.clone();
-                                    ui.horizontal(|ui| {
-                                        egui::ComboBox::from_id_salt("hw_montage_profile")
-                                            .selected_text(&shown)
-                                            .width(110.0)
-                                            .show_ui(ui, |ui| {
-                                                for n in &profile_names {
-                                                    ui.selectable_value(&mut pick, n.clone(), n);
-                                                }
-                                            });
-                                        let save = egui::Button::new("Save").small().frame(false);
-                                        if ui
-                                            .add(save)
-                                            .on_hover_text(
-                                                "Write channel → 10-20 hole into the active profile",
-                                            )
-                                            .clicked()
-                                        {
-                                            for w in self
-                                                .widget_manager
-                                                .widgets
-                                                .iter_mut()
-                                                .chain(self.tool_widgets.iter_mut())
-                                            {
-                                                if let Some(hp) =
-                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
-                                                {
-                                                    hp.set_action(MontageUiAction::Save);
-                                                }
-                                            }
-                                        }
-                                        if ui
-                                            .add(egui::Button::new("Load").small().frame(false))
-                                            .on_hover_text("Load the selected profile")
-                                            .clicked()
-                                        {
-                                            for w in self
-                                                .widget_manager
-                                                .widgets
-                                                .iter_mut()
-                                                .chain(self.tool_widgets.iter_mut())
-                                            {
-                                                if let Some(hp) =
-                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
-                                                {
-                                                    hp.set_action(MontageUiAction::Select(
-                                                        shown.clone(),
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                        if ui
-                                            .add(egui::Button::new("Default").small().frame(false))
-                                            .on_hover_text("Official 8 inserts")
-                                            .clicked()
-                                        {
-                                            for w in self
-                                                .widget_manager
-                                                .widgets
-                                                .iter_mut()
-                                                .chain(self.tool_widgets.iter_mut())
-                                            {
-                                                if let Some(hp) =
-                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
-                                                {
-                                                    hp.set_action(MontageUiAction::Select(
-                                                        crate::widgets::head_plot::DEFAULT_PROFILE_NAME
-                                                            .to_string(),
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                        if ui
-                                            .add(egui::Button::new("Save as").small().frame(false))
-                                            .clicked()
-                                        {
-                                            for w in self
-                                                .widget_manager
-                                                .widgets
-                                                .iter_mut()
-                                                .chain(self.tool_widgets.iter_mut())
-                                            {
-                                                if let Some(hp) =
-                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
-                                                {
-                                                    hp.set_save_as_open(true);
-                                                }
-                                            }
-                                        }
-                                    });
-                                    if pick != profile_name {
-                                        for w in self
-                                            .widget_manager
-                                            .widgets
-                                            .iter_mut()
-                                            .chain(self.tool_widgets.iter_mut())
-                                        {
-                                            if let Some(hp) =
-                                                w.as_any_mut().downcast_mut::<WHeadPlot>()
-                                            {
-                                                hp.set_action(MontageUiAction::Select(pick.clone()));
-                                            }
-                                        }
-                                    }
-                                    // Save as dialog
-                                    if save_as_open {
-                                        ui.horizontal(|ui| {
-                                            ui.label("Name");
-                                            let mut buf = String::new();
-                                            for w in self
-                                                .widget_manager
-                                                .widgets
-                                                .iter_mut()
-                                                .chain(self.tool_widgets.iter_mut())
-                                            {
-                                                if let Some(hp) =
-                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
-                                                {
-                                                    buf = hp.save_as_buf().to_string();
-                                                    break;
-                                                }
-                                            }
-                                            let resp = ui.add(
-                                                egui::TextEdit::singleline(&mut buf)
-                                                    .desired_width(140.0),
-                                            );
-                                            // Update buffer in WHeadPlot
-                                            for w in self
-                                                .widget_manager
-                                                .widgets
-                                                .iter_mut()
-                                                .chain(self.tool_widgets.iter_mut())
-                                            {
-                                                if let Some(hp) =
-                                                    w.as_any_mut().downcast_mut::<WHeadPlot>()
-                                                {
-                                                    *hp.save_as_buf_mut() = buf.clone();
-                                                }
-                                            }
-                                            if ui.button("Create").clicked()
-                                                || (resp.lost_focus()
-                                                    && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                                            {
-                                                let name = buf.trim().to_string();
-                                                if !name.is_empty() {
-                                                    for w in self
-                                                        .widget_manager
-                                                        .widgets
-                                                        .iter_mut()
-                                                        .chain(self.tool_widgets.iter_mut())
-                                                    {
-                                                        if let Some(hp) =
-                                                            w.as_any_mut().downcast_mut::<WHeadPlot>()
-                                                        {
-                                                            hp.set_action(MontageUiAction::SaveAs(
-                                                                name.clone(),
-                                                            ));
-                                                            hp.set_save_as_open(false);
-                                                            hp.save_as_buf_mut().clear();
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            if ui.button("Cancel").clicked() {
-                                                for w in self
-                                                    .widget_manager
-                                                    .widgets
-                                                    .iter_mut()
-                                                    .chain(self.tool_widgets.iter_mut())
-                                                {
-                                                    if let Some(hp) =
-                                                        w.as_any_mut().downcast_mut::<WHeadPlot>()
-                                                    {
-                                                        hp.set_save_as_open(false);
-                                                    }
-                                                }
-                                            }
-                                        });
-                                    }
-                                    ui.add_space(8.0);
-
-                                    if let Some(board) = self.board.as_deref() {
-                                        {
-                                            let mut widget_ctx = WidgetContext::new(
-                                                &mut self.networking,
-                                                &mut self.data_logger,
-                                                &mut self.last_marker,
-                                                &mut self.event_log,
-                                                &mut self.emg,
-                                            );
-                                            ui.small(
-                                                egui::RichText::new("Board").color(theme::HAIRLINE),
-                                            );
-                                            show_named_tool(
-                                                &mut self.tool_widgets,
-                                                "Board",
-                                                ui,
-                                                board,
-                                                &mut widget_ctx,
-                                            );
-                                            ui.small(
-                                                egui::RichText::new("Impedance")
-                                                    .color(theme::HAIRLINE),
-                                            );
-                                            show_named_tool(
-                                                &mut self.tool_widgets,
-                                                "Impedance",
-                                                ui,
-                                                board,
-                                                &mut widget_ctx,
-                                            );
-                                            ui.small(
-                                                egui::RichText::new("Analog Read")
-                                                    .color(theme::HAIRLINE),
-                                            );
-                                            show_named_tool(
-                                                &mut self.tool_widgets,
-                                                "Analog Read",
-                                                ui,
-                                                board,
-                                                &mut widget_ctx,
-                                            );
-                                            ui.small(
-                                                egui::RichText::new("Digital Read")
-                                                    .color(theme::HAIRLINE),
-                                            );
-                                            show_named_tool(
-                                                &mut self.tool_widgets,
-                                                "Digital Read",
-                                                ui,
-                                                board,
-                                                &mut widget_ctx,
-                                            );
-                                            ui.small(
-                                                egui::RichText::new("Pulse Sensor")
-                                                    .color(theme::HAIRLINE),
-                                            );
-                                            show_named_tool(
-                                                &mut self.tool_widgets,
-                                                "Pulse Sensor",
-                                                ui,
-                                                board,
-                                                &mut widget_ctx,
-                                            );
-                                        }
-                                        // Packet Loss inspect lives in Hardware, not as a spine row.
-                                        ui.small(
-                                            egui::RichText::new("Packet Loss")
-                                                .color(theme::HAIRLINE),
-                                        );
-                                        let loss = self.packet_loss_percent;
-                                        let loss_color = crate::stream_stats::loss_color(loss);
-                                        ui.horizontal(|ui| {
-                                            ui.colored_label(loss_color, format!("{:.1}%", loss));
-                                            if ui.button("Reset").clicked() {
-                                                self.packet_loss_history.clear();
-                                                self.packet_loss_percent = 0.0;
-                                                self.window_samples = 0;
-                                                self.window_lost = 0;
-                                                self.last_sample_time = None;
-                                                self.samples_received = 0;
-                                                self.event_log
-                                                    .log_system("Packet loss stats reset by user");
-                                            }
-                                        });
-                                        let hist = &self.packet_loss_history;
-                                        if !hist.is_empty() {
-                                            let desired = egui::vec2(ui.available_width(), 42.0);
-                                            let (resp, painter) =
-                                                ui.allocate_painter(desired, egui::Sense::hover());
-                                            let rect = resp.rect;
-                                            let max_l = hist
-                                                .iter()
-                                                .copied()
-                                                .fold(0.0f32, |a, b| a.max(b))
-                                                .max(1.0);
-                                            let n = hist.len() as f32;
-                                            for (i, &v) in hist.iter().enumerate() {
-                                                let x = rect.min.x + (i as f32 / n) * rect.width();
-                                                let y_norm = (v / max_l).min(1.0);
-                                                let y = rect.max.y - y_norm * rect.height();
-                                                if i > 0 {
-                                                    let px = rect.min.x
-                                                        + ((i - 1) as f32 / n) * rect.width();
-                                                    let py_norm = (hist[i - 1] / max_l).min(1.0);
-                                                    let py = rect.max.y - py_norm * rect.height();
-                                                    painter.line_segment(
-                                                        [egui::pos2(px, py), egui::pos2(x, y)],
-                                                        egui::Stroke::new(1.5_f32, loss_color),
-                                                    );
-                                                }
-                                            }
-                                        } else {
-                                            ui.small("(no loss history yet)");
-                                        }
-                                    }
-                                });
-                                draw_exclusive_section(ui, &mut open, "Fonts", |ui| {
-                                    ui.label(
-                                        egui::RichText::new("Type sizes").color(theme::TEXT),
-                                    );
-                                    let mut dirty = false;
-                                    let mut drag = |ui: &mut egui::Ui, label: &str, val: &mut f32| {
-                                        ui.horizontal(|ui| {
-                                            ui.label(label);
-                                            if ui
-                                                .add(
-                                                    egui::DragValue::new(val)
-                                                        .range(8.0..=48.0)
-                                                        .speed(0.25),
-                                                )
-                                                .changed()
-                                            {
-                                                dirty = true;
-                                            }
-                                        });
-                                    };
-                                    drag(ui, "small", &mut self.font_sizes.small);
-                                    drag(ui, "body", &mut self.font_sizes.body);
-                                    drag(ui, "button", &mut self.font_sizes.button);
-                                    drag(ui, "heading", &mut self.font_sizes.heading);
-                                    drag(ui, "mono", &mut self.font_sizes.mono);
-                                    drag(ui, "marks", &mut self.font_sizes.marks);
-                                    drag(ui, "hole_label", &mut self.font_sizes.hole_label);
-                                    drag(ui, "caption", &mut self.font_sizes.caption);
-                                    if ui.button("Reset defaults").clicked() {
-                                        self.font_sizes = theme::FontSizes::default();
-                                        dirty = true;
-                                    }
-                                    if dirty {
-                                        theme::set_font_sizes(self.font_sizes.clone());
-                                        self.font_sizes.apply_egui(ui.ctx());
-                                        self.save_current_persisted_settings();
-                                    }
-                                });
-                                self.properties_open = open;
-                            });
-                    });
-                });
-        }
-
-        // Status bar BEFORE CentralPanel so panes never draw under it (every-pane bottom clip).
-        egui::TopBottomPanel::bottom("status_bar")
-            .exact_height(32.0)
-            .frame(
-                egui::Frame::NONE
-                    .fill(theme::TRANSPORT)
-                    .inner_margin(egui::Margin {
-                        left: 12,
-                        right: 12,
-                        top: 4,
-                        bottom: 8,
-                    }),
-            )
-            .show(ctx, |ui| {
-                // 32px bar − 4 top − 8 bottom = 20px inner; keep Pause/speed on this line.
-                ui.spacing_mut().interact_size.y = 16.0;
-                ui.spacing_mut().button_padding = egui::vec2(6.0, 1.0);
-                ui.horizontal(|ui| {
-                    // Phase 7 Playback polish: compact interactive controls for the magical roundtrip.
-                    // Lets the user pause, change speed, and scrub the exact recording they just made
-                    // while Focus ML+audio, markers (sent during replay), Networking, and Console
-                    // continue to work exactly as in the live session. This makes validation and
-                    // neurofeedback rehearsal trivial without hardware.
-                    if let Some(b) = self.board.as_deref_mut() {
-                        if let Some((pos, total)) = b.playback_progress() {
-                            // Play/Pause is the transport button. Speed stays here.
-                            // Speed presets
-                            for &s in &[0.5, 1.0, 2.0] {
-                                let lbl = format!("{:.1}x", s);
-                                if ui
-                                    .selectable_label(
-                                        b.playback_speed()
-                                            .is_some_and(|cur| (cur - s).abs() < 0.01),
-                                        lbl,
-                                    )
-                                    .clicked()
-                                {
-                                    b.set_playback_speed(s);
-                                    self.event_log
-                                        .log_system(&format!("Playback speed set to {}x", s));
-                                }
-                            }
-
-                            // Progress text + manual seek slider (0..1)
-                            let frac = if total > 0 {
-                                pos as f32 / total as f32
-                            } else {
-                                0.0
-                            };
-                            let secs = pos as f64 / b.sample_rate().max(1) as f64;
-                            let total_secs = total as f64 / b.sample_rate().max(1) as f64;
-                            ui.label(format!("{:.1}/{:.1}s", secs, total_secs));
-                            let _ = frac;
-                        }
-                    }
-                    if self
-                        .board
-                        .as_ref()
-                        .and_then(|b| b.playback_progress())
-                        .is_some()
-                    {
-                        ui.separator();
-                    }
-
-                    if self.networking.has_active_streams() {
-                        ui.colored_label(egui::Color32::from_rgb(100, 180, 255), "📡 Net");
-                    }
-
-                    if !self.last_marker.is_empty() {
-                        ui.colored_label(theme::ACCENT, format!("Last: {}", self.last_marker));
-                    }
-
-                    if ui.button("Console").clicked() {
-                        self.console_show_window = !self.console_show_window;
-                    }
-                    ui.separator();
-                    if let Some(entry) = self.event_log.last_n(1).first() {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&entry.message).color(entry.level.color()),
-                            )
-                            .truncate(),
-                        );
-                    }
-                });
-            });
-
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(theme::CANVAS))
-            .show(ctx, |ui| {
-                // Phase 7: as_deref() yields Option<&dyn DataSource> — uniform for Playback + live boards
-                self.apply_display_controls();
-                if let Some(board) = self.board.as_deref() {
-                    self.widget_manager.update(board);
-
-                    let overlay = self.experiment.overlay(std::time::Instant::now());
-                    for w in &mut self.widget_manager.widgets {
-                        if let Some(ts) = w.as_any_mut().downcast_mut::<WTimeSeries>() {
-                            ts.set_experiment_overlay(overlay.clone());
-                        }
-                    }
-                    // Create a fresh WidgetContext for this frame. This gives every widget
-                    // (especially Marker and the new configurable WNetworking) the ability
-                    // to send markers, reconfigure networking, etc. in a clean, borrow-checker
-                    // friendly way. This is the Phase 4 architectural foundation.
-                    // Phase 7: also passes the EventLog so WConsole and all widgets can emit
-                    // structured, filterable events for the live audit trail.
-                    let mut widget_ctx = WidgetContext::new(
-                        &mut self.networking,
-                        &mut self.data_logger,
-                        &mut self.last_marker,
-                        &mut self.event_log,
-                        &mut self.emg,
-                    );
-                    self.widget_manager.draw(ui, board, &mut widget_ctx);
-                    self.drain_head_montage();
-                    self.sync_head_plot_chrome();
-                }
-            });
-        self.drain_time_series_drop_mark();
-        self.drain_time_series_scrub();
-
+        // ReBot place-locked shell: sidebar | viewport | inspector | transport.
+        self.draw_rebot_shell(ctx);
 
         self.draw_export_prompt(ctx);
 
@@ -4219,7 +4287,19 @@ mod properties_rack_tests {
 
     #[test]
     fn version_is_semver() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.57");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "2.2.58");
+    }
+
+    #[test]
+    fn rebot_place_lock_shell_exists() {
+        let src = include_str!("app.rs");
+        assert!(src.contains("enum AppPlace"));
+        assert!(src.contains("fn draw_nav_sidebar"));
+        assert!(src.contains("fn draw_live_inspector"));
+        assert!(src.contains("fn draw_live_transport"));
+        assert!(src.contains("rebot_nav"));
+        assert!(src.contains("ACCENT_LIME"));
+        assert!(!src.contains("TopBottomPanel::top(\"top_nav\")"));
     }
 
     #[test]
@@ -4242,7 +4322,9 @@ mod properties_rack_tests {
     #[test]
     fn status_bar_is_allocated_before_central_panel() {
         let src = include_str!("app.rs");
-        let status = src.find("TopBottomPanel::bottom(\"status_bar\")").expect("status");
+        let status = src
+            .find("TopBottomPanel::bottom(\"rebot_transport\")")
+            .expect("live transport");
         let central = src
             .find("CentralPanel::default()\n            .frame(egui::Frame::NONE.fill(theme::CANVAS))")
             .expect("session central");
@@ -4251,7 +4333,6 @@ mod properties_rack_tests {
             "egui panels must be allocated before CentralPanel or every pane clips under the bar"
         );
     }
-
     #[test]
     fn status_bar_does_not_draw_a_second_scrub_bar() {
         let src = include_str!("app.rs");
@@ -4260,22 +4341,25 @@ mod properties_rack_tests {
             "bottom status must not host a second scrub bar"
         );
         assert!(
-            src.contains("self.apply_playback_scrub(ui, 180.0)"),
-            "top transport still scrubs"
+            src.contains("self.apply_playback_scrub(ui, 220.0)"),
+            "playback transport scrubs in viewport bar"
         );
     }
 
     #[test]
     fn window_and_smooth_live_on_top_bar_not_session_cutoff() {
         let src = include_str!("app.rs");
-        let top = src
-            .split("top_nav")
+        let transport = src
+            .split("fn draw_live_transport")
             .nth(1)
             .unwrap_or("")
-            .split("tool_panel")
+            .split("fn draw_playback_transport")
             .next()
             .unwrap_or("");
-        assert!(top.contains("draw_display_controls"), "{top}");
+        assert!(
+            transport.contains("draw_display_controls"),
+            "{transport}"
+        );
         assert!(src.contains("from_id_salt(\"top_window\")"));
         assert!(src.contains("from_id_salt(\"top_smooth\")"));
         let session = src
@@ -4294,7 +4378,6 @@ mod properties_rack_tests {
         let bp = include_str!("widgets/band_power.rs");
         assert!(!bp.contains("from_id_salt(\"bp_smooth\")"));
     }
-
     #[test]
     fn play_is_finished_take_live_is_start_stop() {
         assert_eq!(transport_go_label(false, false), "Start");

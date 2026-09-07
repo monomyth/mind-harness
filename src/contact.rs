@@ -139,6 +139,11 @@ impl ContactLog {
         self.common_notice.take()
     }
 
+    /// Fail-closed inspector line (does not clear).
+    pub fn peek_notice(&self) -> Option<&str> {
+        self.common_notice.as_deref()
+    }
+
     pub fn observe(
         &mut self,
         channels: &[Vec<f64>],

@@ -210,11 +210,11 @@ impl ControlPanel {
             let soft_top = (ui.available_height() * 0.18).clamp(16.0, 72.0);
             ui.add_space(soft_top);
 
-            const GLASS_OUTER: f32 = 400.0;
+            const GLASS_OUTER: f32 = 480.0;
 
             let glass = egui::Frame::new()
-                .fill(crate::theme::SETUP_GLASS)
-                .stroke(egui::Stroke::new(1.25, crate::theme::SETUP_CYAN))
+                .fill(crate::theme::PANEL_RAISED)
+                .stroke(egui::Stroke::new(1.0, crate::theme::HAIRLINE))
                 .corner_radius(14.0)
                 .inner_margin(egui::Margin::symmetric(20, 16));
 
@@ -226,8 +226,8 @@ impl ControlPanel {
                     ui.set_max_width(GLASS_OUTER);
                     glass.show(ui, |ui| {
                                 // Content ~360 + 20 side margins => outer ≈400.
-                                ui.set_max_width(360.0);
-                                ui.set_min_width(360.0);
+                                ui.set_max_width(440.0);
+                                ui.set_min_width(400.0);
                                 // Place lock: title + radios + Advanced + details as ONE centered block.
                                 ui.vertical_centered(|ui| {
                             ui.label(
@@ -278,7 +278,7 @@ impl ControlPanel {
                                 .add(
                                     egui::Button::new(
                                         egui::RichText::new("Refresh")
-                                            .color(crate::theme::SETUP_CYAN),
+                                            .color(crate::theme::ACCENT_LIME),
                                     )
                                     .frame(false),
                                 )
@@ -519,15 +519,15 @@ impl ControlPanel {
                 ui.add_space(8.0);
             }
 
-            // Quiet studio Start: PANEL fill + SETUP_CYAN label.
+            // Quiet ReBot Start: PANEL_RAISED fill + ACCENT_LIME label.
             let start = ui.add(
                 egui::Button::new(
                     egui::RichText::new(self.selected_source.go_label())
-                        .color(crate::theme::SETUP_CYAN)
+                        .color(crate::theme::ACCENT_LIME)
                         .strong(),
                 )
-                .fill(crate::theme::PANEL)
-                .stroke(egui::Stroke::new(1.0_f32, crate::theme::SETUP_CYAN))
+                .fill(crate::theme::PANEL_RAISED)
+                .stroke(egui::Stroke::new(1.0_f32, crate::theme::ACCENT_LIME))
                 .corner_radius(8.0)
                 .min_size(egui::vec2(200.0, 36.0)),
             );
@@ -597,7 +597,7 @@ impl ControlPanel {
         result
     }
 
-    /// Radio with cyan selection rim (Imagine). Not a toggle.
+    /// Radio with lime selection tick (ReBot). Not a toggle.
     fn setup_radio(&mut self, ui: &mut egui::Ui, value: DataSourceType, text: &str) {
         let checked = self.selected_source == value;
         let response = ui.add(egui::RadioButton::new(checked, text));
@@ -606,7 +606,7 @@ impl ControlPanel {
             ui.painter().rect_stroke(
                 rect,
                 6.0,
-                egui::Stroke::new(1.5_f32, crate::theme::SETUP_CYAN),
+                egui::Stroke::new(1.5_f32, crate::theme::ACCENT_LIME),
                 egui::StrokeKind::Outside,
             );
         }
@@ -678,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn session_setup_hero_glass_cyan_start() {
+    fn session_setup_quiet_lime_start() {
         let src = include_str!("control_panel.rs");
         let impl_src = src.split("#[cfg(test)]").next().expect("impl before tests");
         let draw_body = impl_src
@@ -696,26 +696,30 @@ mod tests {
                 && !draw_body.contains("300.0")
                 && !draw_body.contains("PAIR")
                 && draw_body.contains("GLASS_OUTER"),
-            "Session Setup must be the glass card only — no hero splash"
+            "Session Setup must be the quiet card only — no hero splash"
         );
         assert!(
             !draw_body.contains("add_space(72.0)"),
             "empty 72px hero slot must stay gone"
         );
         assert!(
-            draw_body.contains("SETUP_GLASS"),
-            "Data Source + Serial stack must sit on frosted glass"
+            draw_body.contains("PANEL_RAISED"),
+            "Data Source + Serial stack must sit on quiet charcoal card"
         );
         assert!(
-            draw_body.contains("SETUP_CYAN"),
-            "glass card and selected radio must use cyan rim"
+            !draw_body.contains("SETUP_CYAN"),
+            "Session Setup chrome must not use Imagine SETUP_CYAN"
         );
         assert!(
-            draw_body.contains(".fill(crate::theme::PANEL)")
-                && draw_body.contains(".color(crate::theme::SETUP_CYAN)")
+            draw_body.contains("ACCENT_LIME"),
+            "selected radio / Start must use ACCENT_LIME"
+        );
+        assert!(
+            draw_body.contains(".fill(crate::theme::PANEL_RAISED)")
+                && draw_body.contains(".color(crate::theme::ACCENT_LIME)")
                 && !draw_body.contains("SETUP_NEON")
                 && !draw_body.contains("0xf2, 0xf7, 0xf8"),
-            "Start Session must use PANEL fill + SETUP_CYAN label, not SETUP_NEON"
+            "Start Session must use PANEL_RAISED fill + ACCENT_LIME label, not SETUP_NEON"
         );
         assert!(
             draw_body.contains("Advanced"),
