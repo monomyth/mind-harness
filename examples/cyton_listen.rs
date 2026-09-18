@@ -56,6 +56,9 @@ fn try_port(port: &str, baud: u32, dtr: bool) {
 }
 
 fn main() {
-    let port = std::env::args().nth(1).unwrap_or_else(|| "/dev/cu.usbserial-DN00967F".into());
+    let port = std::env::args().nth(1).unwrap_or_else(|| {
+        eprintln!("usage: cyton_listen <port>");
+        std::process::exit(2);
+    });
     try_port(&port, 115200, false);
 }

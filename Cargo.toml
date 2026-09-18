@@ -1,6 +1,6 @@
 [package]
 name = "mind-harness"
-version = "2.2.58"
+version = "2.3.1"
 edition = "2021"
 authors = ["Eugene Ray"]
 description = "Mind Harness — native EEG instrument for the Ultracortex Mark IV"
@@ -74,8 +74,7 @@ rosc = "0.10"
 #   parent/
 #     mind-harness/
 #     brainflow/rust_package/brainflow/
-# On WayStation that is often code/grok/mind-harness + a symlink
-# code/grok/brainflow -> ~/github/brainflow. Build native libs with
+# A symlink from parent/brainflow to a BrainFlow clone is fine. Build native libs with
 # scripts/build_brainflow_macos.sh or scripts/build_brainflow_linux.sh;
 # BRAINFLOW_LIB overrides only the native lib search path (not this path=).
 # --------------------------------------------------------------------
@@ -99,7 +98,7 @@ identifier = "com.openbci.gui"
 # Product icon (Grok Imagine Mark IV head) — not the Java sketch.icns / eframe e-icon.
 # Window icon: resources/mind-harness-icon.rgba via ViewportBuilder::with_icon in main.rs.
 icon = ["resources/icon.icns"]
-version = "2.2.58"
+version = "2.3.1"
 resources = ["resources/"]
 copyright = "Copyright © 2026 OpenBCI"
 category = "public.app-category.education"

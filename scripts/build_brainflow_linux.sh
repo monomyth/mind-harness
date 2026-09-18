@@ -7,7 +7,7 @@
 #     mind-harness/
 #     brainflow/
 #
-# Verified on Arch (isengard) for Mind Harness 2.2.53 / e821617.
+# Verified on Arch Linux.
 # This script does not SSH or touch remote hosts; run it on the Linux box.
 #
 # Arch packages (see also scripts/install-mh-linux-deps.sh):
@@ -46,7 +46,7 @@ if [ ! -d "$BRAINFLOW_SRC" ]; then
     exit 1
 fi
 
-# MLModule needs onnxruntime_c_api.h even when BUILD_ONNX=OFF (seen on isengard).
+# MLModule needs onnxruntime_c_api.h even when BUILD_ONNX=OFF.
 ONNX_HDR="$BRAINFLOW_SRC/third_party/onnxruntime/include/onnxruntime_c_api.h"
 if [ ! -f "$ONNX_HDR" ]; then
     echo "ERROR: missing $ONNX_HDR"

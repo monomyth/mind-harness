@@ -630,21 +630,21 @@ mod tests {
                 description: "Bluetooth".into(),
             },
             SerialPortInfo {
-                port_name: "/dev/tty.usbserial-DN00967F".into(),
+                port_name: "/dev/tty.usbserial-TEST1".into(),
                 description: "USB".into(),
             },
             SerialPortInfo {
-                port_name: "/dev/cu.usbserial-DN00967F".into(),
+                port_name: "/dev/cu.usbserial-TEST1".into(),
                 description: "USB".into(),
             },
         ];
         assert_eq!(
             pick_cyton_port(&ports, None).as_deref(),
-            Some("/dev/cu.usbserial-DN00967F")
+            Some("/dev/cu.usbserial-TEST1")
         );
         assert_eq!(
-            pick_cyton_port(&ports, Some("/dev/cu.usbserial-DN00967F")).as_deref(),
-            Some("/dev/cu.usbserial-DN00967F")
+            pick_cyton_port(&ports, Some("/dev/cu.usbserial-TEST1")).as_deref(),
+            Some("/dev/cu.usbserial-TEST1")
         );
         assert!(pick_cyton_port(&[], None).is_none());
     }

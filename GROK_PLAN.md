@@ -1,7 +1,7 @@
 # Grok Build plan — top 10 gaps vs Java OpenBCI GUI
 
-CWD: `/Users/monomyth/code/grok/openbci-gui-rust`
-Reference Java: `~/github/OpenBCI_GUI/OpenBCI_GUI/`
+CWD: this repository
+Reference Java: OpenBCI GUI (https://github.com/OpenBCI/OpenBCI_GUI)
 Do not edit the Java tree.
 
 This is **not** a 1:1 port of every widget. Order is daily-driver Cyton + honest hardware + decoder-ready recordings. Layouts 7–12 and Java chrome clones are out of scope unless a later item names them.

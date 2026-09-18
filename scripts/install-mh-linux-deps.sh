@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install Mind Harness + BrainFlow build/runtime deps on Arch Linux.
-# Tested package set used on isengard (Arch) for the 2.2.53 / e821617 build.
+# Tested package set on Arch Linux.
 # Other distros: map equivalents yourself; only Arch was verified.
 #
 # Usage (on the Linux host):

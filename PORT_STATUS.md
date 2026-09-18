@@ -5,7 +5,7 @@
 
 **Launch notes (macOS 26)**: eframe 0.28 crashed in `NSScreen` enumeration (`q` vs `Q`). The GUI now uses **eframe/egui 0.32 + egui_plot 0.33** (winit 0.30.12+). `build.rs` embeds an rpath to BrainFlow's `lib/` so `target/debug/openbci-gui` loads `libBoardController.dylib`.
 
-This document tracks parity with the canonical Java/Processing implementation (`~/github/OpenBCI_GUI/OpenBCI_GUI/`).
+This document tracks parity with the canonical Java/Processing OpenBCI GUI (https://github.com/OpenBCI/OpenBCI_GUI).
 
 ## Core Experiment Loop (Fully Working)
 
@@ -24,7 +24,7 @@ This document tracks parity with the canonical Java/Processing implementation (`
 | **EventLog + Console**         | ✅ **Phase 7**       | Filterable, searchable, live, Save with rfd, 8 categories, mini-preview in status |
 | **Playback roundtrip**         | ✅ **Phase 7** + item 5 | ODF as before. GROK_PLAN item 5 (2026-08-28): record 10 s Synthetic **BDF** → Playback that file: raw EXG matches the session (max abs err < 2 µV) and the three named marks sit in the Time Series window. |
 | Recording (BDF + ODF)          | ✅ Production        | DataLogger + BDF writer with TAL + ODF comments + sidecar |
-| Impedance (Cyton ADS1299)      | ✅ Live proven       | GROK_PLAN item 1 (2026-08-28): Start Impedance on Cyton `/dev/cu.usbserial-DN00967F`, footer live (not simulated), scan one ch at a time. Headset-off jumped ch1 15k→50k kΩ and ch2 8k→58k kΩ. Contacts were still Poor/dry — do not start Focus. Synthetic/Playback stay labelled simulated. |
+| Impedance (Cyton ADS1299)      | ✅ Live proven       | GROK_PLAN item 1 (2026-08-28): Start Impedance on a Cyton dongle, footer live (not simulated), scan one ch at a time. Headset-off jumped ch1 15k→50k kΩ and ch2 8k→58k kΩ. Contacts were still Poor/dry — do not start Focus. Synthetic/Playback stay labelled simulated. |
 | Filtering (Notch + BP)         | ✅ Production        | Notch: None / 50 / 60 / 50+60 (Java labels); BP 1–50 Hz; live + Playback |
 | EMG                            | ✅ Production        | WEmg — envelope circles + 0–1 bar, Java EmgSettingsValues |
 | EMG Joystick                   | ✅ Production        | WEmgJoystick — ±X/±Y channel map, unit-circle + lerp |

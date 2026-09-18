@@ -19,7 +19,7 @@ parent/
 
 Example: `mind-harness` beside `brainflow` (a symlink into your BrainFlow clone is fine). For native libs, set `BRAINFLOW_LIB` to the folder with `libBoardController`, `libDataHandler`, and `libMLModule` (`.dylib` on macOS, `.so` on Linux), or leave it unset to use `../brainflow/rust_package/brainflow/lib`.
 
-Compatible BrainFlow revision used on WayStation for this tree: `3a8ebea15d90ebcf162bb755afad8d45be621418` (record your own if you rebuild).
+Compatible BrainFlow revision used for this tree: `3a8ebea15d90ebcf162bb755afad8d45be621418` (record your own if you rebuild).
 
 ## Run (macOS)
 
@@ -37,7 +37,7 @@ First compile is slow; later ones are not. Optional Homebrew `lsl.framework` ena
 
 ## Run (Linux)
 
-Arch packages (verified on **isengard**, Arch, for **2.2.53** / `e821617`):
+Arch packages (verified on Arch Linux):
 
 ```bash
 sudo bash scripts/install-mh-linux-deps.sh

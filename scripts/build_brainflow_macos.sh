@@ -4,7 +4,7 @@
 #
 # Mind Harness expects a sibling BrainFlow checkout:
 #   parent/mind-harness  +  parent/brainflow
-# (On WayStation, parent/brainflow may be a symlink to ~/github/brainflow.)
+# parent/brainflow may be a clone or a symlink to one.
 #
 # Run once before `cargo build` in mind-harness. Uses build/ + installed/
 # under the BrainFlow tree (macOS only). For Linux use

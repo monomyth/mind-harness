@@ -1,10 +1,15 @@
 //! Headless Cyton ingest probe. Same BrainFlowBoard ingest thread as the GUI.
-//! Usage: cyton-probe [port] [seconds]
+//! Usage: cyton-probe <port> [seconds]
+//!    or: OPENBCI_LIVE_SERIAL=<port> cyton-probe [seconds]
 fn main() {
     let port = std::env::args()
         .nth(1)
-        .or_else(|| std::env::var("OPENBCI_LIVE_SERIAL").ok())
-        .unwrap_or_else(|| "/dev/cu.usbserial-DN00967F".into());
+        .or_else(|| std::env::var("OPENBCI_LIVE_SERIAL").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| {
+            eprintln!("usage: cyton-probe <port> [seconds]");
+            eprintln!("   or: OPENBCI_LIVE_SERIAL=<port> cyton-probe [seconds]");
+            std::process::exit(2);
+        });
     let secs: u64 = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
